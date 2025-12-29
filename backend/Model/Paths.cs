@@ -12,4 +12,5 @@ public class Paths
     public bool TwoWay { get; set; }
     public double Length { get; set; }
     public string Status { get; set; } = string.Empty;
+    public bool Rest { get; set; }
 }

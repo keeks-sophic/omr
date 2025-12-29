@@ -18,6 +18,7 @@ public static class PathMapper
             TwoWay = entity.TwoWay,
             Length = entity.Length,
             Status = entity.Status,
+            Rest = entity.Rest,
             Points = entity.Location != null
                 ? entity.Location.Coordinates.Select(c => new PathPointDto { X = c.X, Y = c.Y }).ToList()
                 : null
@@ -35,7 +36,8 @@ public static class PathMapper
             EndNodeId = dto.EndNodeId,
             TwoWay = dto.TwoWay,
             Length = dto.Length,
-            Status = dto.Status
+            Status = dto.Status,
+            Rest = dto.Rest
         };
 
         if (dto.Points != null && dto.Points.Count > 0)

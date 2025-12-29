@@ -25,6 +25,7 @@ public class PathConfiguration : IEntityTypeConfiguration<Paths>
         builder.Property(p => p.TwoWay).IsRequired();
         builder.Property(p => p.Length);
         builder.Property(p => p.Status).HasMaxLength(64).IsRequired();
+        builder.Property(p => p.Rest);
 
         builder.HasOne<Nodes>().WithMany().HasForeignKey(p => p.StartNodeId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<Nodes>().WithMany().HasForeignKey(p => p.EndNodeId).OnDelete(DeleteBehavior.Restrict);

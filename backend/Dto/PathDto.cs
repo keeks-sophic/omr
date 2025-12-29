@@ -11,6 +11,7 @@ public class PathDto
     public bool TwoWay { get; set; }
     public double Length { get; set; }
     public string Status { get; set; } = string.Empty;
+    public bool Rest { get; set; }
     public List<PathPointDto>? Points { get; set; }
 }
 
