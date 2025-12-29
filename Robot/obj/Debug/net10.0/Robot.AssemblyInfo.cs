@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Robot")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7b95d3ac1fa97a49f9da104522a01e96767f9afb")]
 [assembly: System.Reflection.AssemblyProductAttribute("Robot")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Robot")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

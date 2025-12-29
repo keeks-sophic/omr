@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\Robot\\Robot.csproj": {}
+    "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robot\\Robot.csproj": {}
   },
   "projects": {
-    "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\Robot\\Robot.csproj": {
+    "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robot\\Robot.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\Robot\\Robot.csproj",
+        "projectUniqueName": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robot\\Robot.csproj",
         "projectName": "Robot",
-        "projectPath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\Robot\\Robot.csproj",
+        "projectPath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robot\\Robot.csproj",
         "packagesPath": "C:\\Users\\SA-SI-GFWP6G3\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\Robot\\obj\\",
+        "outputPath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robot\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

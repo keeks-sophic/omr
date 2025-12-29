@@ -45,3 +45,4 @@ C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\robot\obj\Debug\net10.0\refint\R
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\robot\obj\Debug\net10.0\Robot.pdb
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\robot\obj\Debug\net10.0\Robot.genruntimeconfig.cache
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\robot\obj\Debug\net10.0\ref\Robot.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\robot\obj\Debug\net10.0\Robot.sourcelink.json
