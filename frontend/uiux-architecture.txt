@@ -1,0 +1,96 @@
+UI/UX Design Architecture — Skylink Frontend (Modern & Clean Revision)
+
+1. Design Philosophy: "Tech-Elegant & Focus-Driven"
+- Core: A harmony of functional density and aesthetic minimalism.
+- Vibe: Futuristic but grounded. Think "SpaceX Dashboard" meets "Linear.app".
+- Principles:
+  - Content-First: UI recedes; data stands out.
+  - Fluidity: Smooth transitions and micro-interactions for every state change.
+  - Depth: Use lighting and subtle borders rather than heavy drop shadows.
+
+2. Theming System
+- Mode: Dark mode first (Operational focus). Light mode as secondary.
+- Palette (Tailwind v4 Clean Slate):
+  - Background: Zinc-950 (Deep, neutral dark).
+  - Surface: Zinc-900 with subtle transparency (95% opacity).
+  - Primary: Violet-500 (Modern, vibrant but not aggressive).
+  - Accent: Sky-400 (For data streams/active states).
+  - Status:
+    - Success: Emerald-400 (Glow effect allowed).
+    - Warning: Amber-400.
+    - Error: Rose-500.
+- Gradients: Very subtle radial gradients to highlight active areas (e.g., top-left glow on active cards).
+
+3. Typography
+- Font: 'Inter' (or 'Geist Sans' if available) for UI; 'JetBrains Mono' for telemetry/code.
+- Weights:
+  - Headers: SemiBold (600) with tight tracking (-0.02em).
+  - Body: Regular (400) with relaxed line-height (1.6).
+  - Labels: Medium (500), uppercase, wide tracking (0.05em) for small caps.
+- Hierarchy: rely on color opacity (text-white vs text-zinc-400) over size variance.
+
+4. Layout & Spacing (The "Bento" Approach)
+- Grid: 4px baseline.
+- Structure: "Bento Grid" dashboard layouts—modular, resizable rectangular tiles.
+- Gaps: Consistent 16px (compact) or 24px (relaxed) gaps.
+- Radius:
+  - Outer Windows: `rounded-3xl` (if framing content).
+  - Cards/Panels: `rounded-2xl` (Modern standard).
+  - Buttons/Inputs: `rounded-lg` or `rounded-full` (Pill shapes for actions).
+
+5. Component Language
+- App Shell:
+  - Floating Dock or Sidebar: Detached from edges, glass effect (`backdrop-blur-md`, `bg-zinc-900/80`).
+  - Header: Minimal, transparent with sticky blur.
+- Cards (The "Glass" Surface):
+  - Border: 1px solid `zinc-800`.
+  - Background: `bg-zinc-900/60` (Glassmorphism allowed for depth).
+  - Hover: `border-zinc-700` + subtle scale (1.01).
+- Buttons:
+  - Primary: Gradient background (Violet-600 to Indigo-600), white text, subtle shadow glow.
+  - Secondary: Surface color, border `zinc-700`, hover text-white.
+  - Ghost: Text only, hover `bg-zinc-800/50`.
+- Inputs:
+  - Background: `bg-zinc-950`.
+  - Border: `zinc-800` (focus ring: `ring-2 ring-violet-500/20`).
+  - No default heavy outlines; use glow for focus.
+
+6. Visualization & Telemetry
+- Charts:
+  - Thin lines (1.5px).
+  - Gradient fills (fade to transparent).
+  - Minimal axes (hide grid lines where possible).
+- Maps:
+  - Custom dark theme (desaturated).
+  - Markers: Pulsing dots for active robots.
+  - Controls: Floating glass pills on map corners.
+
+7. Interaction & Motion
+- Speed: Snappy (150ms-200ms).
+- Easing: `cubic-bezier(0.16, 1, 0.3, 1)` (Spring-like, smooth).
+- Feedback:
+  - Click: Active scale down (0.98).
+  - Hover: Lift or brightness increase.
+- Skeleton Loading: Shimmer effects for data fetching; never show blank screens.
+
+8. Accessibility & Clarity
+- Contrast: Ensure 4.5:1 for text.
+- Focus: Visible focus rings (Indigo/Violet glow) for keyboard nav.
+- Reduced Motion: Respect user preferences for animation.
+
+9. Navigation Structure
+- Sidebar (Icon-first, expandable on hover):
+  - [Grid] Dashboard
+  - [Cpu] Robot Status
+  - [Map] Map View
+  - [Play] Simulation
+  - [Joystick] Manual Control
+  - [List] Mission Plan
+- Breadcrumbs: Minimal, slash-separated.
+
+10. Future-Proofing
+- Tech: React Server Components (RSC) where possible.
+- State: URL-driven state for shareable views.
+- Icons: Lucide React (Clean, consistent stroke width 1.5px).
+
+This architecture pushes for a "Modern SaaS" feel—clean lines, depth through blur/borders, and high-quality typography—while maintaining the utility needed for robotics control.
