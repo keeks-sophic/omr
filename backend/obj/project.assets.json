@@ -844,6 +844,19 @@
           "buildTransitive/Mono.TextTemplating.targets": {}
         }
       },
+      "NATS.Client/1.1.8": {
+        "type": "package",
+        "compile": {
+          "lib/netstandard2.0/NATS.Client.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/netstandard2.0/NATS.Client.dll": {
+            "related": ".xml"
+          }
+        }
+      },
       "NetTopologySuite/2.6.0": {
         "type": "package",
         "compile": {
@@ -2593,6 +2606,20 @@
         "readme.md"
       ]
     },
+    "NATS.Client/1.1.8": {
+      "sha512": "ISyMFTeESWsGQR10HEg5YtgrroDMg8XGsEWRMoWBrGWGRRHq+uSU3RzSU62tFW6ULEyjXQqPrnk6giyBKE98Aw==",
+      "type": "package",
+      "path": "nats.client/1.1.8",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "lib/netstandard2.0/NATS.Client.dll",
+        "lib/netstandard2.0/NATS.Client.xml",
+        "nats.client.1.1.8.nupkg.sha512",
+        "nats.client.nuspec",
+        "package-icon.png"
+      ]
+    },
     "NetTopologySuite/2.6.0": {
       "sha512": "1B1OTacTd4QtFyBeuIOcThwSSLUdRZU3bSFIwM8vk36XiZlBMi3K36u74e4OqwwHRHUuJC1PhbDx4hyI266X1Q==",
       "type": "package",
@@ -3144,6 +3171,7 @@
     "net10.0": [
       "Microsoft.AspNetCore.OpenApi >= 10.0.0",
       "Microsoft.EntityFrameworkCore.Design >= 10.0.0",
+      "NATS.Client >= 1.1.8",
       "NetTopologySuite >= 2.6.0",
       "Npgsql.EntityFrameworkCore.PostgreSQL >= 10.0.0",
       "Npgsql.EntityFrameworkCore.PostgreSQL.NetTopologySuite >= 10.0.0"
@@ -3208,6 +3236,10 @@
             "suppressParent": "All",
             "target": "Package",
             "version": "[10.0.0, )"
+          },
+          "NATS.Client": {
+            "target": "Package",
+            "version": "[1.1.8, )"
           },
           "NetTopologySuite": {
             "target": "Package",

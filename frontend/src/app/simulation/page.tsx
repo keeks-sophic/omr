@@ -47,7 +47,7 @@ export default function SimulationPage() {
   const handleGenerateRoute = async () => {
     if (!selectedRobot || !destination) return;
     
-    const start = { x: selectedRobot.x, y: selectedRobot.y };
+    const start = { x: selectedRobot.x ?? 0, y: selectedRobot.y ?? 0 };
     const generatedRoute = await calculateRoute(start, destination);
     setRoute(generatedRoute);
     setSimProgress(0);
@@ -114,7 +114,7 @@ export default function SimulationPage() {
   // Calculate robot position based on progress
   const getRobotPosition = (): Point => {
       if (!selectedRobot) return { x: 0, y: 0 };
-      if (!route || simProgress === 0) return { x: selectedRobot.x, y: selectedRobot.y };
+      if (!route || simProgress === 0) return { x: selectedRobot.x ?? 0, y: selectedRobot.y ?? 0 };
       
       // Simple interpolation between start and end of the ENTIRE route for now
       // A better implementation would interpolate between specific segments

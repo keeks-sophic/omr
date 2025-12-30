@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
-import { LayoutDashboard, Bot, Map as MapIcon, Play, Gamepad2, ListTodo } from "lucide-react";
+import { LayoutDashboard, Bot, Map as MapIcon, Play, Gamepad2, ListTodo, Layers } from "lucide-react";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,6 +28,7 @@ export default function RootLayout({
     { name: "Dashboard", href: "/", icon: LayoutDashboard },
     { name: "Robot", href: "/robot", icon: Bot },
     { name: "Map", href: "/map", icon: MapIcon },
+    { name: "Visualise", href: "/visualise", icon: Layers },
     { name: "Simulation", href: "/simulation", icon: Play },
     { name: "Control", href: "/control", icon: Gamepad2 },
     { name: "Mission", href: "/mission", icon: ListTodo },

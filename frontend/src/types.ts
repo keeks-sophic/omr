@@ -1,14 +1,14 @@
 export interface Robot {
   name: string;
   ip: string;
-  x: number;
-  y: number;
+  x?: number;
+  y?: number;
   state: string;
   battery: number;
   connected: boolean;
   lastActive?: string;
   isMock?: boolean;
-  mapId?: number;
+  mapId?: number | null;
 }
 
 export interface RobotCommand {

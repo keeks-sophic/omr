@@ -1,5 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Builder;
+using Backend.Options;
+using Backend.Services;
+using Backend.Hubs;
+using Backend.Database;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,6 +14,7 @@ builder.Services.AddDbContext<Backend.Infrastructure.Persistence.AppDbContext>(o
     opt.UseNpgsql(builder.Configuration.GetConnectionString("Database"),
         npgsql => npgsql.UseNetTopologySuite()));
 builder.Services.AddControllers();
+builder.Services.AddSignalR();
 builder.Services.AddCors(opt =>
 {
     opt.AddDefaultPolicy(policy =>
@@ -20,6 +25,11 @@ builder.Services.AddCors(opt =>
               .AllowCredentials();
     });
 });
+builder.Services.Configure<NatsOptions>(builder.Configuration.GetSection("Nats"));
+builder.Services.AddSingleton<NatsService>();
+builder.Services.AddHostedService<RobotTelemetrySubscriber>();
+builder.Services.AddScoped<MapRepository>();
+builder.Services.AddScoped<RobotRepository>();
 
 var app = builder.Build();
 
@@ -32,6 +42,7 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.MapControllers();
 app.UseCors();
+app.MapHub<RobotsHub>("/hub/robots");
 
 var summaries = new[]
 {

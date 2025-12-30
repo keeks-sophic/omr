@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { HubConnectionBuilder, HubConnection, HubConnectionState } from "@microsoft/signalr";
 import { Robot, RobotCommand } from "../types";
 
-const HUB_URL = "http://localhost:5146/hub/robots";
+const HUB_URL = "http://localhost:5067/hub/robots";
 
 export function useRobotFleet() {
   const [robots, setRobots] = useState<Robot[]>([]);
@@ -15,7 +15,7 @@ export function useRobotFleet() {
     // 1. Initial Fetch to populate list
     const fetchInitialData = async () => {
       try {
-        const res = await fetch("http://localhost:5146/robots");
+        const res = await fetch("http://localhost:5067/robots");
         if (!res.ok) throw new Error("Failed to fetch initial robot data");
         const data = await res.json();
         setRobots(data);
@@ -121,5 +121,25 @@ export function useRobotFleet() {
     [connection]
   );
 
-  return { robots, loading, error, isConnected, sendCommand };
+  const joinMap = useCallback(async (mapId: number) => {
+    if (connection && connection.state === HubConnectionState.Connected) {
+      try {
+        await connection.invoke("JoinMap", mapId);
+      } catch (err) {
+        console.error("JoinMap failed:", err);
+      }
+    }
+  }, [connection]);
+
+  const leaveMap = useCallback(async (mapId: number) => {
+    if (connection && connection.state === HubConnectionState.Connected) {
+      try {
+        await connection.invoke("LeaveMap", mapId);
+      } catch (err) {
+        console.error("LeaveMap failed:", err);
+      }
+    }
+  }, [connection]);
+
+  return { robots, loading, error, isConnected, sendCommand, joinMap, leaveMap };
 }

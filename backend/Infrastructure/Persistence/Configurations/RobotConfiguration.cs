@@ -22,8 +22,8 @@ public class RobotConfiguration : IEntityTypeConfiguration<Robot>
             .HasMaxLength(128)
             .IsRequired();
 
-        builder.Property(r => r.X);
-        builder.Property(r => r.Y);
+        builder.Property(r => r.X).IsRequired(false);
+        builder.Property(r => r.Y).IsRequired(false);
 
         builder.Property(r => r.Location)
             .HasColumnType("geometry (Point, 0)");
@@ -37,7 +37,7 @@ public class RobotConfiguration : IEntityTypeConfiguration<Robot>
         builder.Property(r => r.LastActive);
 
         builder.Property(r => r.MapId)
-            .IsRequired();
+            .IsRequired(false);
 
         builder.HasIndex(r => r.MapId);
     }

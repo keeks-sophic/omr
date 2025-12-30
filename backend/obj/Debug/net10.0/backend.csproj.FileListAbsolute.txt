@@ -183,3 +183,4 @@ C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backend\bin\Debug\net10.0\tr\Mic
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backend\bin\Debug\net10.0\zh-Hans\Microsoft.CodeAnalysis.Workspaces.MSBuild.resources.dll
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backend\bin\Debug\net10.0\zh-Hant\Microsoft.CodeAnalysis.Workspaces.MSBuild.resources.dll
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backend\bin\Debug\net10.0\runtimes\win\lib\net9.0\System.Windows.Extensions.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backend\bin\Debug\net10.0\NATS.Client.dll

@@ -12,7 +12,10 @@ import {
   Navigation,
   Layers,
   Trash2,
-  FolderOpen
+  FolderOpen,
+  Coffee,
+  Zap,
+  ArrowDownToLine
 } from "lucide-react";
 import { useRobotFleet } from "../../hooks/useRobotFleet";
 
@@ -44,15 +47,24 @@ interface MapPath {
   id: string;
   sourceId: string;
   targetId: string;
+  status?: "active" | "maintenance";
+  rest?: boolean;
+  direction?: "bidirectional" | "one-way";
 }
 
+interface MapPoint {
+  id: string;
+  pathId: string;
+  distance: number; // meters from source
+  type: "charging" | "drop" | "rest";
+}
 // --- Constants ---
 
 const PIXELS_PER_METER = 20; // 20px = 1m
 const GRID_SIZE = 50; // Visual grid size in pixels
 const DOT_SIZE = 1;
 const ROBOT_SIZE_PX = 24;
-const API_BASE = "http://localhost:5146";
+const API_BASE = "http://localhost:5067";
 
 export default function VisualisePage() {
   // --- State ---
@@ -72,10 +84,13 @@ export default function VisualisePage() {
   const [maps, setMaps] = useState<{ id: number; name: string }[]>([]);
   const [mapNodes, setMapNodes] = useState<MapNode[]>([]);
   const [mapPaths, setMapPaths] = useState<MapPath[]>([]);
+  const [mapPoints, setMapPoints] = useState<MapPoint[]>([]);
   const [currentMapId, setCurrentMapId] = useState<number | null>(null);
   const [selectedUnassignedIp, setSelectedUnassignedIp] = useState<string | null>(null);
+  const [unassigned, setUnassigned] = useState<{ name: string; ip: string }[]>([]);
+  const prevMapIdRef = useRef<number | null>(null);
 
-  const { robots: fleetRobots } = useRobotFleet();
+  const { robots: fleetRobots, joinMap, leaveMap } = useRobotFleet();
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -106,6 +121,22 @@ export default function VisualisePage() {
     return colorMap[key];
   };
 
+  const getPointPosition = (pathId: string, distanceMeters: number) => {
+      const path = mapPaths.find(p => p.id === pathId);
+      if (!path) return null;
+      const source = mapNodes.find(n => n.id === path.sourceId);
+      const target = mapNodes.find(n => n.id === path.targetId);
+      if (!source || !target) return null;
+
+      const pathLen = Math.sqrt(Math.pow(target.x - source.x, 2) + Math.pow(target.y - source.y, 2));
+      const ratio = distanceMeters / pathLen;
+      
+      return {
+          x: source.x + (target.x - source.x) * ratio,
+          y: source.y + (target.y - source.y) * ratio
+      };
+  };
+
   // --- Math Helpers for Snapping ---
 
   const getDistance = (p1: Position, p2: Position) => {
@@ -130,6 +161,20 @@ export default function VisualisePage() {
   const getClosestPointOnMap = (p: Position): Position | null => {
     let closestPoint: Position | null = null;
     let minDist = Infinity;
+    const SNAP_RADIUS_METERS = 1.0; 
+
+    // 1. Check Points (POIs)
+    for (const pt of mapPoints) {
+        const pos = getPointPosition(pt.pathId, pt.distance);
+        if (pos) {
+            const dist = getDistance(p, pos);
+            if (dist < SNAP_RADIUS_METERS && dist < minDist) {
+                minDist = dist;
+                closestPoint = pos;
+            }
+        }
+    }
+    if (closestPoint) return closestPoint;
 
     // Iterate all paths
     for (const path of mapPaths) {
@@ -165,6 +210,15 @@ export default function VisualisePage() {
       } catch {}
     };
     loadMaps();
+    const loadUnassigned = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/robots/unassigned`, { credentials: "include" });
+        if (!res.ok) return;
+        const data = await res.json();
+        setUnassigned(data.map((r: any) => ({ name: r.name, ip: r.ip })));
+      } catch {}
+    };
+    loadUnassigned();
   }, []);
 
   useEffect(() => {
@@ -178,18 +232,41 @@ export default function VisualisePage() {
         const nodes: MapNode[] = (graph.nodes as any[]).map((n: any, i: number) => ({
           id: String(n.id ?? i + 1),
           x: n.x,
-          y: n.y
+          y: -n.y
         }));
         const paths: MapPath[] = (graph.paths as any[]).map((p: any, i: number) => ({
           id: String(p.id ?? i + 1),
           sourceId: String(p.startNodeId),
-          targetId: String(p.endNodeId)
+          targetId: String(p.endNodeId),
+          status: (p.status as "active" | "maintenance") ?? "active",
+          rest: Boolean(p.rest ?? p.Rest ?? false),
+          direction: p.twoWay ? "bidirectional" : "one-way"
+        }));
+        const points: MapPoint[] = (graph.points as any[]).map((pt: any, i: number) => ({
+          id: String(pt.id ?? i + 1),
+          pathId: String(pt.pathId ?? 0),
+          distance: pt.offset,
+          type: (pt.type as MapPoint["type"]) ?? "rest"
         }));
         setMapNodes(nodes);
         setMapPaths(paths);
+        setMapPoints(points);
+        const origin = nodes[0];
+        if (origin) {
+          setView(v => ({ ...v, x: 200 - origin.x * PIXELS_PER_METER, y: 200 - origin.y * PIXELS_PER_METER }));
+        } else {
+          setView(v => ({ ...v, x: 200, y: 200 }));
+        }
       } catch {}
     };
     loadGraph();
+    if (prevMapIdRef.current && prevMapIdRef.current !== idNum) {
+      leaveMap(prevMapIdRef.current);
+    }
+    if (idNum) {
+      joinMap(idNum);
+      prevMapIdRef.current = idNum;
+    }
   }, [currentMapId]);
 
   const displayRobots = useMemo(() => {
@@ -221,8 +298,13 @@ export default function VisualisePage() {
   // --- Handlers ---
 
   const handleAddRobot = () => {
+    if (currentMapId === null) {
+        alert("Please select a map first");
+        return;
+    }
     // Start at Node 1 or first available path start
     const startNode = mapNodes[0];
+    console.log("Adding robot at:", startNode, "Map ID:", currentMapId);
     
     const newRobot: RobotEntity = {
       id: generateId(),
@@ -233,7 +315,7 @@ export default function VisualisePage() {
       status: "idle",
       mapId: currentMapId
     };
-    setMockRobots([...mockRobots, newRobot]);
+    setMockRobots(prev => [...prev, newRobot]);
     setSelectedRobotId(newRobot.id);
   };
 
@@ -279,11 +361,9 @@ export default function VisualisePage() {
       if (snappedPos && currentMapId) {
         const robot = displayRobots.find(r => r.id === navigateRobotId);
         if (robot?.ip) {
-          fetch(`${API_BASE}/robots/${robot.ip}/navigate`, {
+          fetch(`${API_BASE}/robots/${robot.ip}/move`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-            body: JSON.stringify({ x: snappedPos.x, y: snappedPos.y, mapId: currentMapId })
+            credentials: "include"
           }).catch(() => {});
         }
       }
@@ -361,11 +441,12 @@ export default function VisualisePage() {
         if (robot && ov && robot.ip) {
           const x = ov.x;
           const y = ov.y;
+          console.log(`[Mock Backend] Robot ${robot.ip} relocate to:`, { x, y, mapId: currentMapId });
           fetch(`${API_BASE}/robots/${robot.ip}/relocate`, {
-            method: "POST",
+            method: "PUT",
             headers: { "Content-Type": "application/json" },
             credentials: "include",
-            body: JSON.stringify({ x, y, mapId: currentMapId })
+            body: JSON.stringify({ x, y })
           }).catch(() => {});
           setPendingRelocates(prev => ({ ...prev, [draggingRobotId]: { x, y } }));
         }
@@ -441,7 +522,7 @@ export default function VisualisePage() {
               className="bg-zinc-900/50 border border-zinc-800 text-xs text-zinc-200 rounded-lg px-2 py-1"
             >
               <option value="" className="bg-zinc-900">Select robot</option>
-              {fleetRobots.filter(r => !r.mapId).map(r => (
+              {unassigned.map(r => (
                 <option key={r.ip} value={r.ip} className="bg-zinc-900">
                   {(r.name || r.ip) + ` (${r.ip})`}
                 </option>
@@ -451,7 +532,17 @@ export default function VisualisePage() {
               onClick={async () => {
                 if (!selectedUnassignedIp || !currentMapId) return;
                 try {
-                  await fetch(`${API_BASE}/robots/${selectedUnassignedIp}/assign-map/${currentMapId}`, { method: "POST", credentials: "include" });
+                  await fetch(`${API_BASE}/robots/${selectedUnassignedIp}/assign`, { 
+                    method: "POST", 
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ mapId: currentMapId })
+                  });
+                  const res = await fetch(`${API_BASE}/robots/unassigned`, { credentials: "include" });
+                  if (res.ok) {
+                    const data = await res.json();
+                    setUnassigned(data.map((r: any) => ({ name: r.name, ip: r.ip })));
+                  }
                 } catch {}
               }}
               disabled={!selectedUnassignedIp || !currentMapId}
@@ -519,6 +610,8 @@ export default function VisualisePage() {
                 const source = mapNodes.find((n) => n.id === path.sourceId);
                 const target = mapNodes.find((n) => n.id === path.targetId);
                 if (!source || !target) return null;
+                const isMaint = path.status === "maintenance";
+                const isRest = !!path.rest;
 
                 return (
                   <line
@@ -540,6 +633,9 @@ export default function VisualisePage() {
                 const source = mapNodes.find((n) => n.id === path.sourceId);
                 const target = mapNodes.find((n) => n.id === path.targetId);
                 if (!source || !target) return null;
+                const isMaint = path.status === "maintenance";
+                const isRest = !!path.rest;
+                const isOneWay = path.direction === "one-way";
 
                 return (
                   <line
@@ -548,9 +644,10 @@ export default function VisualisePage() {
                     y1={source.y * PIXELS_PER_METER}
                     x2={target.x * PIXELS_PER_METER}
                     y2={target.y * PIXELS_PER_METER}
-                    stroke="#52525b"
+                    stroke={isMaint ? "#fbbf24" : isRest ? "#22c55e" : "#52525b"}
                     strokeWidth="2"
-                    markerEnd="url(#arrow)"
+                    strokeDasharray={isMaint ? "2,6" : "none"}
+                    markerEnd={isOneWay ? "url(#arrow)" : undefined}
                   />
                 );
               })}
@@ -567,6 +664,32 @@ export default function VisualisePage() {
                 }}
               />
             ))}
+
+            {/* Points */}
+            {mapPoints.map(point => {
+                const pos = getPointPosition(point.pathId, point.distance);
+                if (!pos) return null;
+
+                let color = "bg-sky-400"; // Rest
+                let icon = <Coffee size={10} />;
+                if (point.type === 'charging') {
+                    color = "bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.5)]";
+                    icon = <Zap size={10} />;
+                } else if (point.type === 'drop') {
+                    color = "bg-rose-500";
+                    icon = <ArrowDownToLine size={10} />;
+                }
+
+                return (
+                    <div
+                        key={point.id}
+                        className={`absolute w-5 h-5 -ml-2.5 -mt-2.5 rounded-full flex items-center justify-center text-zinc-950 z-20 ${color}`}
+                        style={{ left: pos.x * PIXELS_PER_METER, top: pos.y * PIXELS_PER_METER }}
+                    >
+                        {icon}
+                    </div>
+                );
+            })}
 
             {/* Robots */}
             {displayRobots.map((robot) => {

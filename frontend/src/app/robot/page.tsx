@@ -7,8 +7,8 @@ import { Bot, Battery, Wifi, WifiOff, MapPin } from "lucide-react";
 interface Robot {
   name: string;
   ip: string;
-  x: number;
-  y: number;
+  x?: number;
+  y?: number;
   state: string;
   battery: number;
   connected: boolean;
@@ -25,7 +25,7 @@ export default function RobotPage() {
     // 1. Initial Fetch to populate list
     const fetchInitialData = async () => {
       try {
-        const res = await fetch("http://localhost:5146/robots");
+        const res = await fetch("http://localhost:5067/robots");
         if (!res.ok) throw new Error("Failed to fetch initial robot data");
         const data = await res.json();
         setRobots(data);
@@ -41,7 +41,7 @@ export default function RobotPage() {
 
     // 2. Setup SignalR
     const newConnection = new HubConnectionBuilder()
-      .withUrl("http://localhost:5146/hub/robots")
+      .withUrl("http://localhost:5067/hub/robots")
       .withAutomaticReconnect()
       .build();
 
@@ -180,10 +180,10 @@ export default function RobotPage() {
                   </div>
                   <div className="text-xs font-mono text-white space-y-1">
                      <div className="flex justify-between">
-                       <span className="text-zinc-500">X:</span> {robot.x.toFixed(2)}
+                       <span className="text-zinc-500">X:</span> {(robot.x ?? 0).toFixed(2)}
                      </div>
                      <div className="flex justify-between">
-                       <span className="text-zinc-500">Y:</span> {robot.y.toFixed(2)}
+                       <span className="text-zinc-500">Y:</span> {(robot.y ?? 0).toFixed(2)}
                      </div>
                   </div>
                </div>

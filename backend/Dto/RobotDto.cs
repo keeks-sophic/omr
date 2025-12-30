@@ -13,5 +13,5 @@ public class RobotDto
     public double Battery { get; set; }
     public bool Connected { get; set; }
     public DateTime LastActive { get; set; }
-    public int MapId { get; set; }
+    public int? MapId { get; set; }
 }

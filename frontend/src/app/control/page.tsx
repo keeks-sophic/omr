@@ -69,7 +69,7 @@ export default function ControlPage() {
     let mounted = true;
     (async () => {
       try {
-        const res = await fetch("http://localhost:5146/robots", { credentials: "include" });
+        const res = await fetch("http://localhost:5067/robots", { credentials: "include" });
         const data: Robot[] = await res.json();
         if (!mounted) return;
         setRobots(data);
@@ -81,7 +81,7 @@ export default function ControlPage() {
 
   useEffect(() => {
     const conn = new signalR.HubConnectionBuilder()
-      .withUrl("http://localhost:5146/hub/robots", { withCredentials: true })
+      .withUrl("http://localhost:5067/hub/robots", { withCredentials: true })
       .withAutomaticReconnect()
       .build();
     conn.on("telemetry", (dto: Robot) => {
@@ -293,7 +293,7 @@ export default function ControlPage() {
                       <span className="text-xs text-zinc-500 block mb-1">Location</span>
                       <div className="flex items-baseline gap-1">
                          <span className="text-sm font-mono text-white">
-                           {selectedRobot ? `X:${selectedRobot.x.toFixed(1)} Y:${selectedRobot.y.toFixed(1)}` : "N/A"}
+                           {selectedRobot ? `X:${(selectedRobot.x ?? 0).toFixed(1)} Y:${(selectedRobot.y ?? 0).toFixed(1)}` : "N/A"}
                          </span>
                       </div>
                   </div>
