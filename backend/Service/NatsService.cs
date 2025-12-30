@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 using NATS.Client;
 using NATS.Client.JetStream;
 
-namespace Backend.Services;
+namespace Backend.Service;
 
 public class NatsService
 {
@@ -37,7 +37,33 @@ public class NatsService
     public Task EnsureStreamAsync(string streamName, params string[] subjects)
     {
         if (_jm == null || string.IsNullOrWhiteSpace(streamName)) return Task.CompletedTask;
-        try { _jm.GetStreamInfo(streamName); }
+        try
+        {
+            var info = _jm.GetStreamInfo(streamName);
+            var existing = (info?.Config?.Subjects ?? new List<string>()).ToArray();
+            var required = subjects ?? Array.Empty<string>();
+            var needUpdate = required.Any(s => !existing.Contains(s));
+            if (needUpdate)
+            {
+                try
+                {
+                    var builder = StreamConfiguration.Builder().WithName(streamName);
+                    foreach (var s in required) builder = builder.WithSubjects(s);
+                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    _jm.UpdateStream(cfg);
+                    _logger.LogInformation("JetStream stream updated: {Stream} → {Subjects}", streamName, string.Join(",", required));
+                }
+                catch
+                {
+                    _jm.DeleteStream(streamName);
+                    var builder = StreamConfiguration.Builder().WithName(streamName);
+                    foreach (var s in required) builder = builder.WithSubjects(s);
+                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    _jm.AddStream(cfg);
+                    _logger.LogInformation("JetStream stream recreated: {Stream} → {Subjects}", streamName, string.Join(",", required));
+                }
+            }
+        }
         catch
         {
             var builder = StreamConfiguration.Builder().WithName(streamName);
@@ -57,12 +83,25 @@ public class NatsService
         if (_js != null)
         {
             try { _js.Publish(subject, data); }
-            catch (Exception ex) { _logger.LogError(ex, "JetStream publish failed {Subject}", subject); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "JetStream publish failed {Subject}", subject);
+                try { _conn?.Publish(subject, data); } catch { }
+            }
         }
         else
         {
             _conn.Publish(subject, data);
         }
+        return Task.CompletedTask;
+    }
+
+    public Task PublishCoreAsync(string subject, object payload, CancellationToken token)
+    {
+        if (_conn == null) return Task.CompletedTask;
+        var json = JsonSerializer.Serialize(payload);
+        var data = Encoding.UTF8.GetBytes(json);
+        _conn.Publish(subject, data);
         return Task.CompletedTask;
     }
 

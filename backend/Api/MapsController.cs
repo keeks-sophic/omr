@@ -1,6 +1,6 @@
 using Backend.Dto;
 using Backend.Endpoints;
-using Backend.Database;
+using Backend.Data;
 using Backend.Mapping;
 using Backend.Model;
 using Microsoft.AspNetCore.Mvc;

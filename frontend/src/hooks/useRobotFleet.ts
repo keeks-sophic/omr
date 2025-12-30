@@ -10,6 +10,7 @@ export function useRobotFleet() {
   const [connection, setConnection] = useState<HubConnection | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [routes, setRoutes] = useState<Record<string, { mapId: number; nodes: { id: number; x: number; y: number }[] }>>({});
 
   useEffect(() => {
     // 1. Initial Fetch to populate list
@@ -49,7 +50,7 @@ export function useRobotFleet() {
           // Handle 'identity' updates (New robot or IP change)
           connection.on("identity", (data: { name: string, ip: string }) => {
             setRobots(prev => {
-              const idx = prev.findIndex(r => r.name === data.name);
+              const idx = prev.findIndex(r => r.ip === data.ip);
               if (idx === -1) {
                 // New robot
                 return [...prev, { 
@@ -65,7 +66,7 @@ export function useRobotFleet() {
               }
               // Update IP
               const updated = [...prev];
-              updated[idx] = { ...updated[idx], ip: data.ip };
+              updated[idx] = { ...updated[idx], name: data.name, ip: data.ip };
               return updated;
             });
           });
@@ -73,7 +74,7 @@ export function useRobotFleet() {
           // Handle 'telemetry' updates (Real-time movement/stats)
           connection.on("telemetry", (data: Robot) => {
              setRobots(prev => {
-                const idx = prev.findIndex(r => r.name === data.name);
+                const idx = prev.findIndex(r => r.ip === data.ip);
                 if (idx === -1) {
                    // If we get telemetry for a robot we don't know yet, add it
                    return [...prev, data];
@@ -82,6 +83,29 @@ export function useRobotFleet() {
                 updated[idx] = { ...updated[idx], ...data };
                 return updated;
              });
+             setRoutes(prev => {
+               if (!data.ip || !prev[data.ip]) return prev;
+               const route = prev[data.ip];
+               const last = route.nodes[route.nodes.length - 1];
+               if (!last) return prev;
+               const rx = typeof data.x === "number" ? data.x : 0;
+               const ry = typeof data.y === "number" ? data.y : 0;
+               const dx = rx - last.x;
+               const dy = ry - last.y;
+               const d = Math.sqrt(dx * dx + dy * dy);
+               if (d <= 0.2) {
+                 const { [data.ip]: _, ...rest } = prev;
+                 return rest;
+               }
+               return prev;
+             });
+          });
+
+          // Handle route overlay
+          connection.on("route", (data: { ip: string; mapId: number; nodes: { id: number; x: number; y: number }[] }) => {
+            if (data?.ip && Array.isArray(data.nodes)) {
+              setRoutes(prev => ({ ...prev, [data.ip]: { mapId: data.mapId, nodes: data.nodes } }));
+            }
           });
 
         })
@@ -141,5 +165,5 @@ export function useRobotFleet() {
     }
   }, [connection]);
 
-  return { robots, loading, error, isConnected, sendCommand, joinMap, leaveMap };
+  return { robots, loading, error, isConnected, sendCommand, joinMap, leaveMap, routes };
 }

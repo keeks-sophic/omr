@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.SignalR;
 
-namespace Backend.Hubs;
+namespace Backend.SignalR;
 
 public class RobotsHub : Hub
 {

@@ -38,8 +38,10 @@ public class RobotWorker : BackgroundService
         _logger.LogInformation("Robot starting. Name: {Name}", name);
 
         await _nats.ConnectAsync(_options.Value.NatsUrl, stoppingToken);
-        await _nats.EnsureStreamAsync(_options.Value.TelemetryStream!, _options.Value.TelemetrySubject);
-        await _nats.EnsureStreamAsync(_options.Value.CommandStream!, _options.Value.CommandSubject);
+        await _nats.EnsureStreamAsync("ROBOTS_TELEMETRY", $"{Robot.Topics.NatsSubjects.TelemetryPrefix}.>");
+        await _nats.EnsureStreamAsync("ROBOTS_COMMAND", $"{Robot.Topics.NatsSubjects.CommandPrefix}.>");
+        await _nats.EnsureStreamAsync("ROBOTS_ROUTE", $"{Robot.Topics.NatsSubjects.RoutePlanPrefix}.>", $"{Robot.Topics.NatsSubjects.RouteSegmentPrefix}.>");
+        await _nats.EnsureStreamAsync("ROBOTS_CONTROL", $"{Robot.Topics.NatsSubjects.ControlPrefix}.>", $"{Robot.Topics.NatsSubjects.SyncPrefix}.>");
 
         await _identity.RegisterAsync(
             name,
@@ -51,13 +53,21 @@ public class RobotWorker : BackgroundService
             ipOverride: _options.Value.Ip);
 
         _telemetry.Initialize(name, ip!);
-        await _commands.StartAsync(name, ip!, _options.Value.CommandSubject, stoppingToken);
+        var cmdSubjects = new[]
+        {
+            $"{Robot.Topics.NatsSubjects.CommandPrefix}.{ip}.>",
+            $"{Robot.Topics.NatsSubjects.RoutePlanPrefix}.{ip}",
+            $"{Robot.Topics.NatsSubjects.ControlPrefix}.{ip}",
+            $"{Robot.Topics.NatsSubjects.SyncPrefix}.{ip}"
+        };
+        await _commands.StartAsync(name, ip!, cmdSubjects, stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             _telemetry.TickIdle();
             _telemetry.TickBattery();
             _telemetry.TickRoute();
+            // publish next segment opportunistically when moving allowed and route present
             await _telemetry.PublishStatusAsync();
             await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
         }

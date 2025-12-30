@@ -34,6 +34,7 @@ interface RobotEntity {
   y: number; // Meters
   color: string;
   status: "idle" | "moving" | "error";
+  state?: string;
   mapId?: number | null;
 }
 
@@ -50,6 +51,7 @@ interface MapPath {
   status?: "active" | "maintenance";
   rest?: boolean;
   direction?: "bidirectional" | "one-way";
+  points?: Position[]; // Intermediate points (including start/end or just intermediate? Usually backend sends full geometry or intermediate)
 }
 
 interface MapPoint {
@@ -80,6 +82,7 @@ export default function VisualisePage() {
   const [fleetOverrides, setFleetOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [pendingRelocates, setPendingRelocates] = useState<Record<string, { x: number; y: number }>>({});
   const [navigateRobotId, setNavigateRobotId] = useState<string | null>(null);
+  const [hoveredMapPos, setHoveredMapPos] = useState<Position | null>(null);
 
   const [maps, setMaps] = useState<{ id: number; name: string }[]>([]);
   const [mapNodes, setMapNodes] = useState<MapNode[]>([]);
@@ -90,7 +93,7 @@ export default function VisualisePage() {
   const [unassigned, setUnassigned] = useState<{ name: string; ip: string }[]>([]);
   const prevMapIdRef = useRef<number | null>(null);
 
-  const { robots: fleetRobots, joinMap, leaveMap } = useRobotFleet();
+  const { robots: fleetRobots, joinMap, leaveMap, routes } = useRobotFleet();
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -124,6 +127,26 @@ export default function VisualisePage() {
   const getPointPosition = (pathId: string, distanceMeters: number) => {
       const path = mapPaths.find(p => p.id === pathId);
       if (!path) return null;
+
+      if (path.points && path.points.length > 1) {
+          let remaining = distanceMeters;
+          for (let i = 0; i < path.points.length - 1; i++) {
+              const p1 = path.points[i];
+              const p2 = path.points[i + 1];
+              const dist = Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+              
+              if (remaining <= dist) {
+                  const ratio = remaining / dist;
+                  return {
+                      x: p1.x + (p2.x - p1.x) * ratio,
+                      y: p1.y + (p2.y - p1.y) * ratio
+                  };
+              }
+              remaining -= dist;
+          }
+          return path.points[path.points.length - 1];
+      }
+
       const source = mapNodes.find(n => n.id === path.sourceId);
       const target = mapNodes.find(n => n.id === path.targetId);
       if (!source || !target) return null;
@@ -161,7 +184,7 @@ export default function VisualisePage() {
   const getClosestPointOnMap = (p: Position): Position | null => {
     let closestPoint: Position | null = null;
     let minDist = Infinity;
-    const SNAP_RADIUS_METERS = 1.0; 
+    const SNAP_RADIUS_METERS = navigateRobotId ? 2.0 : 1.0;
 
     // 1. Check Points (POIs)
     for (const pt of mapPoints) {
@@ -178,18 +201,31 @@ export default function VisualisePage() {
 
     // Iterate all paths
     for (const path of mapPaths) {
-      const source = mapNodes.find(n => n.id === path.sourceId);
-      const target = mapNodes.find(n => n.id === path.targetId);
-      
-      if (source && target) {
-        // Source and Target are in Meters
-        const proj = getClosestPointOnSegment(p, source, target);
-        const dist = getDistance(p, proj);
-        
-        if (dist < minDist) {
-          minDist = dist;
-          closestPoint = proj;
-        }
+      if (path.points && path.points.length > 1) {
+          for (let i = 0; i < path.points.length - 1; i++) {
+              const p1 = path.points[i];
+              const p2 = path.points[i + 1];
+              const proj = getClosestPointOnSegment(p, p1, p2);
+              const dist = getDistance(p, proj);
+              if (dist < minDist) {
+                  minDist = dist;
+                  closestPoint = proj;
+              }
+          }
+      } else {
+          const source = mapNodes.find(n => n.id === path.sourceId);
+          const target = mapNodes.find(n => n.id === path.targetId);
+          
+          if (source && target) {
+            // Source and Target are in Meters
+            const proj = getClosestPointOnSegment(p, source, target);
+            const dist = getDistance(p, proj);
+            
+            if (dist < minDist) {
+              minDist = dist;
+              closestPoint = proj;
+            }
+          }
       }
     }
 
@@ -240,7 +276,8 @@ export default function VisualisePage() {
           targetId: String(p.endNodeId),
           status: (p.status as "active" | "maintenance") ?? "active",
           rest: Boolean(p.rest ?? p.Rest ?? false),
-          direction: p.twoWay ? "bidirectional" : "one-way"
+          direction: p.twoWay ? "bidirectional" : "one-way",
+          points: p.points ? p.points.map((pt: any) => ({ x: pt.x, y: -pt.y })) : undefined
         }));
         const points: MapPoint[] = (graph.points as any[]).map((pt: any, i: number) => ({
           id: String(pt.id ?? i + 1),
@@ -286,25 +323,21 @@ export default function VisualisePage() {
         y: ov ? ov.y : (r.y ?? 0),
         color,
         status,
+        state: typeof r.state === "string" ? r.state : undefined,
         mapId: r.mapId ?? null
       } as RobotEntity;
     });
     const currentId = currentMapId;
-    const filteredFleet = currentId ? fromFleet.filter(r => r.mapId === currentId) : [];
-    const filteredMocks = currentId ? mockRobots.filter(r => r.mapId === currentId) : [];
-    return [...filteredFleet, ...filteredMocks];
+    const filteredFleet = currentId ? fromFleet.filter(r => r.mapId === currentId || r.mapId == null) : fromFleet;
+    const filteredMocks = currentId ? mockRobots.filter(r => r.mapId === currentId || r.mapId == null) : mockRobots;
+    return [...filteredFleet, ...filteredMocks.map(m => ({ ...m, y: -m.y }))];
   }, [fleetRobots, mockRobots, colorMap, currentMapId, fleetOverrides]);
 
   // --- Handlers ---
 
   const handleAddRobot = () => {
-    if (currentMapId === null) {
-        alert("Please select a map first");
-        return;
-    }
     // Start at Node 1 or first available path start
     const startNode = mapNodes[0];
-    console.log("Adding robot at:", startNode, "Map ID:", currentMapId);
     
     const newRobot: RobotEntity = {
       id: generateId(),
@@ -315,7 +348,7 @@ export default function VisualisePage() {
       status: "idle",
       mapId: currentMapId
     };
-    setMockRobots(prev => [...prev, newRobot]);
+    setMockRobots([...mockRobots, newRobot]);
     setSelectedRobotId(newRobot.id);
   };
 
@@ -361,9 +394,13 @@ export default function VisualisePage() {
       if (snappedPos && currentMapId) {
         const robot = displayRobots.find(r => r.id === navigateRobotId);
         if (robot?.ip) {
-          fetch(`${API_BASE}/robots/${robot.ip}/move`, {
+          const worldX = snappedPos.x;
+          const worldY = -snappedPos.y;
+          fetch(`${API_BASE}/robots/${robot.ip}/navigate`, {
             method: "POST",
-            credentials: "include"
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ mapId: currentMapId, x: worldX, y: worldY })
           }).catch(() => {});
         }
       }
@@ -375,7 +412,7 @@ export default function VisualisePage() {
     for (let i = displayRobots.length - 1; i >= 0; i--) {
       const robot = displayRobots[i];
       // Convert robot position to pixels for hit testing
-      const rPx = { x: robot.x * PIXELS_PER_METER, y: robot.y * PIXELS_PER_METER };
+      const rPx = { x: robot.x * PIXELS_PER_METER, y: (-robot.y) * PIXELS_PER_METER };
       const dist = Math.sqrt(Math.pow(worldPosPx.x - rPx.x, 2) + Math.pow(worldPosPx.y - rPx.y, 2));
       
       if (dist < ROBOT_SIZE_PX / 2 + 10) { 
@@ -388,6 +425,7 @@ export default function VisualisePage() {
 
     if (e.button === 0) { // Left click
         setSelectedRobotId(null);
+        setNavigateRobotId(null);
     }
     
     if (e.button === 1 || e.button === 0) {
@@ -398,6 +436,18 @@ export default function VisualisePage() {
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const worldPosPx = screenToWorldPx(e.clientX, e.clientY);
+    
+    // Update hovered position for navigation preview
+    if (navigateRobotId) {
+       const mouseMeters = { 
+        x: worldPosPx.x / PIXELS_PER_METER, 
+        y: worldPosPx.y / PIXELS_PER_METER 
+      };
+      const snapped = getClosestPointOnMap(mouseMeters);
+      setHoveredMapPos(snapped);
+    } else {
+      if (hoveredMapPos) setHoveredMapPos(null);
+    }
 
     if (draggingRobotId) {
       // Convert current mouse position to meters
@@ -414,10 +464,10 @@ export default function VisualisePage() {
         if (isMock) {
           setMockRobots((prev) =>
             prev.map((r) =>
-              r.id === draggingRobotId ? { ...r, x: snappedPos.x, y: snappedPos.y } : r
+              r.id === draggingRobotId ? { ...r, x: snappedPos.x, y: -snappedPos.y } : r
             ));
         } else {
-          setFleetOverrides(prev => ({ ...prev, [draggingRobotId]: { x: snappedPos.x, y: snappedPos.y } }));
+          setFleetOverrides(prev => ({ ...prev, [draggingRobotId]: { x: snappedPos.x, y: -snappedPos.y } }));
         }
       }
       return;
@@ -567,7 +617,7 @@ export default function VisualisePage() {
         <div
           ref={canvasRef}
           className={`flex-1 relative rounded-3xl border border-zinc-800 bg-zinc-950 overflow-hidden shadow-inner group ${
-            isPanning ? "cursor-grabbing" : draggingRobotId ? "cursor-grabbing" : "cursor-crosshair"
+            navigateRobotId ? "cursor-cell" : (isPanning ? "cursor-grabbing" : draggingRobotId ? "cursor-grabbing" : "cursor-crosshair")
           }`}
           onWheel={handleWheel}
           onMouseDown={handleMouseDown}
@@ -613,6 +663,21 @@ export default function VisualisePage() {
                 const isMaint = path.status === "maintenance";
                 const isRest = !!path.rest;
 
+                if (path.points && path.points.length > 0) {
+                    const pointsStr = path.points.map(p => `${p.x * PIXELS_PER_METER},${p.y * PIXELS_PER_METER}`).join(" ");
+                    return (
+                        <polyline
+                            key={path.id}
+                            points={pointsStr}
+                            stroke="#52525b"
+                            strokeWidth="20"
+                            strokeLinecap="round"
+                            fill="none"
+                            className="opacity-20"
+                        />
+                    );
+                }
+
                 return (
                   <line
                     key={path.id}
@@ -637,6 +702,21 @@ export default function VisualisePage() {
                 const isRest = !!path.rest;
                 const isOneWay = path.direction === "one-way";
 
+                if (path.points && path.points.length > 0) {
+                    const pointsStr = path.points.map(p => `${p.x * PIXELS_PER_METER},${p.y * PIXELS_PER_METER}`).join(" ");
+                    return (
+                        <polyline
+                            key={`inner-${path.id}`}
+                            points={pointsStr}
+                            stroke={isMaint ? "#fbbf24" : isRest ? "#22c55e" : "#52525b"}
+                            strokeWidth="2"
+                            strokeDasharray={isMaint ? "2,6" : "none"}
+                            fill="none"
+                            markerEnd={isOneWay ? "url(#arrow)" : undefined}
+                        />
+                    );
+                }
+
                 return (
                   <line
                     key={`inner-${path.id}`}
@@ -651,6 +731,48 @@ export default function VisualisePage() {
                   />
                 );
               })}
+            {/* Route Overlay */}
+            {Object.entries(routes).map(([ip, route]) => {
+              if (route.mapId !== currentMapId || !route.nodes || route.nodes.length < 2) return null;
+              
+              const pointsStr = route.nodes.map(p => `${p.x * PIXELS_PER_METER},${-p.y * PIXELS_PER_METER}`).join(" ");
+              
+              return (
+                <g key={`route-${ip}`}>
+                   {/* Glow effect */}
+                   <polyline
+                    points={pointsStr}
+                    stroke="#38bdf8" // Sky-400
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                    className="opacity-20 blur-md"
+                  />
+                  {/* Main line */}
+                  <polyline
+                    points={pointsStr}
+                    stroke="#38bdf8" // Sky-400
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                    strokeDasharray="4 2"
+                    className="opacity-90"
+                  />
+                   {/* Start/End Markers */}
+                   {route.nodes.length > 0 && (
+                      <circle 
+                        cx={route.nodes[route.nodes.length - 1].x * PIXELS_PER_METER} 
+                        cy={-route.nodes[route.nodes.length - 1].y * PIXELS_PER_METER} 
+                        r="3" 
+                        fill="#38bdf8"
+                        className="animate-ping opacity-75" 
+                      />
+                   )}
+                </g>
+              );
+            })}
             </svg>
 
             {/* Nodes */}
@@ -702,7 +824,7 @@ export default function VisualisePage() {
                   }`}
                   style={{
                     left: robot.x * PIXELS_PER_METER,
-                    top: robot.y * PIXELS_PER_METER,
+                    top: (-robot.y) * PIXELS_PER_METER,
                     transform: `translate(-50%, -50%)`,
                   }}
                 >
@@ -734,6 +856,11 @@ export default function VisualisePage() {
                       isSelected ? "bg-zinc-900 text-white border-zinc-700" : "bg-zinc-950/50 text-zinc-500 border-transparent"
                   }`}>
                     {robot.name}
+                    {robot.state && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                        {robot.state}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -792,49 +919,51 @@ export default function VisualisePage() {
                                     </div>
                                     <div>
                                         <h2 className="font-semibold text-white">{robot.name}</h2>
-                                        <div className="flex items-center gap-1.5 mt-0.5">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                            <span className="text-xs text-emerald-500 font-medium uppercase">Online</span>
-                                        </div>
-                                    </div>
-                                </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          <span className="text-xs text-emerald-500 font-medium uppercase">Online</span>
+                        </div>
+                      </div>
+                    </div>
 
-                                <div className="space-y-4">
-                                    <div className="space-y-2">
-                                        <label className="text-xs text-zinc-500 uppercase tracking-wider">Position (Meters)</label>
-                                        <div className="grid grid-cols-2 gap-2">
-                                            <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                                                <div className="text-[10px] text-zinc-600 mb-1">X Axis</div>
-                                                <div className="font-mono text-sm text-zinc-300">{robot.x.toFixed(2)}m</div>
-                                            </div>
-                                            <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                                                <div className="text-[10px] text-zinc-600 mb-1">Y Axis</div>
-                                                <div className="font-mono text-sm text-zinc-300">{robot.y.toFixed(2)}m</div>
-                                            </div>
-                                        </div>
-                                    </div>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-500 uppercase tracking-wider">Position (Meters)</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                            <div className="text-[10px] text-zinc-600 mb-1">X Axis</div>
+                            <div className="font-mono text-sm text-zinc-300">{robot.x.toFixed(2)}m</div>
+                          </div>
+                          <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                            <div className="text-[10px] text-zinc-600 mb-1">Y Axis</div>
+                            <div className="font-mono text-sm text-zinc-300">{robot.y.toFixed(2)}m</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-500 uppercase tracking-wider">State</label>
+                        <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                          <div className="font-mono text-sm text-zinc-300">{(robot.state ?? robot.status).toString().toUpperCase()}</div>
+                        </div>
+                      </div>
 
-                                    <div className="space-y-2">
-                                        <label className="text-xs text-zinc-500 uppercase tracking-wider">Actions</label>
-                                        <button className="w-full py-2.5 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-xs font-medium transition-colors">
-                                            <Navigation size={14} />
-                                            Navigate To...
-                                        </button>
-                                        <button
-                                          onClick={() => { setNavigateRobotId(robot.id); }}
-                                          className="w-full py-2.5 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-medium transition-colors"
-                                        >
-                                            <Navigation size={14} />
-                                            Pick Destination
-                                        </button>
-                                        <button
-                                          onClick={() => { setRelocateRobotId(robot.id); }}
-                                          className="w-full py-2.5 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-xs font-medium transition-colors"
-                                        >
-                                            <Move size={14} />
-                                            Relocate
-                                        </button>
-                                    </div>
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-500 uppercase tracking-wider">Actions</label>
+                        <button
+                          onClick={() => { setNavigateRobotId(robot.id); }}
+                          className="w-full py-2.5 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-medium transition-colors"
+                        >
+                          <Navigation size={14} />
+                          Pick Destination
+                        </button>
+                        <button
+                          onClick={() => { setRelocateRobotId(robot.id); }}
+                          className="w-full py-2.5 flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl text-xs font-medium transition-colors"
+                        >
+                          <Move size={14} />
+                          Relocate
+                        </button>
+                      </div>
 
                                     {isMock && (
                                         <div className="pt-4 border-t border-zinc-800">

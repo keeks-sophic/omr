@@ -23,7 +23,13 @@ public class TelemetryService
     private int _routeIndex = 0;
     private List<(double x, double y)> _waypoints = new();
     private DateTime _lastMoveAt = DateTime.UtcNow;
-    private double _speedMps = 0.1;
+    private double _speedMps = 2.0;
+    private bool _moveAllowed = false;
+    private double? _segmentLimitMeters = null;
+    private double _segmentAdvancedMeters = 0;
+    private int _lastSegmentIndexPublished = -1;
+    private int? _robotId = null;
+    private DateTime _lastSegmentRequestAt = DateTime.MinValue;
 
     public TelemetryService(ILogger<TelemetryService> logger, NatsService nats, IOptions<RobotOptions> options)
     {
@@ -44,6 +50,8 @@ public class TelemetryService
         _lastCommandAt = DateTime.UtcNow;
         _lastAutoDecrementAt = DateTime.MinValue;
         _mapId = null;
+        _moveAllowed = false;
+        _lastSegmentIndexPublished = -1;
     }
 
     public void ApplyCommand(string command)
@@ -101,6 +109,11 @@ public class TelemetryService
         if (!string.IsNullOrWhiteSpace(state)) _state = state!;
     }
 
+    public void SetRobotId(int id)
+    {
+        _robotId = id;
+    }
+
     public void SetRoutePath(IEnumerable<(double x, double y)> points, double? speed, int? mapId)
     {
         _waypoints = points?.ToList() ?? new List<(double x, double y)>();
@@ -109,15 +122,27 @@ public class TelemetryService
         if (mapId.HasValue) _mapId = mapId.Value;
         _state = _waypoints.Count > 0 ? "moving" : "idle";
         _lastMoveAt = DateTime.UtcNow;
-        if (_waypoints.Count > 0)
-        {
-            _x = _waypoints[0].x;
-            _y = _waypoints[0].y;
-        }
+        _lastSegmentIndexPublished = -1;
+        _segmentAdvancedMeters = 0;
+        _lastSegmentRequestAt = DateTime.MinValue;
+        PublishNextSegmentAsync().ConfigureAwait(false);
     }
 
     public void TickRoute()
     {
+        if (!_moveAllowed)
+        {
+            if (_waypoints.Count > 0 && _routeIndex < _waypoints.Count)
+            {
+                var now2 = DateTime.UtcNow;
+                if (now2 - _lastSegmentRequestAt >= TimeSpan.FromSeconds(1))
+                {
+                    _lastSegmentRequestAt = now2;
+                    PublishNextSegmentAsync().ConfigureAwait(false);
+                }
+            }
+            return;
+        }
         if (_waypoints.Count == 0 || _routeIndex >= _waypoints.Count) return;
         var now = DateTime.UtcNow;
         var dt = (now - _lastMoveAt).TotalSeconds;
@@ -128,11 +153,23 @@ public class TelemetryService
         var dy = target.y - _y;
         var dist = Math.Sqrt(dx * dx + dy * dy);
         var step = _speedMps * dt;
+        if (_segmentLimitMeters.HasValue)
+        {
+            var remaining = Math.Max(0, _segmentLimitMeters.Value - _segmentAdvancedMeters);
+            step = Math.Min(step, remaining);
+        }
         if (dist <= step)
         {
             _x = target.x;
             _y = target.y;
             _routeIndex++;
+            _segmentAdvancedMeters += dist;
+            _segmentLimitMeters = null;
+            if (_routeIndex != _lastSegmentIndexPublished)
+            {
+                _segmentAdvancedMeters = 0;
+                PublishNextSegmentAsync().ConfigureAwait(false);
+            }
             if (_routeIndex >= _waypoints.Count)
             {
                 _state = "idle";
@@ -145,8 +182,60 @@ public class TelemetryService
             var uy = dy / dist;
             _x += ux * step;
             _y += uy * step;
+            _segmentAdvancedMeters += step;
             _state = "moving";
         }
+        if (_segmentLimitMeters.HasValue && _segmentAdvancedMeters >= _segmentLimitMeters.Value - 1e-6)
+        {
+            _segmentLimitMeters = null;
+            _segmentAdvancedMeters = 0;
+            PublishNextSegmentAsync().ConfigureAwait(false);
+        }
+    }
+
+    public void SetTrafficControl(bool allowed, double? limitMeters = null)
+    {
+        _moveAllowed = allowed;
+        _segmentLimitMeters = limitMeters;
+        if (!allowed) _state = "stop";
+        else if (_waypoints.Count > 0) _state = "moving";
+    }
+
+    private async Task PublishNextSegmentAsync()
+    {
+        if (_waypoints.Count == 0) return;
+        var points = new List<object>();
+        var idx = Math.Max(0, _routeIndex);
+        var lastX = _x;
+        var lastY = _y;
+        double accum = 0.0;
+        for (var i = idx; i < _waypoints.Count; i++)
+        {
+            var p = _waypoints[i];
+            var dx = p.x - lastX;
+            var dy = p.y - lastY;
+            var d = Math.Sqrt(dx * dx + dy * dy);
+            accum += d;
+            points.Add(new { x = p.x, y = p.y });
+            lastX = p.x;
+            lastY = p.y;
+            if (accum >= 5.0) break;
+        }
+        var payload = new
+        {
+            command = "route.segment",
+            ip = _ip,
+            segment = new
+            {
+                mapId = _mapId,
+                points = points.ToArray(),
+                length = accum
+            }
+        };
+        var subject = $"{Robot.Topics.NatsSubjects.RouteSegmentPrefix}.{(_robotId.HasValue ? _robotId.Value : _ip)}";
+        await _nats.PublishAsync(subject, payload, default);
+        _lastSegmentIndexPublished = _routeIndex;
+        _segmentAdvancedMeters = 0;
     }
 
     public bool TickBattery()
@@ -159,7 +248,6 @@ public class TelemetryService
             {
                 _battery = newBatt;
                 _lastAutoDecrementAt = now;
-                if (_state != "charging") _state = "idle";
                 return true;
             }
         }
@@ -169,7 +257,11 @@ public class TelemetryService
     public bool TickIdle()
     {
         var now = DateTime.UtcNow;
-        if (now - _lastCommandAt >= TimeSpan.FromSeconds(2) && _state != "idle")
+        var hasActiveRoute = _waypoints.Count > 0 && _routeIndex < _waypoints.Count;
+        var isMovingOrStopped = string.Equals(_state, "moving", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_state, "stop", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(_state, "charging", StringComparison.OrdinalIgnoreCase);
+        if (now - _lastCommandAt >= TimeSpan.FromSeconds(2) && !hasActiveRoute && !isMovingOrStopped && _state != "idle")
         {
             _state = "idle";
             return true;
@@ -196,7 +288,8 @@ public class TelemetryService
     public async Task PublishStatusAsync()
     {
         var status = GetStatus();
-        await _nats.PublishAsync(_options.Value.TelemetrySubject, status, default);
+        var subject = $"{Robot.Topics.NatsSubjects.TelemetryPrefix}.{(_robotId.HasValue ? _robotId.Value : _ip)}";
+        await _nats.PublishAsync(subject, status, default);
         _logger.LogInformation("Telemetry: {@Status}", status);
     }
 }

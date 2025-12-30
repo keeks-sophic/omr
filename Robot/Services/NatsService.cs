@@ -46,15 +46,35 @@ public class NatsService
         if (_jm == null || string.IsNullOrWhiteSpace(streamName)) return Task.CompletedTask;
         try
         {
-            _jm.GetStreamInfo(streamName);
+            var info = _jm.GetStreamInfo(streamName);
+            var existing = (info?.Config?.Subjects ?? new List<string>()).ToArray();
+            var required = subjects ?? Array.Empty<string>();
+            var needUpdate = required.Any(s => !existing.Contains(s));
+            if (needUpdate)
+            {
+                try
+                {
+                    var builder = StreamConfiguration.Builder().WithName(streamName);
+                    foreach (var s in required) builder = builder.WithSubjects(s);
+                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    _jm.UpdateStream(cfg);
+                    _logger.LogInformation("JetStream stream updated: {Stream} → {Subjects}", streamName, string.Join(",", required));
+                }
+                catch
+                {
+                    _jm.DeleteStream(streamName);
+                    var builder = StreamConfiguration.Builder().WithName(streamName);
+                    foreach (var s in required) builder = builder.WithSubjects(s);
+                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    _jm.AddStream(cfg);
+                    _logger.LogInformation("JetStream stream recreated: {Stream} → {Subjects}", streamName, string.Join(",", required));
+                }
+            }
         }
         catch
         {
             var builder = StreamConfiguration.Builder().WithName(streamName);
-            foreach (var s in subjects)
-            {
-                builder = builder.WithSubjects(s);
-            }
+            foreach (var s in subjects) builder = builder.WithSubjects(s);
             var cfg = builder.WithStorageType(StorageType.File).Build();
             _jm.AddStream(cfg);
             _logger.LogInformation("JetStream stream ensured: {Stream} → {Subjects}", streamName, string.Join(",", subjects));
@@ -74,7 +94,11 @@ public class NatsService
         if (_js != null)
         {
             try { _js.Publish(subject, data); }
-            catch (Exception ex) { _logger.LogError(ex, "JetStream publish failed {Subject}", subject); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "JetStream publish failed {Subject}", subject);
+                try { _conn?.Publish(subject, data); } catch { }
+            }
         }
         else
         {

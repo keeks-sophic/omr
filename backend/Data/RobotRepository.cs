@@ -2,7 +2,7 @@ using Backend.Infrastructure.Persistence;
 using Backend.Model;
 using Microsoft.EntityFrameworkCore;
 
-namespace Backend.Database;
+namespace Backend.Data;
 
 public class RobotRepository
 {
@@ -76,7 +76,8 @@ public class RobotRepository
             state = r.State,
             battery = r.Battery,
             connected = r.Connected,
-            lastActive = r.LastActive
+            lastActive = r.LastActive,
+            mapId = r.MapId
         }).ToListAsync(ct);
         return list.Cast<object>().ToList();
     }
@@ -98,6 +99,21 @@ public class RobotRepository
                 mapId = r.MapId
             }).ToListAsync(ct);
         return list.Cast<object>().ToList();
+    }
+    public Task<Robot?> GetRobotByIpAsync(string ip, CancellationToken ct)
+    {
+        return _db.Robots.AsNoTracking().FirstOrDefaultAsync(r => r.Ip == ip, ct);
+    }
+    public async Task<List<Robot>> MarkStaleRobotsDisconnectedAsync(TimeSpan threshold, CancellationToken ct)
+    {
+        var cutoff = DateTime.UtcNow - threshold;
+        var stale = await _db.Robots.Where(r => r.Connected && r.LastActive < cutoff).ToListAsync(ct);
+        if (stale.Count > 0)
+        {
+            foreach (var r in stale) r.Connected = false;
+            await _db.SaveChangesAsync(ct);
+        }
+        return stale;
     }
     public async Task<Robot> UpsertRobotTelemetryAsync(string ip, string? name, double? x, double? y, double battery, string? state, int? mapId, CancellationToken ct)
     {
@@ -122,22 +138,18 @@ public class RobotRepository
             await _db.SaveChangesAsync(ct);
             return rob;
         }
-        // Avoid DB writes unless state changes; heartbeat handled in memory
-        if (!string.IsNullOrWhiteSpace(state) && !string.Equals(rob.State, state, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(state)) rob.State = state!;
+        rob.Battery = battery;
+        if (x.HasValue) rob.X = x.Value;
+        if (y.HasValue) rob.Y = y.Value;
+        if (x.HasValue && y.HasValue)
         {
-            rob.State = state!;
-            rob.Battery = battery;
-            if (x.HasValue) rob.X = x.Value;
-            if (y.HasValue) rob.Y = y.Value;
-            if (x.HasValue && y.HasValue)
-            {
-                rob.Location = new NetTopologySuite.Geometries.Point(x.Value, y.Value) { SRID = 0 };
-            }
-            if (mapId.HasValue) rob.MapId = mapId.Value;
-            rob.Connected = true;
-            rob.LastActive = now;
-            await _db.SaveChangesAsync(ct);
+            rob.Location = new NetTopologySuite.Geometries.Point(x.Value, y.Value) { SRID = 0 };
         }
+        if (mapId.HasValue) rob.MapId = mapId.Value;
+        rob.Connected = true;
+        rob.LastActive = now;
+        await _db.SaveChangesAsync(ct);
         return rob;
     }
 

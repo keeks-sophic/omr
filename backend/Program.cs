@@ -1,9 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Builder;
-using Backend.Options;
-using Backend.Services;
-using Backend.Hubs;
-using Backend.Database;
+using Backend.Topics;
+using Backend.Service;
+using Backend.SignalR;
+using Backend.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,9 +27,12 @@ builder.Services.AddCors(opt =>
 });
 builder.Services.Configure<NatsOptions>(builder.Configuration.GetSection("Nats"));
 builder.Services.AddSingleton<NatsService>();
-builder.Services.AddHostedService<RobotTelemetrySubscriber>();
+builder.Services.AddHostedService<Backend.Worker.RobotTelemetrySubscriber>();
 builder.Services.AddScoped<MapRepository>();
 builder.Services.AddScoped<RobotRepository>();
+builder.Services.AddSingleton<IRoutePlanQueue, RoutePlanQueue>();
+builder.Services.AddHostedService<Backend.Worker.RoutePlannerWorker>();
+builder.Services.AddHostedService<Backend.Worker.TrafficControlWorker>();
 
 var app = builder.Build();
 

@@ -5,7 +5,7 @@ using Backend.Model;
 using Microsoft.EntityFrameworkCore;
 using NetTopologySuite.Geometries;
 
-namespace Backend.Database;
+namespace Backend.Data;
 
 public class MapRepository
 {
@@ -153,5 +153,62 @@ public class MapRepository
         }
 
         return map.Id;
+    }
+
+    public async Task<(int[] nodeIds, int[] pathIds, double totalLength)?> TryComputeRouteWithPgRoutingAsync(int mapId, int startNodeId, int destNodeId, CancellationToken ct)
+    {
+        var conn = _db.Database.GetDbConnection();
+        await conn.OpenAsync(ct);
+        try
+        {
+            using var checkCmd = conn.CreateCommand();
+            checkCmd.CommandText = "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='pgrouting')";
+            var existsObj = await checkCmd.ExecuteScalarAsync(ct);
+            var exists = existsObj is bool b ? b : (existsObj is int i ? i != 0 : false);
+            if (!exists) return null;
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                WITH edges AS (
+                    SELECT id, startnodeid AS source, endnodeid AS target, length AS cost
+                    FROM paths
+                    WHERE mapid = @map AND lower(status) = 'active'
+                )
+                SELECT seq, path_seq, node, edge, cost, agg_cost
+                FROM pgr_dijkstra(
+                    'SELECT id, source, target, cost FROM edges',
+                    @start, @dest, false
+                )
+                ORDER BY path_seq";
+            var pMap = cmd.CreateParameter(); pMap.ParameterName = "@map"; pMap.Value = mapId; cmd.Parameters.Add(pMap);
+            var pStart = cmd.CreateParameter(); pStart.ParameterName = "@start"; pStart.Value = startNodeId; cmd.Parameters.Add(pStart);
+            var pDest = cmd.CreateParameter(); pDest.ParameterName = "@dest"; pDest.Value = destNodeId; cmd.Parameters.Add(pDest);
+            var nodes = new List<int>();
+            var edges = new List<int>();
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var node = reader.GetFieldValue<int>(reader.GetOrdinal("node"));
+                var edge = reader.GetFieldValue<int>(reader.GetOrdinal("edge"));
+                if (nodes.Count == 0 || nodes[^1] != node) nodes.Add(node);
+                if (edge != -1) edges.Add(edge);
+            }
+            await reader.CloseAsync();
+            if (nodes.Count == 0) return null;
+            var pathIds = edges.Distinct().ToArray();
+            double totalLength = 0.0;
+            if (pathIds.Length > 0)
+            {
+                totalLength = await _db.Paths.AsNoTracking().Where(p => pathIds.Contains(p.Id)).Select(p => p.Location != null ? p.Location.Length : p.Length).SumAsync(ct);
+            }
+            return (nodes.ToArray(), pathIds, totalLength);
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            await conn.CloseAsync();
+        }
     }
 }

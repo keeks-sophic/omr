@@ -1,0 +1,23 @@
+cd frontend
+npm run dev
+
+
+cd robot
+dotnet run -- -n hahaha --ip 1.1.1.2
+dotnet run -- -n hahaha --ip 1.1.1.2
+
+-n name
+--ip ip
+name ip can suibian put
+
+
+cd backend 
+dotnet run
+
+db chg at
+backend\appsettings.Development.json
+"Host=localhost;Port=5432;Database=nsky;Username=postgres;Password=1234"
+use db migrate to init db
+
+still gt bug
+code not yet clean
