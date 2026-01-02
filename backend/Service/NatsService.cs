@@ -42,23 +42,27 @@ public class NatsService
             var info = _jm.GetStreamInfo(streamName);
             var existing = (info?.Config?.Subjects ?? new List<string>()).ToArray();
             var required = subjects ?? Array.Empty<string>();
-            var needUpdate = required.Any(s => !existing.Contains(s));
+            var needUpdate = required.Any(s => !existing.Contains(s)) || existing.Length != required.Length;
             if (needUpdate)
             {
                 try
                 {
-                    var builder = StreamConfiguration.Builder().WithName(streamName);
-                    foreach (var s in required) builder = builder.WithSubjects(s);
-                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    var cfg = StreamConfiguration.Builder()
+                        .WithName(streamName)
+                        .WithSubjects(required)
+                        .WithStorageType(StorageType.File)
+                        .Build();
                     _jm.UpdateStream(cfg);
                     _logger.LogInformation("JetStream stream updated: {Stream} → {Subjects}", streamName, string.Join(",", required));
                 }
                 catch
                 {
                     _jm.DeleteStream(streamName);
-                    var builder = StreamConfiguration.Builder().WithName(streamName);
-                    foreach (var s in required) builder = builder.WithSubjects(s);
-                    var cfg = builder.WithStorageType(StorageType.File).Build();
+                    var cfg = StreamConfiguration.Builder()
+                        .WithName(streamName)
+                        .WithSubjects(required)
+                        .WithStorageType(StorageType.File)
+                        .Build();
                     _jm.AddStream(cfg);
                     _logger.LogInformation("JetStream stream recreated: {Stream} → {Subjects}", streamName, string.Join(",", required));
                 }
@@ -66,9 +70,11 @@ public class NatsService
         }
         catch
         {
-            var builder = StreamConfiguration.Builder().WithName(streamName);
-            foreach (var s in subjects) builder = builder.WithSubjects(s);
-            var cfg = builder.WithStorageType(StorageType.File).Build();
+            var cfg = StreamConfiguration.Builder()
+                .WithName(streamName)
+                .WithSubjects(subjects)
+                .WithStorageType(StorageType.File)
+                .Build();
             _jm.AddStream(cfg);
             _logger.LogInformation("JetStream stream ensured: {Stream} → {Subjects}", streamName, string.Join(",", subjects));
         }

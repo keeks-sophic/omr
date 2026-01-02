@@ -92,6 +92,7 @@ export default function VisualisePage() {
   const [selectedUnassignedIp, setSelectedUnassignedIp] = useState<string | null>(null);
   const [unassigned, setUnassigned] = useState<{ name: string; ip: string }[]>([]);
   const prevMapIdRef = useRef<number | null>(null);
+  const [recentlyAssigned, setRecentlyAssigned] = useState<Record<string, number>>({});
 
   const { robots: fleetRobots, joinMap, leaveMap, routes } = useRobotFleet();
 
@@ -328,9 +329,13 @@ export default function VisualisePage() {
       } as RobotEntity;
     });
     const currentId = currentMapId;
-    const filteredFleet = currentId ? fromFleet.filter(r => r.mapId === currentId || r.mapId == null) : fromFleet;
-    const filteredMocks = currentId ? mockRobots.filter(r => r.mapId === currentId || r.mapId == null) : mockRobots;
-    return [...filteredFleet, ...filteredMocks.map(m => ({ ...m, y: -m.y }))];
+    const filteredFleet = currentId ? fromFleet.filter(r => r.mapId === currentId) : fromFleet.filter(r => r.mapId != null);
+    const filteredMocks = currentId ? mockRobots.filter(r => r.mapId === currentId) : mockRobots.filter(r => r.mapId != null);
+    const nowTs = Date.now();
+    const fleetFilteredFinal = currentId 
+      ? fromFleet.filter(r => r.mapId === currentId || (r.ip && recentlyAssigned[r.ip] && (nowTs - recentlyAssigned[r.ip]) < 3000))
+      : fromFleet.filter(r => r.mapId != null);
+    return [...fleetFilteredFinal, ...filteredMocks.map(m => ({ ...m, y: -m.y }))];
   }, [fleetRobots, mockRobots, colorMap, currentMapId, fleetOverrides]);
 
   // --- Handlers ---
@@ -588,6 +593,7 @@ export default function VisualisePage() {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ mapId: currentMapId })
                   });
+                  setRecentlyAssigned(prev => ({ ...prev, [selectedUnassignedIp]: Date.now() }));
                   const res = await fetch(`${API_BASE}/robots/unassigned`, { credentials: "include" });
                   if (res.ok) {
                     const data = await res.json();
@@ -770,10 +776,33 @@ export default function VisualisePage() {
                         className="animate-ping opacity-75" 
                       />
                    )}
+                   {typeof route.length === "number" && route.length > 0 && (
+                     <text
+                       x={route.nodes[route.nodes.length - 1].x * PIXELS_PER_METER + 8}
+                       y={-route.nodes[route.nodes.length - 1].y * PIXELS_PER_METER - 8}
+                       fill="#38bdf8"
+                       fontSize="10"
+                       className="opacity-80"
+                     >
+                       {`${route.length.toFixed(1)}m`}
+                     </text>
+                   )}
                 </g>
               );
             })}
             </svg>
+
+            {/* Destination Preview While Picking */}
+            {navigateRobotId && hoveredMapPos && (
+              <div
+                className="absolute -ml-2 -mt-2 w-4 h-4 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.6)] border border-white/60 z-30"
+                style={{
+                  left: hoveredMapPos.x * PIXELS_PER_METER,
+                  top: hoveredMapPos.y * PIXELS_PER_METER
+                }}
+                title="Destination"
+              />
+            )}
 
             {/* Nodes */}
             {mapNodes.map((node) => (

@@ -114,8 +114,11 @@ public class CommandListenerService
                                 double? limitMeters = null;
                                 if (doc.RootElement.TryGetProperty("limitMeters", out var lm) && lm.ValueKind == JsonValueKind.Number)
                                     limitMeters = lm.GetDouble();
-                                _telemetry.SetTrafficControl(allow, limitMeters);
-                                _logger.LogInformation("Traffic control: allow={Allow}", allow);
+                                double? speedLimit = null;
+                                if (doc.RootElement.TryGetProperty("speedLimit", out var sl) && sl.ValueKind == JsonValueKind.Number)
+                                    speedLimit = sl.GetDouble();
+                                _telemetry.SetTrafficControl(allow, limitMeters, speedLimit);
+                                _logger.LogInformation("Traffic control: allow={Allow}, limitMeters={Limit}, speedLimit={Speed}", allow, limitMeters, speedLimit);
                             }
                             else if (string.Equals(command, "robot.sync", StringComparison.OrdinalIgnoreCase))
                             {
@@ -195,7 +198,10 @@ public class CommandListenerService
                             double? limitMeters = null;
                             if (doc.RootElement.TryGetProperty("limitMeters", out var lm) && lm.ValueKind == JsonValueKind.Number)
                                 limitMeters = lm.GetDouble();
-                            _telemetry.SetTrafficControl(allow, limitMeters);
+                            double? speedLimit = null;
+                            if (doc.RootElement.TryGetProperty("speedLimit", out var sl) && sl.ValueKind == JsonValueKind.Number)
+                                speedLimit = sl.GetDouble();
+                            _telemetry.SetTrafficControl(allow, limitMeters, speedLimit);
                         }
                         else if (string.Equals(command, "route.plan", StringComparison.OrdinalIgnoreCase))
                         {

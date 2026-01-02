@@ -17,7 +17,8 @@ public class RobotsController : ControllerBase
     private readonly IRoutePlanQueue _routeQueue;
     private readonly NatsService _nats;
     private readonly IOptions<NatsOptions> _opts;
-    public RobotsController(RobotRepository repo, IHubContext<RobotsHub> hub, IRoutePlanQueue routeQueue, NatsService nats, IOptions<NatsOptions> opts) { _repo = repo; _hub = hub; _routeQueue = routeQueue; _nats = nats; _opts = opts; }
+    private readonly DestinationRepository _destRepo;
+    public RobotsController(RobotRepository repo, IHubContext<RobotsHub> hub, IRoutePlanQueue routeQueue, NatsService nats, IOptions<NatsOptions> opts, DestinationRepository destRepo) { _repo = repo; _hub = hub; _routeQueue = routeQueue; _nats = nats; _opts = opts; _destRepo = destRepo; }
 
     [HttpGet("/robots")]
     public async Task<ActionResult<IEnumerable<object>>> GetAll(CancellationToken ct)
@@ -60,6 +61,25 @@ public class RobotsController : ControllerBase
         };
         await _hub.Clients.All.SendAsync(SignalRTopics.Telemetry, payload, ct);
         if (rob.MapId.HasValue) await _hub.Clients.Group($"map:{rob.MapId.Value}").SendAsync(SignalRTopics.Telemetry, payload, ct);
+        await _nats.ConnectAsync(_opts.Value.Url, ct);
+        await _nats.EnsureStreamAsync(_opts.Value.ControlWildcardStream ?? "ROBOTS_CONTROL", $"{NatsTopics.SyncPrefix}.>");
+        var sync = new
+        {
+            command = NatsTopics.CommandRobotSync,
+            ip = rob.Ip,
+            robot = new
+            {
+                id = rob.Id,
+                name = rob.Name,
+                mapId = rob.MapId,
+                x = rob.X,
+                y = rob.Y,
+                battery = rob.Battery,
+                state = rob.State
+            }
+        };
+        await _nats.PublishAsync($"{NatsTopics.SyncPrefix}.{rob.Id}", sync, ct);
+        await _nats.PublishAsync($"{NatsTopics.SyncPrefix}.{ip}", sync, ct);
         return Ok(new { name = rob.Name, ip = rob.Ip, mapId = rob.MapId, x = rob.X, y = rob.Y });
     }
 
@@ -136,6 +156,12 @@ public class RobotsController : ControllerBase
     [HttpPost("/robots/{ip}/navigate")]
     public async Task<ActionResult> Navigate(string ip, [FromBody] RoutePlanRequest req, CancellationToken ct)
     {
+        var rob = await _repo.GetRobotByIpAsync(ip, ct);
+        if (rob != null)
+        {
+            var rid = rob.Id;
+            await _destRepo.UpsertDestinationAsync(rid, req.MapId, req.X, req.Y, ct);
+        }
         await _routeQueue.EnqueueAsync(new RoutePlanTask { Ip = ip, MapId = req.MapId, X = req.X, Y = req.Y }, ct);
         return Accepted();
     }

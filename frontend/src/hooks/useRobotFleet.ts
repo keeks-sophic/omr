@@ -10,7 +10,7 @@ export function useRobotFleet() {
   const [connection, setConnection] = useState<HubConnection | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [routes, setRoutes] = useState<Record<string, { mapId: number; nodes: { id: number; x: number; y: number }[] }>>({});
+  const [routes, setRoutes] = useState<Record<string, { mapId: number; nodes: { id: number; x: number; y: number }[]; length?: number }>>({});
 
   useEffect(() => {
     // 1. Initial Fetch to populate list
@@ -102,9 +102,9 @@ export function useRobotFleet() {
           });
 
           // Handle route overlay
-          connection.on("route", (data: { ip: string; mapId: number; nodes: { id: number; x: number; y: number }[] }) => {
+          connection.on("route", (data: { ip: string; mapId: number; nodes: { id: number; x: number; y: number }[]; length?: number }) => {
             if (data?.ip && Array.isArray(data.nodes)) {
-              setRoutes(prev => ({ ...prev, [data.ip]: { mapId: data.mapId, nodes: data.nodes } }));
+              setRoutes(prev => ({ ...prev, [data.ip]: { mapId: data.mapId, nodes: data.nodes, length: data.length } }));
             }
           });
 

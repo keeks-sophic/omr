@@ -30,6 +30,7 @@ builder.Services.AddSingleton<NatsService>();
 builder.Services.AddHostedService<Backend.Worker.RobotTelemetrySubscriber>();
 builder.Services.AddScoped<MapRepository>();
 builder.Services.AddScoped<RobotRepository>();
+builder.Services.AddScoped<DestinationRepository>();
 builder.Services.AddSingleton<IRoutePlanQueue, RoutePlanQueue>();
 builder.Services.AddHostedService<Backend.Worker.RoutePlannerWorker>();
 builder.Services.AddHostedService<Backend.Worker.TrafficControlWorker>();

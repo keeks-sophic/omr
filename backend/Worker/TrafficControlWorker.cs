@@ -15,6 +15,12 @@ using System.Collections.Concurrent;
 
 namespace Backend.Worker;
 
+/// <summary>
+/// TrafficControlWorker listens to robot route-segment requests and telemetry over NATS.
+/// It decides per-request whether the robot can proceed, how far (limitMeters),
+/// and at what speed, while enforcing collision avoidance via node/edge reservations.
+/// It also triggers rerouting if a robot is stopped on a two-way path.
+/// </summary>
 public class TrafficControlWorker : BackgroundService
 {
     private readonly ILogger<TrafficControlWorker> _logger;
@@ -23,10 +29,15 @@ public class TrafficControlWorker : BackgroundService
     private readonly IOptions<NatsOptions> _opts;
     private readonly object _lock = new();
 
-    private readonly Dictionary<int, Dictionary<int, string>> _nodeOccupancyByMap = new();
-    private readonly Dictionary<int, Dictionary<(int from, int to), string>> _edgeOccupancyByMap = new();
+    // Per-map occupancy state: node and directed edge reservations with short leases
+    private readonly Dictionary<int, Dictionary<int, Occupancy>> _nodeOccupancyByMap = new();
+    private readonly Dictionary<int, Dictionary<(int from, int to), Occupancy>> _edgeOccupancyByMap = new();
+    // Robot's last reserved node/edge so we can release previous reservations
     private readonly Dictionary<string, (int? nodeId, (int from, int to)? edge)> _robotLast = new();
+    // Latest telemetry snapshot per robot IP (position/state/map)
     private readonly ConcurrentDictionary<string, RobotSnap> _latest = new();
+    // Last reroute time per robot to throttle reroute triggers
+    private readonly ConcurrentDictionary<string, DateTime> _lastReroute = new();
 
     public TrafficControlWorker(ILogger<TrafficControlWorker> logger, IServiceProvider sp, NatsService nats, IOptions<NatsOptions> opts)
     {
@@ -38,14 +49,17 @@ public class TrafficControlWorker : BackgroundService
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Connect to NATS and ensure streams exist
         _ = _nats.ConnectAsync(_opts.Value.Url, stoppingToken);
         _ = _nats.EnsureStreamAsync(_opts.Value.RouteWildcardStream ?? "ROBOTS_ROUTE", $"{NatsTopics.RouteSegmentPrefix}.>");
         _ = _nats.EnsureStreamAsync(_opts.Value.ControlWildcardStream ?? "ROBOTS_CONTROL", $"{NatsTopics.ControlPrefix}.>");
         _ = _nats.EnsureStreamAsync(_opts.Value.TelemetryWildcardStream ?? "ROBOTS_TELEMETRY", $"{NatsTopics.TelemetryPrefix}.>");
+        // Subscribe to route-segment commands (decision path)
         _nats.Subscribe($"{NatsTopics.RouteSegmentPrefix}.>", async (s, e) =>
         {
             await HandleRouteSegmentMessage(e, stoppingToken);
         });
+        // Subscribe to telemetry to keep latest position/state per robot
         _nats.Subscribe($"{NatsTopics.TelemetryPrefix}.>", (s, e) =>
         {
             try
@@ -71,6 +85,7 @@ public class TrafficControlWorker : BackgroundService
     {
         try
         {
+            // Parse incoming command payload
             var text = e.Message.Data != null ? Encoding.UTF8.GetString(e.Message.Data) : "{}";
             var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
             var command = doc.RootElement.TryGetProperty("command", out var cmd) ? cmd.GetString() : null;
@@ -83,6 +98,7 @@ public class TrafficControlWorker : BackgroundService
             var mapId = mapEl.GetInt32();
             if (!routeEl.TryGetProperty("points", out var ptsEl) || ptsEl.ValueKind != JsonValueKind.Array) return;
             var segLen = routeEl.TryGetProperty("length", out var lenEl) && lenEl.ValueKind == JsonValueKind.Number ? lenEl.GetDouble() : 5.0;
+            // Extract segment polyline points
             var pts = ptsEl.EnumerateArray().Select(p =>
             {
                 var x = p.TryGetProperty("x", out var xx) && xx.ValueKind == JsonValueKind.Number ? xx.GetDouble() : 0;
@@ -95,6 +111,7 @@ public class TrafficControlWorker : BackgroundService
             int? endNodeId;
             using (var scope = _sp.CreateScope())
             {
+                // Resolve robot entity and nearest graph nodes for segment endpoints
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var robotEntity = await db.Robots.AsNoTracking().FirstOrDefaultAsync(r => r.Ip == ip, stoppingToken);
                 var robotId = robotEntity?.Id ?? 0;
@@ -104,9 +121,11 @@ public class TrafficControlWorker : BackgroundService
                 endNodeId = await NearestNodeIdAsync(db, mapId, lastPt.x, lastPt.y, stoppingToken);
                 if (startNodeId == null || endNodeId == null)
                 {
-                    await SendAllowAsync(ip!, robotId, true, segLen, stoppingToken);
+                    // If endpoints can't be mapped to nodes, allow with default speed
+                    await SendAllowAsync(ip!, robotId, true, segLen, 1.5, stoppingToken);
                     return;
                 }
+                // Find path entity between nodes or closest active path as fallback
                 var path = await db.Paths.AsNoTracking()
                     .FirstOrDefaultAsync(p => p.MapId == mapId && p.StartNodeId == startNodeId && p.EndNodeId == endNodeId, stoppingToken)
                     ?? await db.Paths.AsNoTracking()
@@ -135,6 +154,7 @@ public class TrafficControlWorker : BackgroundService
                     path = bestPath;
                     if (path != null)
                     {
+                        // Orient start/end nodes based on which endpoint is closer to segment start
                         var a = nodesMap[path.StartNodeId];
                         var b = nodesMap[path.EndNodeId];
                         var dax = Math.Abs((a.Location?.X ?? a.X) - firstPt.x);
@@ -148,6 +168,7 @@ public class TrafficControlWorker : BackgroundService
                     }
                 }
 
+                // Compute the allowed forward travel limit based on robots ahead on the same path
                 var endNode = await db.Nodes.AsNoTracking().FirstOrDefaultAsync(n => n.Id == endNodeId, stoppingToken);
                 var endDist = double.MaxValue;
                 if (endNode != null)
@@ -163,73 +184,25 @@ public class TrafficControlWorker : BackgroundService
                     .Select(r => new { r.Ip, X = (double?)r.X, Y = (double?)r.Y, r.State })
                     .ToList();
                 var line = path?.Location as LineString;
-                double aheadLimit = segLen;
-                if (line != null)
-                {
-                    var lir = new LengthIndexedLine(line);
-                    var startIdx = lir.Project(new Coordinate(firstPt.x, firstPt.y));
-                    var nearestAhead = nearRobots
-                        .Select(r =>
-                        {
-                            var rx = r.X ?? 0;
-                            var ry = r.Y ?? 0;
-                            var ridx = lir.Project(new Coordinate(rx, ry));
-                            var proj = lir.ExtractPoint(ridx);
-                            var dx = rx - proj.X;
-                            var dy = ry - proj.Y;
-                            var perpDist = Math.Sqrt(dx * dx + dy * dy);
-                            var st = (r.State ?? "").ToLowerInvariant();
-                            var isBlockingState = st.Contains("idle") || st.Contains("stop");
-                            return (ridx, ip2: r.Ip, perpDist, isBlockingState);
-                        })
-                        .Where(t => t.ridx > startIdx && t.isBlockingState && t.perpDist <= 0.3)
-                        .OrderBy(t => t.ridx)
-                        .FirstOrDefault();
-                    if (nearestAhead.ip2 != null)
-                    {
-                        var delta = nearestAhead.ridx - startIdx;
-                        if (delta <= 1.0)
-                        {
-                            aheadLimit = 0.0;
-                        }
-                        else
-                        {
-                            aheadLimit = Math.Max(0, delta - 1.0);
-                        }
-                    }
-                }
+                var aheadLimit = ComputeAheadLimit(line, ip!, segLen, firstPt.x, firstPt.y, lastPt.x, lastPt.y, robotEntity, mapId);
                 bool allowed;
                 double? limitMeters = null;
-                lock (_lock)
+                double speedLimit = 0;
+                // Degree of end node; high-degree implies junction handling
+                var deg = await db.Paths.AsNoTracking().CountAsync(p => p.MapId == mapId && (p.StartNodeId == endNodeId || p.EndNodeId == endNodeId), stoppingToken);
+                // Decide conflict-free reservation and speed, and record occupancy
+                (allowed, limitMeters, speedLimit) = DecideAndReserve(mapId, startNodeId!.Value, endNodeId!.Value, ip!, segLen, aheadLimit, deg);
+                // If robot is stopped on a two-way path, trigger reroute (throttled)
+                if (path?.TwoWay == true && IsStopped(ip!) && ShouldReroute(ip!))
                 {
-                    if (!_nodeOccupancyByMap.TryGetValue(mapId, out var nodeOcc))
-                    {
-                        nodeOcc = new Dictionary<int, string>();
-                        _nodeOccupancyByMap[mapId] = nodeOcc;
-                    }
-                    if (!_edgeOccupancyByMap.TryGetValue(mapId, out var edgeOcc))
-                    {
-                        edgeOcc = new Dictionary<(int from, int to), string>();
-                        _edgeOccupancyByMap[mapId] = edgeOcc;
-                    }
-                    if (_robotLast.TryGetValue(ip!, out var last))
-                    {
-                        if (last.nodeId.HasValue) nodeOcc.Remove(last.nodeId.Value);
-                        if (last.edge.HasValue) edgeOcc.Remove(last.edge.Value);
-                    }
-                    {
-                        var forward = (from: startNodeId.Value, to: endNodeId.Value);
-                        allowed = true;
-                        limitMeters = allowed ? Math.Min(segLen, aheadLimit) : 0;
-                        if (allowed && (limitMeters ?? 0) <= 0) allowed = false;
-                        if (allowed)
-                        {
-                            edgeOcc[forward] = ip!;
-                            _robotLast[ip!] = (endNodeId.Value, forward);
-                        }
-                    }
+                    var rx = _latest.TryGetValue(ip!, out var snapR) ? snapR.X : (robotEntity?.Location != null ? robotEntity.Location.X : (robotEntity?.X ?? lastPt.x));
+                    var ry = _latest.TryGetValue(ip!, out var snapR2) ? snapR2.Y : (robotEntity?.Location != null ? robotEntity.Location.Y : (robotEntity?.Y ?? lastPt.y));
+                    var queue = scope.ServiceProvider.GetRequiredService<IRoutePlanQueue>();
+                    await queue.EnqueueAsync(new RoutePlanTask { Ip = ip!, MapId = mapId, X = rx, Y = ry }, stoppingToken);
+                    _lastReroute[ip!] = DateTime.UtcNow;
                 }
-                await SendAllowAsync(ip!, robotId, allowed, limitMeters, stoppingToken);
+                // Send final allow/limit/speed command for robot to execute
+                await SendAllowAsync(ip!, robotId, allowed, limitMeters, speedLimit, stoppingToken);
             }
         }
         catch (Exception ex)
@@ -240,6 +213,7 @@ public class TrafficControlWorker : BackgroundService
 
     private async Task<int?> NearestNodeIdAsync(AppDbContext db, int mapId, double x, double y, CancellationToken ct)
     {
+        // Pick nearest node by Euclidean distance; supports nodes with geometry Location or X/Y
         var nodes = await db.Nodes.AsNoTracking().Where(n => n.MapId == mapId).Select(n => new { n.Id, n.X, n.Y, n.Location }).ToArrayAsync(ct);
         if (nodes.Length == 0) return null;
         var best = nodes.Select(n =>
@@ -252,20 +226,23 @@ public class TrafficControlWorker : BackgroundService
         return best.Id;
     }
 
-    private async Task SendAllowAsync(string ip, int robotId, bool allow, double? limitMeters, CancellationToken ct)
+    private async Task SendAllowAsync(string ip, int robotId, bool allow, double? limitMeters, double speedLimit, CancellationToken ct)
     {
+        // Publish decision to robot-specific control topic
         var payload = new
         {
             command = NatsTopics.CommandTrafficControl,
             ip,
             allow,
-            limitMeters
+            limitMeters,
+            speedLimit
         };
         await _nats.PublishCoreAsync($"{NatsTopics.ControlPrefix}.{robotId}", payload, ct);
     }
 
     private static double DistanceToSegment(double px, double py, double ax, double ay, double bx, double by)
     {
+        // Point-to-segment distance for path fallback/orientation
         var vx = bx - ax;
         var vy = by - ay;
         var wx = px - ax;
@@ -282,11 +259,187 @@ public class TrafficControlWorker : BackgroundService
 
     private class RobotSnap
     {
+        // Latest telemetry data per robot IP
         public string Ip { get; set; } = "";
         public double X { get; set; }
         public double Y { get; set; }
         public string? State { get; set; }
         public int? MapId { get; set; }
         public DateTime Last { get; set; }
+    }
+
+    private class Occupancy
+    {
+        // Reservation metadata for nodes/edges
+        public string Ip { get; set; } = "";
+        public double Priority { get; set; }
+        public DateTime Updated { get; set; }
+    }
+
+    private double ComputePriority(string ip)
+    {
+        // Priority favors moving robots over idle/stopped, with deterministic tie-breaker
+        if (_latest.TryGetValue(ip, out var snap))
+        {
+            var baseScore = 1.0;
+            var st = (snap.State ?? "").ToLowerInvariant();
+            if (st.Contains("navigate") || st.Contains("move")) baseScore += 1.0;
+            if (st.Contains("idle") || st.Contains("stop")) baseScore -= 0.5;
+            var tie = Math.Abs(ip.GetHashCode() % 1000) / 1000.0;
+            return baseScore + tie;
+        }
+        return 1.0;
+    }
+
+    /// <summary>
+    /// Projects the requesting robot and nearby robots onto the path geometry and
+    /// computes the safe forward travel limit (meters) by enforcing a buffer
+    /// to the nearest robot ahead on the same line.
+    /// </summary>
+    private double ComputeAheadLimit(LineString? line, string ip, double segLen, double sx, double sy, double ex, double ey, dynamic? robotEntity, int mapId)
+    {
+        var limit = segLen;
+        if (line == null) return limit;
+        var lir = new LengthIndexedLine(line);
+        double rx0 = sx;
+        double ry0 = sy;
+        if (_latest.TryGetValue(ip, out var mySnap))
+        {
+            rx0 = mySnap.X;
+            ry0 = mySnap.Y;
+        }
+        else
+        {
+            rx0 = robotEntity?.Location != null ? robotEntity.Location.X : (robotEntity?.X ?? sx);
+            ry0 = robotEntity?.Location != null ? robotEntity.Location.Y : (robotEntity?.Y ?? sy);
+        }
+        var startIdx = lir.Project(new Coordinate(rx0, ry0));
+        var endIdx = lir.Project(new Coordinate(ex, ey));
+        var forwardDir = endIdx >= startIdx;
+        var near = _latest.Values
+            .Where(r => r.MapId == mapId && r.Ip != ip && (DateTime.UtcNow - r.Last) <= TimeSpan.FromSeconds(5))
+            .Select(r =>
+            {
+                var ridx = lir.Project(new Coordinate(r.X, r.Y));
+                var proj = lir.ExtractPoint(ridx);
+                var dx = r.X - proj.X;
+                var dy = r.Y - proj.Y;
+                var perpDist = Math.Sqrt(dx * dx + dy * dy);
+                var st = (r.State ?? "").ToLowerInvariant();
+                var stopped = st.Contains("stop") || st.Contains("idle");
+                var buffer = stopped ? 1.2 : 2.5;
+                return (ridx, ip2: r.Ip, perpDist, buffer);
+            })
+            .Where(t => t.perpDist <= 0.8 && ((forwardDir && t.ridx > startIdx && t.ridx <= endIdx) || (!forwardDir && t.ridx < startIdx && t.ridx >= endIdx)))
+            .OrderBy(t => Math.Abs(t.ridx - startIdx))
+            .FirstOrDefault();
+        if (near.ip2 != null)
+        {
+            var delta = forwardDir ? (near.ridx - startIdx) : (startIdx - near.ridx);
+            if (delta <= near.buffer) limit = 0.0;
+            else limit = Math.Max(0, Math.Min(segLen, delta - near.buffer));
+        }
+        return limit;
+    }
+
+    /// <summary>
+    /// Cleans up expired reservations, releases previous reservations for this robot,
+    /// checks for conflicts on end node and forward/reverse edges, and if allowed,
+    /// reserves resources and computes speed scaling based on allowed distance.
+    /// </summary>
+    private (bool allowed, double? limitMeters, double speed) DecideAndReserve(int mapId, int startNodeId, int endNodeId, string ip, double segLen, double aheadLimit, int deg)
+    {
+        bool allowed = true;
+        double? limitMeters = null;
+        double speedLimit = 0;
+        lock (_lock)
+        {
+            if (!_nodeOccupancyByMap.TryGetValue(mapId, out var nodeOcc))
+            {
+                nodeOcc = new Dictionary<int, Occupancy>();
+                _nodeOccupancyByMap[mapId] = nodeOcc;
+            }
+            if (!_edgeOccupancyByMap.TryGetValue(mapId, out var edgeOcc))
+            {
+                edgeOcc = new Dictionary<(int from, int to), Occupancy>();
+                _edgeOccupancyByMap[mapId] = edgeOcc;
+            }
+            var now = DateTime.UtcNow;
+            var leaseMs = 6000;
+            if (nodeOcc.Count > 0)
+            {
+                var expiredNodes = nodeOcc.Where(kv => (now - kv.Value.Updated).TotalMilliseconds > leaseMs).Select(kv => kv.Key).ToList();
+                foreach (var nid in expiredNodes) nodeOcc.Remove(nid);
+            }
+            if (edgeOcc.Count > 0)
+            {
+                var expiredEdges = edgeOcc.Where(kv => (now - kv.Value.Updated).TotalMilliseconds > leaseMs).Select(kv => kv.Key).ToList();
+                foreach (var eid in expiredEdges) edgeOcc.Remove(eid);
+            }
+            if (_robotLast.TryGetValue(ip, out var last))
+            {
+                if (last.nodeId.HasValue)
+                {
+                    if (nodeOcc.TryGetValue(last.nodeId.Value, out var occN) && occN.Ip == ip) nodeOcc.Remove(last.nodeId.Value);
+                }
+                if (last.edge.HasValue)
+                {
+                    if (edgeOcc.TryGetValue(last.edge.Value, out var occE) && occE.Ip == ip) edgeOcc.Remove(last.edge.Value);
+                }
+            }
+            var forward = (from: startNodeId, to: endNodeId);
+            var reverse = (from: endNodeId, to: startNodeId);
+            var myPriority = ComputePriority(ip);
+            if (deg > 2)
+            {
+                if (nodeOcc.TryGetValue(endNodeId, out var nocc) && nocc.Ip != ip) allowed = false;
+            }
+            if (allowed)
+            {
+                if (edgeOcc.TryGetValue(forward, out var eocc) && eocc.Ip != ip) allowed = false;
+            }
+            if (allowed)
+            {
+                if (edgeOcc.TryGetValue(reverse, out var reocc) && reocc.Ip != ip) allowed = false;
+            }
+            limitMeters = allowed ? Math.Min(segLen, aheadLimit) : 0;
+            if ((limitMeters ?? 0) <= 0) allowed = false;
+            if (allowed)
+            {
+                var occ = new Occupancy { Ip = ip, Priority = myPriority, Updated = now };
+                edgeOcc[forward] = occ;
+                if (deg > 2) nodeOcc[endNodeId] = occ;
+                _robotLast[ip] = (endNodeId, forward);
+                var ratio = Math.Max(0, Math.Min(1, (limitMeters ?? 0) / Math.Max(0.1, segLen)));
+                speedLimit = Math.Max(0.1, Math.Min(2.0, 0.5 + 1.5 * ratio));
+            }
+        }
+        return (allowed, limitMeters, speedLimit);
+    }
+
+    /// <summary>
+    /// Returns true if telemetry indicates the robot is stopped.
+    /// </summary>
+    private bool IsStopped(string ip)
+    {
+        if (_latest.TryGetValue(ip, out var snap))
+        {
+            var st = (snap.State ?? "").ToLowerInvariant();
+            return st.Contains("stop");
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Throttles reroute triggers per robot to avoid spamming; minimum interval applies.
+    /// </summary>
+    private bool ShouldReroute(string ip)
+    {
+        var now = DateTime.UtcNow;
+        if (_lastReroute.TryGetValue(ip, out var last))
+        {
+            if ((now - last) < TimeSpan.FromSeconds(5)) return false;
+        }
+        return true;
     }
 }

@@ -24,6 +24,7 @@ public class TelemetryService
     private List<(double x, double y)> _waypoints = new();
     private DateTime _lastMoveAt = DateTime.UtcNow;
     private double _speedMps = 2.0;
+    private double? _speedCapMps = null;
     private bool _moveAllowed = false;
     private double? _segmentLimitMeters = null;
     private double _segmentAdvancedMeters = 0;
@@ -132,14 +133,16 @@ public class TelemetryService
     {
         if (!_moveAllowed)
         {
-            if (_waypoints.Count > 0 && _routeIndex < _waypoints.Count)
+            if (_waypoints.Count == 0 || _routeIndex >= _waypoints.Count)
             {
-                var now2 = DateTime.UtcNow;
-                if (now2 - _lastSegmentRequestAt >= TimeSpan.FromSeconds(1))
-                {
-                    _lastSegmentRequestAt = now2;
-                    PublishNextSegmentAsync().ConfigureAwait(false);
-                }
+                _state = "idle";
+                return;
+            }
+            var now2 = DateTime.UtcNow;
+            if (now2 - _lastSegmentRequestAt >= TimeSpan.FromSeconds(1))
+            {
+                _lastSegmentRequestAt = now2;
+                PublishNextSegmentAsync().ConfigureAwait(false);
             }
             return;
         }
@@ -148,11 +151,13 @@ public class TelemetryService
         var dt = (now - _lastMoveAt).TotalSeconds;
         if (dt <= 0) return;
         _lastMoveAt = now;
+        var effectiveSpeed = _speedMps;
+        if (_speedCapMps.HasValue && _speedCapMps.Value > 0) effectiveSpeed = Math.Min(effectiveSpeed, _speedCapMps.Value);
         var target = _waypoints[_routeIndex];
         var dx = target.x - _x;
         var dy = target.y - _y;
         var dist = Math.Sqrt(dx * dx + dy * dy);
-        var step = _speedMps * dt;
+        var step = effectiveSpeed * dt;
         if (_segmentLimitMeters.HasValue)
         {
             var remaining = Math.Max(0, _segmentLimitMeters.Value - _segmentAdvancedMeters);
@@ -173,6 +178,11 @@ public class TelemetryService
             if (_routeIndex >= _waypoints.Count)
             {
                 _state = "idle";
+                _waypoints.Clear();
+                _routeIndex = 0;
+                _segmentLimitMeters = null;
+                _moveAllowed = false;
+                PublishStatusAsync().ConfigureAwait(false);
                 return;
             }
         }
@@ -193,11 +203,13 @@ public class TelemetryService
         }
     }
 
-    public void SetTrafficControl(bool allowed, double? limitMeters = null)
+    public void SetTrafficControl(bool allowed, double? limitMeters = null, double? speedLimit = null)
     {
         _moveAllowed = allowed;
         _segmentLimitMeters = limitMeters;
-        if (!allowed) _state = "stop";
+        if (speedLimit.HasValue && speedLimit.Value > 0) _speedCapMps = speedLimit.Value;
+        else _speedCapMps = null;
+        if (!allowed) _state = (_waypoints.Count == 0 || _routeIndex >= _waypoints.Count) ? "idle" : "stop";
         else if (_waypoints.Count > 0) _state = "moving";
     }
 

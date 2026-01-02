@@ -13,6 +13,7 @@ public class AppDbContext : DbContext
     public DbSet<Paths> Paths => Set<Paths>();
     public DbSet<Points> Points => Set<Points>();
     public DbSet<Qrs> Qrs => Set<Qrs>();
+    public DbSet<Destinations> Destinations => Set<Destinations>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

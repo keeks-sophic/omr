@@ -41,99 +41,66 @@ public class RoutePlannerWorker : BackgroundService
                 using var scope = _sp.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var robot = await db.Robots.AsNoTracking().FirstOrDefaultAsync(r => r.Ip == task.Ip, stoppingToken);
-                var startNodeId = await ResolveNearestEndpointNodeIdAsync(db, task.MapId, robot?.Location != null ? robot.Location.X : (robot?.X ?? 0), robot?.Location != null ? robot.Location.Y : (robot?.Y ?? 0), stoppingToken);
-                var destNodeId = await ResolveNearestEndpointNodeIdAsync(db, task.MapId, task.X, task.Y, stoppingToken);
+                var destRepo = scope.ServiceProvider.GetRequiredService<Backend.Data.DestinationRepository>();
+                var destination = robot != null ? await destRepo.GetByRobotIdAsync(robot.Id, stoppingToken) : null;
+                var startX0 = robot?.Location != null ? robot.Location.X : (robot?.X ?? 0);
+                var startY0 = robot?.Location != null ? robot.Location.Y : (robot?.Y ?? 0);
+                var destX0 = destination?.Location != null ? destination.Location.X : (destination?.X ?? task.X);
+                var destY0 = destination?.Location != null ? destination.Location.Y : (destination?.Y ?? task.Y);
+                var useMapId = destination?.MapId ?? task.MapId;
+                var startNodeId = await ResolveNearestEndpointNodeIdAsync(db, useMapId, startX0, startY0, stoppingToken);
+                var destNodeId = await ResolveNearestEndpointNodeIdAsync(db, useMapId, destX0, destY0, stoppingToken);
                 if (startNodeId == null || destNodeId == null)
                 {
                     _logger.LogWarning("Route plan failed: start or destination node not found");
                     continue;
                 }
                 var repo = scope.ServiceProvider.GetRequiredService<Backend.Data.MapRepository>();
-                var pgRoute = await repo.TryComputeRouteWithPgRoutingAsync(task.MapId, startNodeId.Value, destNodeId.Value, stoppingToken);
-                var (nodeIds, pathIds, totalLength) = pgRoute ?? ComputeRoute(db, task.MapId, startNodeId.Value, destNodeId.Value);
+                var pgRoute = await repo.TryComputeRouteWithPgRoutingAsync(useMapId, startNodeId.Value, destNodeId.Value, stoppingToken);
+                var (nodeIds, pathIds, totalLength) = pgRoute ?? ComputeRoute(db, useMapId, startNodeId.Value, destNodeId.Value);
                 var dbNodes = await db.Nodes.AsNoTracking().Where(n => nodeIds.Contains(n.Id)).Select(n => new { n.Id, n.X, n.Y, n.Location }).ToListAsync(stoppingToken);
                 var coords = new List<object>();
-                var startX = robot?.Location != null ? robot.Location.X : (robot?.X ?? 0);
-                var startY = robot?.Location != null ? robot.Location.Y : (robot?.Y ?? 0);
+                var startX = startX0;
+                var startY = startY0;
                 var pathEntities = await db.Paths.AsNoTracking().Where(p => pathIds.Contains(p.Id)).Select(p => new { p.Id, p.Location, p.StartNodeId, p.EndNodeId }).ToListAsync(stoppingToken);
                 var hasValidPath = pathEntities.Count > 0 && nodeIds.Length > 1;
-                var addedSamples = false;
+                var destX = destX0;
+                var destY = destY0;
                 if (hasValidPath)
                 {
-                    var firstPath = pathEntities.FirstOrDefault(p => p.StartNodeId == nodeIds[0] && p.EndNodeId == nodeIds[1]) ?? pathEntities.First();
-                    if (firstPath.Location is LineString line1)
+                    coords.Add(new { id = 0, x = startX, y = startY });
+                    for (var i = 0; i + 1 < nodeIds.Length; i++)
                     {
-                        var lir = new LengthIndexedLine(line1);
-                        var idx = lir.Project(new Coordinate(startX, startY));
-                        var c = lir.ExtractPoint(idx);
-                        startX = c.X;
-                        startY = c.Y;
-                        coords.Add(new { id = 0, x = startX, y = startY });
-                    }
-                }
-                var destX = task.X;
-                var destY = task.Y;
-                double sampleStep = 0.5;
-                for (var i = 0; i + 1 < nodeIds.Length; i++)
-                {
-                    var aId = nodeIds[i];
-                    var bId = nodeIds[i + 1];
-                    var segPath = pathEntities.FirstOrDefault(p => p.StartNodeId == aId && p.EndNodeId == bId)
-                        ?? pathEntities.FirstOrDefault(p => p.StartNodeId == bId && p.EndNodeId == aId);
-                    if (segPath?.Location is LineString line)
-                    {
-                        var lir = new LengthIndexedLine(line);
-                        double startIdx;
-                        double endIdx;
-                        if (i == 0)
+                        var aId = nodeIds[i];
+                        var bId = nodeIds[i + 1];
+                        var segPath = pathEntities.FirstOrDefault(p => p.StartNodeId == aId && p.EndNodeId == bId)
+                            ?? pathEntities.FirstOrDefault(p => p.StartNodeId == bId && p.EndNodeId == aId);
+                        if (segPath?.Location is LineString line)
                         {
-                            startIdx = lir.Project(new Coordinate(startX, startY));
-                        }
-                        else
-                        {
-                            var aNode = dbNodes.First(n => n.Id == aId);
-                            var ax = aNode.Location != null ? aNode.Location.X : aNode.X;
-                            var ay = aNode.Location != null ? aNode.Location.Y : aNode.Y;
-                            startIdx = lir.Project(new Coordinate(ax, ay));
-                        }
-                        if (i == nodeIds.Length - 2)
-                        {
-                            endIdx = lir.Project(new Coordinate(destX, destY));
-                        }
-                        else
-                        {
-                            var bNode = dbNodes.First(n => n.Id == bId);
-                            var bx = bNode.Location != null ? bNode.Location.X : bNode.X;
-                            var by = bNode.Location != null ? bNode.Location.Y : bNode.Y;
-                            endIdx = lir.Project(new Coordinate(bx, by));
-                        }
-                        var reverse = endIdx < startIdx;
-                        var length = Math.Abs(endIdx - startIdx);
-                        var steps = Math.Max(1, (int)Math.Floor(length / sampleStep));
-                        for (var s = 1; s <= steps; s++)
-                        {
-                            var dist = reverse ? -Math.Min(length, s * sampleStep) : Math.Min(length, s * sampleStep);
-                            var idx = startIdx + dist;
-                            var c = lir.ExtractPoint(idx);
-                            coords.Add(new { id = bId, x = c.X, y = c.Y });
-                            addedSamples = true;
+                            var lir = new LengthIndexedLine(line);
+                            var startCoord = i == 0 ? new Coordinate(startX, startY) : GetNodeCoord(dbNodes, aId);
+                            var endCoord = i == nodeIds.Length - 2 ? new Coordinate(destX, destY) : GetNodeCoord(dbNodes, bId);
+                            var startIdx = lir.Project(startCoord);
+                            var endIdx = lir.Project(endCoord);
+                            if (Math.Abs(endIdx - startIdx) < 1e-9) continue;
+                            LineString sub;
+                            if (endIdx > startIdx)
+                            {
+                                var g = lir.ExtractLine(startIdx, endIdx);
+                                sub = g as LineString ?? new LineString(new[] { lir.ExtractPoint(startIdx), lir.ExtractPoint(endIdx) }) { SRID = 0 };
+                            }
+                            else
+                            {
+                                var g = lir.ExtractLine(endIdx, startIdx);
+                                var ls = g as LineString ?? new LineString(new[] { lir.ExtractPoint(endIdx), lir.ExtractPoint(startIdx) }) { SRID = 0 };
+                                sub = new LineString(ls.Coordinates.Reverse().ToArray()) { SRID = 0 };
+                            }
+                            foreach (var c in sub.Coordinates)
+                            {
+                                coords.Add(new { id = bId, x = c.X, y = c.Y });
+                            }
                         }
                     }
-                }
-                if (hasValidPath)
-                {
-                    var lastPath = pathEntities.FirstOrDefault(p => p.StartNodeId == nodeIds[^2] && p.EndNodeId == nodeIds[^1]) ?? pathEntities.Last();
-                    if (lastPath.Location is LineString line2)
-                    {
-                        var lir2 = new LengthIndexedLine(line2);
-                        var idx2 = lir2.Project(new Coordinate(destX, destY));
-                        var c2 = lir2.ExtractPoint(idx2);
-                        destX = c2.X;
-                        destY = c2.Y;
-                    }
-                }
-                if (addedSamples)
-                {
                     coords.Add(new { id = -1, x = destX, y = destY });
                 }
                 else
@@ -146,7 +113,7 @@ public class RoutePlannerWorker : BackgroundService
                     ip = task.Ip,
                     route = new
                     {
-                        mapId = task.MapId,
+                        mapId = useMapId,
                         nodes = coords.ToArray(),
                         pathIds,
                         nodeIds,
@@ -334,5 +301,13 @@ public class RoutePlannerWorker : BackgroundService
             }
         }
         return sum;
+    }
+
+    private static Coordinate GetNodeCoord(IEnumerable<dynamic> dbNodes, int id)
+    {
+        var n = dbNodes.First(x => x.Id == id);
+        var x = n.Location != null ? n.Location.X : n.X;
+        var y = n.Location != null ? n.Location.Y : n.Y;
+        return new Coordinate(x, y);
     }
 }
