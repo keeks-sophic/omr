@@ -9,6 +9,7 @@ using BackendV2.Api.Contracts.Traffic;
 using BackendV2.Api.Infrastructure.Messaging;
 using BackendV2.Api.Topics;
 using NATS.Client;
+using NATS.Client.JetStream;
 using BackendV2.Api.Contracts.Commands;
 
 namespace BackendV2.Api.Service.Tasks;
