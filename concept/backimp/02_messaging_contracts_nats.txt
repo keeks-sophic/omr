@@ -1,0 +1,61 @@
+1. What should be implement
+- Define NATS JetStream subjects and payload contracts for robot↔backend
+- Durable streams for commands/tasks/routes/config; droppable for traffic.schedule and some telemetry
+- Command correlation and ack handling
+
+2. What have been implement
+- Contracts: Commands, Tasks, Routes, State, Presence, Telemetry, Logs, TrafficSchedule, NatsEnvelope
+- Topic naming helpers: NatsTopics
+- Publisher: NatsPublisherStub uses real NATS JetStream (js.Publish) with minimal retries and optional ops alerts on failure
+- Consumers: NatsConsumersWorker subscribes core NATS subjects (presence, cmd_ack, state, telemetry, task, route, logs) — registered and active
+- JetStream stream setup: NatsJetStreamSetupWorker creates streams for cmds/state/telemetry and droppable schedule
+- Ack correlation: command endpoints return correlationId; cmd_ack audits persisted with correlationId/status
+
+3. How does it implement
+- Services call NatsPublisherStub to publish TaskAssign/RouteAssign/TaskControl/TrafficSchedule and cmd/cfg via JetStream
+- Subjects are constructed via NatsTopics conventions; payloads wrapped in NatsEnvelope with correlationId
+- JetStream publish calls (js.Publish) are used; endpoints audit publish with correlationId and persist cmd_ack audits on receipt
+- ConsumersWorker provides core NATS SubscribeAsync handlers for ingestion; added as hosted service
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend triggers backend actions via REST
+- Backend publishes to robot subjects via JetStream (producer implemented)
+- Robot responds via cmd_ack and feedback streams (consumer active; cmd_ack audited with correlationId/status)
+- DB persists task/route/config and app state; no stream storage implemented
+
+5. Does it communicate with db, if yes what is the data model used
+- Indirect: services write to Task/Route tables; no JetStream persistence
+- Replay tables and TimescaleDB not implemented
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended endpoints:
+- robot.{robotId}.cmd.*
+- robot.{robotId}.task.assign|control
+- robot.{robotId}.route.assign|update|progress
+- robot.{robotId}.cfg.motion_limits|runtime_mode|features
+- robot.{robotId}.traffic.schedule
+- presence/state/telemetry/log subjects
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- Not directly; frontend uses REST/SignalR; messaging is backend↔robot
+
+8. What have not be implemented
+- JetStream durable consumer setup: Partial (cmd_ack durable push subscription)
+- Retry/dead-letter strategy on NAKs with automated republish: Implemented (max 3 retries, DLQ to backend.deadletter)
+- Timescale writes for telemetry/state: Not implemented (telemetry persisted to replay.robot_events)
+ 
+9. Requirements not implemented (per backendconcept)
+- Durable publish semantics with ACK handling for commands/tasks/routes/config: Partial (correlationId returned, cmd_ack audited + retry/DLQ)
+- Consumer subscriptions with durable JetStream (presence/state/telemetry/task/route/logs): Partial (cmd_ack durable; others core NATS)
+- Closed-loop feedback integration driving traffic and replanning: Partial (motion/radar telemetry triggers schedule summary emission)
+- Event logging and replay stream wiring: Partial (robot events logged; replay endpoints exist)
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream): none (messaging is backend↔robot)
+Matches fbstream: Yes
+NATS/JetStream (from rbnats):
+- Backend -> Robot (Durable): robot.{robotId}.cmd.grip|hoist|telescope|cam_toggle|rotate|mode; robot.{robotId}.task.assign|control; robot.{robotId}.route.assign|update; robot.{robotId}.cfg.motion_limits|runtime_mode|features
+- Backend -> Robot (Droppable): robot.{robotId}.traffic.schedule
+- Robot -> Backend: robot.{robotId}.presence.hello|heartbeat; robot.{robotId}.cmd_ack; robot.{robotId}.state.snapshot|event; robot.{robotId}.task.event; robot.{robotId}.route.progress; robot.{robotId}.telemetry.battery|health|pose|motion|radar|qr; robot.{robotId}.log.event
+Matches rbnats: Yes (subjects defined), Publish: Yes (JetStream), Subscribe: Partial (core NATS, inactive)
+Matches rbnats: Yes (subjects defined), Publish: Yes (JetStream), Subscribe: Partial (core NATS, active)

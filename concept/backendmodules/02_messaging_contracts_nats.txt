@@ -1,0 +1,77 @@
+========================================================
+MODULE 02: MESSAGING & CONTRACTS (NATS JETSTREAM)
+========================================================
+
+Goal:
+- Define and enforce backend <-> robot communication subjects and schemas
+- Provide reliable command/task/route/config delivery and telemetry ingestion
+
+Primary Inputs:
+- Robot -> Backend NATS subjects:
+  - robot.{robotId}.presence.hello
+  - robot.{robotId}.presence.heartbeat
+  - robot.{robotId}.cmd_ack
+  - robot.{robotId}.state.snapshot
+  - robot.{robotId}.state.event
+  - robot.{robotId}.task.event
+  - robot.{robotId}.route.progress
+  - robot.{robotId}.telemetry.battery
+  - robot.{robotId}.telemetry.health
+  - robot.{robotId}.telemetry.pose
+  - robot.{robotId}.telemetry.motion
+  - robot.{robotId}.telemetry.radar
+  - robot.{robotId}.telemetry.qr
+  - robot.{robotId}.log.event
+  - optional debug RPC (NATS core):
+    - robot.{robotId}.rpc.ping
+    - robot.{robotId}.rpc.get_state
+    - robot.{robotId}.rpc.get_versions
+
+Primary Outputs:
+- Backend -> Robot NATS subjects:
+  - robot.{robotId}.cmd.grip
+  - robot.{robotId}.cmd.hoist
+  - robot.{robotId}.cmd.telescope
+  - robot.{robotId}.cmd.cam_toggle
+  - robot.{robotId}.cmd.rotate
+  - robot.{robotId}.cmd.mode
+  - robot.{robotId}.task.assign
+  - robot.{robotId}.task.control
+  - robot.{robotId}.route.assign
+  - robot.{robotId}.route.update
+  - robot.{robotId}.cfg.motion_limits
+  - robot.{robotId}.cfg.runtime_mode
+  - robot.{robotId}.cfg.features
+  - robot.{robotId}.traffic.schedule (droppable)
+
+Backend-internal NATS subjects (tools/services):
+- backend.replay.start / backend.replay.stop / backend.replay.{replaySessionId}.event / backend.replay.{replaySessionId}.status
+- backend.sim.start / backend.sim.stop / backend.sim.{simSessionId}.status
+
+Key Contracts (backenddata.txt):
+- NatsEnvelope<TPayload>
+- PresenceHello, RobotStateDto, Telemetry DTOs, TaskAssignment, RouteAssign, TrafficSchedule, CommandAck
+
+Identity:
+- robotId is a stable string identifier (recommended: serial number).
+- IP may be included in payloads for metadata only and must not be used as identity.
+
+JetStream Policies (concept):
+- Durable work streams:
+  - commands/tasks/routes/config with explicit ACK and max delivery
+  - dead-letter strategy for repeated failures
+- Droppable control stream:
+  - traffic.schedule latest-wins (short retention)
+- Telemetry:
+  - mix durable (battery/health) and droppable (pose/motion)
+
+Correlation Strategy:
+- Backend creates correlationId for every durable outbound message.
+- Robot replies via robot.{robotId}.cmd_ack carrying correlationId and status ACK/NAK.
+
+Failure Handling:
+- If cmd_ack is NAK:
+  - Task Manager or Config Service decides retry/cancel
+- If robot offline:
+  - keep commands in durable stream
+  - Task Manager pauses/cancels based on policy and TTL

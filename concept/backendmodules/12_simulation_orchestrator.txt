@@ -1,0 +1,36 @@
+========================================================
+MODULE 12: SIMULATION ORCHESTRATOR (PRODUCTION-LIKE)
+========================================================
+
+Goal:
+- Create simulation sessions that behave like production:
+  - same task/route/traffic pipeline
+  - same DTOs and replay tooling
+
+Primary Inputs:
+- REST:
+  - /api/v1/sim/sessions (create/start/stop/pause/resume)
+- Map snapshot and mission library
+- Backend-internal NATS (tools/services, rbnats.txt):
+  - backend.sim.start / backend.sim.stop / backend.sim.{simSessionId}.status
+
+Primary Outputs:
+- Postgres:
+  - sim.sim_sessions metadata
+- SignalR:
+  - sim.session.status / sim.event / sim.metrics.updated
+- Internal injection:
+  - simulated RobotStateDto and telemetry into State Ingestion pipeline
+
+Simulation Flow:
+1) Create SimSession with N simulated robots (capabilities + flags)
+2) Register robots in core.robots/core.robot_sessions with runtimeMode=SIM
+3) Run tasks/missions through Task Manager and Route Planner
+4) Traffic Control computes schedules the same way
+5) Simulated robot driver:
+  - consumes schedules
+  - emits state/telemetry like real robots into ingestion pipeline
+
+Isolation:
+- Sim robots and live robots are separated by runtimeMode and authorization policies
+- Replay sessions must never publish to live robot subjects

@@ -1,0 +1,44 @@
+========================================================
+MODULE 13: OBSERVABILITY & OPS (INCLUDING REPLAY)
+========================================================
+
+Goal:
+- Provide operational visibility and incident review:
+  - audit logs, JetStream health, offline detection
+  - replay sessions using TimescaleDB data
+
+Primary Inputs:
+- Ingestion pipeline outputs (replay.robot_events inserts)
+- JetStream consumer health data (backend internal)
+- REST requests for ops and replay
+- Backend-internal NATS (tools/services, rbnats.txt):
+  - backend.replay.start / backend.replay.stop / backend.replay.{replaySessionId}.event / backend.replay.{replaySessionId}.status
+
+Primary Outputs:
+- REST:
+  - /api/v1/ops/health
+  - /api/v1/ops/jetstream
+  - /api/v1/ops/alerts
+  - /api/v1/ops/audit
+  - /api/v1/replay/sessions (create/start/stop/seek)
+- SignalR:
+  - ops.alert.raised/cleared
+  - ops.jetstream.updated
+  - replay.session.status
+  - replay.event
+
+Replay Data Model (dbmodel.txt):
+- replay.replay_sessions (metadata)
+- Timescale hypertable replay.robot_events(ts, robot_id, subject, payload)
+- Optional telemetry hypertables for fast charting
+
+Replay Flow:
+1) Create replay session (robotId + time window)
+   - persist replay.replay_sessions
+2) Query replay.robot_events by robotId and time bucket
+3) Stream results to frontend via replay.event topic
+4) Support seek by re-querying and continuing stream
+
+Incident Rules (concept):
+- Robot offline: lastSeen exceeded -> incident raised
+- Repeated NAKs or JetStream lag -> ops alert raised

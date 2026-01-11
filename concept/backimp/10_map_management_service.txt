@@ -1,0 +1,72 @@
+1. What should be implement
+- Versioned map CRUD and validation; publish active version
+- Manage nodes, paths, points, QR anchors, maintenance toggles
+- Collaborate via SignalR map events
+
+2. What have been implement
+- MapsController with CRUD endpoints
+- MapManagementService with operations and mapping helpers
+- DTOs: MapVersionDto, NodeDto, PathDto, MapPointDto, QrAnchorDto
+- EF Core entities and configurations for PostGIS geometry
+
+3. How does it implement
+- Uses AppDbContext to read/write map entities
+- Applies business rules in service and maps entities to DTOs
+- Emits map topics (conceptual) for editor updates
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend edits maps via REST; backend persists to DB and emits map events
+- Robot uses published map versions indirectly via route planning outputs
+- DB stores map graph across map.* tables with geometry
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: map.map_versions, map.nodes, map.paths, map.points, map.qr_anchors
+- Uses NetTopologySuite for geometry types via EF Core
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- No direct NATS; effects propagate via routes/tasks
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/maps/*
+- SignalR: map.version.created|published, map.entity.updated
+
+8. What have not be implemented
+- Full validation suite (connectivity, one-way constraints, QR proximity)
+- Editor collaboration events and conflict resolution
+ 
+9. Requirements not implemented (per backendconcept)
+- Maintenance toggles and rest path management semantics fully aligned to concept
+- Spatial indexes and nearest path/node lookup endpoints
+- Validation endpoint producing detailed issues and impact previews
+- QR anchor constraints (distanceAlongPath, proximity to path) checks
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- Map versions:
+  - GET  /api/v1/maps — Implemented: No
+  - POST /api/v1/maps — Implemented: Yes
+  - GET  /api/v1/maps/{mapVersionId} — Implemented: No
+  - POST /api/v1/maps/{mapVersionId}/clone — Implemented: Yes
+  - POST /api/v1/maps/{mapVersionId}/publish — Implemented: Yes
+- Graph entities:
+  - GET  /api/v1/maps/{mapVersionId}/nodes — Implemented: No
+  - POST /api/v1/maps/{mapVersionId}/nodes — Implemented: Yes
+  - PUT  /api/v1/maps/{mapVersionId}/nodes/{nodeId} — Implemented: Yes
+  - POST /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance/on|off — Implemented: No (uses PUT {nodeId}/maintenance with body)
+  - GET  /api/v1/maps/{mapVersionId}/paths — Implemented: No
+  - POST /api/v1/maps/{mapVersionId}/paths — Implemented: Yes
+  - PUT  /api/v1/maps/{mapVersionId}/paths/{pathId} — Implemented: Yes
+  - POST /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance/on|off — Implemented: No (uses PUT {pathId}/maintenance with body)
+  - POST /api/v1/maps/{mapVersionId}/paths/{pathId}/rest/on|off — Implemented: No (uses PUT {pathId}/rest with capacity)
+  - GET  /api/v1/maps/{mapVersionId}/points — Implemented: No
+  - POST /api/v1/maps/{mapVersionId}/points — Implemented: Yes
+  - PUT  /api/v1/maps/{mapVersionId}/points/{pointId} — Implemented: Yes
+  - GET  /api/v1/maps/{mapVersionId}/qrs — Implemented: No
+  - POST /api/v1/maps/{mapVersionId}/qrs — Implemented: Yes
+  - PUT  /api/v1/maps/{mapVersionId}/qrs/{qrId} — Implemented: Yes
+- Validation:
+  - POST /api/v1/maps/{mapVersionId}/validate — Implemented: No
+- SignalR: map.version.created|published, map.entity.updated — Implemented: Partial
+Matches fbstream: No (differences and missing GETs)
+NATS/JetStream (from rbnats): none direct
+Matches rbnats: Yes (not applicable)

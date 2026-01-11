@@ -1,0 +1,43 @@
+1. What should be implement
+- Unified telemetry publishing for presence, state, task/route and sensor data
+- Registration of publishers at startup for discoverability
+- Periodic emission for battery and health metrics
+
+2. What have been implement
+- TelemetryService.RegisterPublishers publishes all robot→backend subjects once to register intent
+- TelemetryService provides Publish* methods: Ack, TaskEvent, RouteProgress, LogEvent, Radar, Qr, Motion, Pose, Battery, Health
+- PresencePublisher.PublishHello emits presence.hello; HeartbeatWorker.SendHeartbeat emits presence.heartbeat
+- StateSnapshotWorker publishes state.snapshot and state.event with changed fields and mapped DTO
+- PeriodicScheduler drives battery and health telemetry at configured intervals
+
+3. How does it implement
+- NatsSubjects defines subject families; TelemetryService wraps NatsService.Publish per family
+- Workers invoke Publish* based on tick cadence or events
+- Snapshot events include changed fields array to minimize consumer work
+
+4. How the flow works between frontend, backend, robot, db
+- Backend consumes telemetry to update UI or trigger alerts
+- No direct frontend connection from robot; no database writes on robot side
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Publish: presence.hello/heartbeat, state.snapshot/event, task.event, route.progress, telemetry.battery/health/pose/motion/radar/qr, log.event
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Telemetry payload content and structure (current implementation registers/publishes subjects)
+- Rate limiting and batching strategies
+- Error handling and retry on publish failures
+
+9. Requirements not implemented (per robotconcept)
+- Standardized telemetry envelope with actor/role/timestamp/action/target/outcome
+- Durable telemetry pipelines and replay
+- Health and battery value sourcing beyond stubs
+
+10. Endpoints and compliance
+- NATS: presence.*, state.*, task.event, route.progress, telemetry.*, log.event
+- Matches rbnats: Yes (subject naming)

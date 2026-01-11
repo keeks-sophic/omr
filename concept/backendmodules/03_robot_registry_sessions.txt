@@ -1,0 +1,44 @@
+========================================================
+MODULE 03: ROBOT REGISTRY & SESSIONS
+========================================================
+
+Goal:
+- Track robot connectivity, liveness, runtime mode, capabilities, and feature flags
+- Provide a consistent robot session model for other services
+
+Primary Inputs:
+- NATS:
+  - robot.{robotId}.presence.hello (PresenceHello)
+  - robot.{robotId}.presence.heartbeat (PresenceHeartbeat)
+- REST:
+  - GET /api/v1/robots, GET /api/v1/robots/{robotId}, GET /api/v1/robots/{robotId}/session
+
+Primary Outputs:
+- Postgres:
+  - core.robots, core.robot_sessions updates
+- SignalR:
+  - robot.session.updated
+  - robot.presence.hello / robot.presence.heartbeat (optional echo for UI)
+- Optional: initial config publish on first hello
+
+Key Models:
+- Robot, RobotSession
+- RobotCapabilitiesDto, RobotFeatureFlagsDto
+
+Flow: presence.hello
+1) Upsert core.robots (if new robotId)
+   - robotId is the stable identity key; do not use IP for identity
+2) Upsert core.robot_sessions:
+  - connected=true, lastSeen=now
+  - runtimeMode, softwareVersion
+  - capabilities, featureFlags
+3) Emit SignalR robot.session.updated to robots group and robot:{robotId}
+4) Optionally trigger Configuration Service to publish cfg.* to robot
+
+Flow: heartbeat
+1) Update lastSeen and connected=true
+2) If lastSeen gap indicates reconnect, emit robot.session.updated
+
+Offline Detection:
+- Background check compares now - lastSeen > threshold -> connected=false
+- Emit SignalR robot.session.updated for UI

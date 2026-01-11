@@ -1,0 +1,44 @@
+1. What should be implement
+- Canonical contracts for commands, tasks, routes, telemetry, presence, logs
+- Subject naming conventions and grouping for robot-specific streams
+- Separation of backend→robot and robot→backend subjects
+
+2. What have been implement
+- Contracts under Contracts/*: Commands (Grip/Hoist/Telescope/CamToggle/Rotate/Mode), Tasks (Assignment/Control/Event), Routes (Assign/Update/Progress), Telemetry (Battery/Health/Pose/Motion/Radar/Qr), Presence (Hello/Heartbeat), Logs (Event), DTOs for state and capabilities
+- NatsSubjects centralizes subject naming for cmd/task/route/cfg/traffic/presence/state/telemetry/log/rpc
+- TelemetryService and PresencePublisher use NatsSubjects to publish
+- CommandListenerService registers subscriptions based on NatsSubjects
+
+3. How does it implement
+- NatsSubjects provides Robot(robotId, suffix) and typed helpers to derive per-robot subjects
+- RobotWorker registers publishers and subscriptions upon startup
+- Services and workers publish to subjects via NatsService.Publish and subscribe via NatsService.Subscribe
+
+4. How the flow works between frontend, backend, robot, db
+- Backend emits commands/tasks/routes/config/traffic to robot subjects; robot consumes
+- Robot publishes ack/state/route progress/telemetry/logs to backend; backend consumes
+- No frontend/websocket on robot side; no database writes
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Backend→Robot: cmd.grip/hoist/telescope/cam_toggle/rotate/mode, task.assign/control, route.assign/update, cfg.motion_limits/runtime_mode/features, traffic.schedule, rpc.ping/get_state/get_versions
+- Robot→Backend: presence.hello/heartbeat, cmd_ack, state.snapshot/event, task.event, route.progress, telemetry.battery/health/pose/motion/radar/qr, log.event
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Contract payload serialization and validation in publishers/subscribers
+- Versioning and schema evolution for contracts
+- RPC request/response plumbing beyond subject registration
+
+9. Requirements not implemented (per robotconcept)
+- Durable consumers and delivery guarantees per subject
+- Unified envelope with correlation and trace IDs across all messages
+- Backpressure and rate limiting policy
+
+10. Endpoints and compliance
+- Subject families defined under NatsSubjects.*
+- Matches rbnats: Yes (subject families and per-robot suffixing)

@@ -1,0 +1,30 @@
+========================================================
+MODULE 06: MOTION CONTROL (LINEAR VELOCITY ONLY)
+========================================================
+
+Goal:
+- Convert targetLinearVel into safe actuator commands to the drive system
+- Enforce acceleration/deceleration limits and safety stops
+
+Primary Inputs:
+- targetLinearVel from Traffic Adapter
+- Motion limits from cfg.motion_limits
+- Safety signals from Hardware Interface (radar/estop)
+
+Primary Outputs:
+- Drive motor setpoints (forward/backward)
+- state.event updates:
+  - currentLinearVel, motionState
+
+Core Logic:
+1) Clamp targetVel by maxDriveSpeed
+2) Apply acceleration limiting:
+   - currentVel approaches targetVel with maxAcceleration/maxDeceleration
+3) Safety overrides:
+   - obstacleDetected or estopActive -> targetVel=0 and hard stop
+4) Report currentVel to StateStore for publishing
+
+Cross-check with backendmodules:
+- backendmodules/06_route_planner.txt uses motion limits for ETA.
+- backendmodules/07_traffic_control_service.txt depends on robot feedback currentLinearVel.
+

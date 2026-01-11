@@ -1,0 +1,135 @@
+API & WebSocket Endpoints — Implemented
+- POST /api/v1/auth/login
+- GET /api/v1/auth/me
+- Hub /hubs/realtime
+- GET /api/v1/robots
+- GET /api/v1/robots/{robotId}
+- GET /api/v1/robots/{robotId}/session
+- POST /api/v1/tasks
+- POST /api/v1/tasks/{taskId}/pause
+- POST /api/v1/tasks/{taskId}/resume
+- POST /api/v1/tasks/{taskId}/cancel
+- POST /api/v1/routes/plan
+- GET /api/v1/traffic/conflicts
+- POST /api/v1/traffic/holds
+- DELETE /api/v1/traffic/holds/{holdId}
+- PUT /api/v1/robots/{robotId}/config/motion-limits
+- PUT /api/v1/robots/{robotId}/config/runtime-mode
+- PUT /api/v1/robots/{robotId}/config/feature-flags
+- POST /api/v1/missions
+- PUT /api/v1/missions/{missionId}
+- POST /api/v1/missions/{missionId}/validate
+- POST /api/v1/teach/sessions
+- POST /api/v1/teach/sessions/{teachSessionId}/start
+- POST /api/v1/teach/sessions/{teachSessionId}/stop
+- POST /api/v1/teach/sessions/{teachSessionId}/capture-step
+- POST /api/v1/teach/sessions/{teachSessionId}/save-mission
+- POST /api/v1/maps
+- POST /api/v1/maps/{mapVersionId}/clone
+- POST /api/v1/maps/{mapVersionId}/publish
+- POST /api/v1/maps/{mapVersionId}/nodes
+- PUT /api/v1/maps/{mapVersionId}/nodes/{nodeId}
+- PUT /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance
+- POST /api/v1/maps/{mapVersionId}/paths
+- PUT /api/v1/maps/{mapVersionId}/paths/{pathId}
+- PUT /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance
+- PUT /api/v1/maps/{mapVersionId}/paths/{pathId}/rest
+- POST /api/v1/maps/{mapVersionId}/points
+- PUT /api/v1/maps/{mapVersionId}/points/{pointId}
+- POST /api/v1/maps/{mapVersionId}/qrs
+- PUT /api/v1/maps/{mapVersionId}/qrs/{qrId}
+- POST /api/v1/sim/sessions
+- POST /api/v1/sim/sessions/{simSessionId}/start
+- POST /api/v1/sim/sessions/{simSessionId}/stop
+- POST /api/v1/sim/sessions/{simSessionId}/pause
+- POST /api/v1/sim/sessions/{simSessionId}/resume
+- POST /api/v1/replay/sessions
+- POST /api/v1/replay/sessions/{replaySessionId}/start
+- POST /api/v1/replay/sessions/{replaySessionId}/stop
+- POST /api/v1/replay/sessions/{replaySessionId}/seek
+- GET /api/v1/ops/health
+- GET /api/v1/ops/jetstream
+- GET /api/v1/ops/alerts
+- GET /api/v1/ops/audit
+
+API & WebSocket Endpoints — Not Implemented
+- POST /api/v1/auth/logout
+- GET /api/v1/fleet/incidents
+- POST /api/v1/fleet/incidents/{incidentId}/ack
+- GET /api/v1/robots/{robotId}/capabilities
+- GET /api/v1/robots/{robotId}/feature-flags
+- GET /api/v1/robots/{robotId}/state/history
+- GET /api/v1/robots/{robotId}/telemetry
+- GET /api/v1/robots/{robotId}/logs
+- POST /api/v1/robots/{robotId}/commands/mode
+- POST /api/v1/robots/{robotId}/commands/grip
+- POST /api/v1/robots/{robotId}/commands/hoist
+- POST /api/v1/robots/{robotId}/commands/telescope
+- POST /api/v1/robots/{robotId}/commands/cam-toggle
+- POST /api/v1/robots/{robotId}/commands/rotate
+- GET /api/v1/tasks
+- GET /api/v1/tasks/{taskId}
+- GET /api/v1/routes/{routeId}
+- GET /api/v1/routes/{routeId}/eta
+- GET /api/v1/traffic/robots/{robotId}/schedule
+- GET /api/v1/robots/{robotId}/config
+- GET /api/v1/missions
+- GET /api/v1/missions/{missionId}
+- POST /api/v1/missions/{missionId}/clone
+- GET /api/v1/teach/sessions/{teachSessionId}
+- GET /api/v1/maps
+- GET /api/v1/maps/{mapVersionId}
+- GET /api/v1/maps/{mapVersionId}/nodes
+- POST /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance/on
+- POST /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance/off
+- GET /api/v1/maps/{mapVersionId}/paths
+- POST /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance/on
+- POST /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance/off
+- POST /api/v1/maps/{mapVersionId}/paths/{pathId}/rest/on
+- POST /api/v1/maps/{mapVersionId}/paths/{pathId}/rest/off
+- GET /api/v1/maps/{mapVersionId}/points
+- GET /api/v1/maps/{mapVersionId}/qrs
+- POST /api/v1/maps/{mapVersionId}/validate
+- GET /api/v1/sim/sessions/{simSessionId}
+- GET /api/v1/sim/sessions/{simSessionId}/metrics
+- GET /api/v1/replay/sessions/{replaySessionId}
+
+NATS/JetStream Subjects — Implemented
+- None (subjects defined, no real JetStream client or consumers)
+
+NATS/JetStream Subjects — Not Implemented
+- robot.{robotId}.cmd.grip
+- robot.{robotId}.cmd.hoist
+- robot.{robotId}.cmd.telescope
+- robot.{robotId}.cmd.cam_toggle
+- robot.{robotId}.cmd.rotate
+- robot.{robotId}.cmd.mode
+- robot.{robotId}.task.assign
+- robot.{robotId}.task.control
+- robot.{robotId}.route.assign
+- robot.{robotId}.route.update
+- robot.{robotId}.cfg.motion_limits
+- robot.{robotId}.cfg.runtime_mode
+- robot.{robotId}.cfg.features
+- robot.{robotId}.traffic.schedule
+- robot.{robotId}.presence.hello
+- robot.{robotId}.presence.heartbeat
+- robot.{robotId}.cmd_ack
+- robot.{robotId}.state.snapshot
+- robot.{robotId}.state.event
+- robot.{robotId}.task.event
+- robot.{robotId}.route.progress
+- robot.{robotId}.telemetry.battery
+- robot.{robotId}.telemetry.health
+- robot.{robotId}.telemetry.pose
+- robot.{robotId}.telemetry.motion
+- robot.{robotId}.telemetry.radar
+- robot.{robotId}.telemetry.qr
+- robot.{robotId}.log.event
+- backend.replay.start
+- backend.replay.stop
+- backend.replay.{replaySessionId}.event
+- backend.replay.{replaySessionId}.status
+- backend.sim.start
+- backend.sim.stop
+- backend.sim.{simSessionId}.status

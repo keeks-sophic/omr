@@ -1,0 +1,63 @@
+1. What should be implement
+- Ops visibility: health, JetStream status, alerts
+- Replay sessions streaming events from TimescaleDB
+- SignalR topics for ops and replay
+
+2. What have been implement
+- OpsController and OpsService with health endpoints (placeholders)
+- ReplayController and ReplayService with session create/seek scaffolding
+- ReplaySessionRepository for persistence
+- SignalR topics defined for ops/replay
+
+3. How does it implement
+- OpsService returns static JetStream health (no real client)
+- ReplayService persists session metadata and would query events (not wired to Timescale)
+- Controllers expose REST endpoints per ApiRoutes
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend calls ops and replay endpoints and subscribes to corresponding SignalR topics
+- Backend should read TimescaleDB events and stream to frontend
+- Robot not directly involved; sources are ingestion outputs
+- DB holds replay_sessions and should hold robot_events hypertable
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: replay.replay_sessions
+- Intended: Timescale hypertable replay.robot_events for event stream
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Backend-internal subjects for replay control: backend.replay.start|stop|{sessionId}.event|{sessionId}.status
+- Not implemented producers/consumers
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/ops/*, /api/v1/replay/sessions/*
+- SignalR: ops.alert.*, ops.jetstream.updated, replay.session.status, replay.event
+
+8. What have not be implemented
+- Real JetStream health client and lag reporting
+- TimescaleDB queries and streaming pipeline for replay events
+- Ops alerts based on ingestion/consumer metrics
+ 
+9. Requirements not implemented (per backendconcept)
+- JetStream event log retention and lag/consumer metrics collection
+- Append-only event log for all robot/backends messages and long-term archive
+- Replay controls and filtered playback streaming to dedicated subjects
+- Strict isolation preventing replay-to-live publication
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- Ops:
+  - GET /api/v1/ops/health — Implemented: Yes (placeholder)
+  - GET /api/v1/ops/jetstream — Implemented: Yes (placeholder)
+  - GET /api/v1/ops/alerts — Implemented: Yes (placeholder)
+  - GET /api/v1/ops/audit — Implemented: Yes
+- Replay:
+  - POST /api/v1/replay/sessions — Implemented: Yes
+  - POST /api/v1/replay/sessions/{replaySessionId}/start — Implemented: Yes
+  - POST /api/v1/replay/sessions/{replaySessionId}/stop — Implemented: Yes
+  - POST /api/v1/replay/sessions/{replaySessionId}/seek — Implemented: Yes
+  - GET  /api/v1/replay/sessions/{replaySessionId} — Implemented: No
+- SignalR: ops.alert.raised|cleared, ops.jetstream.updated, replay.session.status, replay.event — Implemented: Partial
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend internal: backend.replay.start|stop|{replaySessionId}.event|{replaySessionId}.status — Implemented: No (handlers missing)
+Matches rbnats: No

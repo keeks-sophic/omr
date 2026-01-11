@@ -1,0 +1,661 @@
+========================================================
+AMR ROBOT – CONCEPTUAL IMPLEMENTATION ARCHITECTURE (UPDATED)
+========================================================
+
+Goal
+----
+Provide a clean, scalable robot software structure that:
+- Supports many AMRs
+- Uses NATS JetStream for backend communication (commands, tasks, route, telemetry)
+- Separates task/state, traffic control, motion control, commands, and telemetry
+- Supports low-frequency reliable messages and droppable control updates
+- Ensures smooth acceleration/deceleration via time-based profiles
+- Avoids coupling logic across domains (no “god module”)
+- Fits this robot constraint:
+  - Drive is forward/backward only (linear motion)
+  - “Left/Right” is a discrete toggle via cam-in-track mechanism (no continuous yaw control)
+  - Radar forces an immediate safe stop when an obstacle is detected
+- QR reader reads track codes for exact on-track localization
+
+
+========================================================
+0. STARTUP CONFIG (ROBOT ID + NAME + IP VIA CLI)
+========================================================
+
+Startup behavior:
+- Robot process supports overriding its identity using command-line flags:
+  - --id: robotId (string; recommended to use serial number)
+  - --name or -n: robot name/id
+  - --ip or -i: robot IP address
+- If flags are not provided, robot uses default robotId/name/IP from configuration.
+
+Examples:
+- dotnet run -- --id SN-001 --name robot-01 --ip 10.10.10.10
+- dotnet run -- --id SN-001 -n robot-01 -i 10.10.10.10
+
+Config precedence:
+1) CLI flags (--id, --name/-n, --ip/-i)
+2) appsettings.json defaults
+
+Identity propagation:
+- The resolved robotId is used as the identity across the system and must be included in:
+  - NATS subject namespace: robot.{robotId}.*
+  - presence.hello payload
+  - periodic state snapshots (identity section)
+  - telemetry (if you publish IP/network info separately)
+
+
+========================================================
+1. HIGH-LEVEL RESPONSIBILITIES
+========================================================
+
+Robot software is divided into 8 core domains:
+
+1. Messaging & Contracts (NATS JetStream, subjects, schemas)
+2. Robot State (single source of truth, state transitions)
+3. Task & Route Execution (task lifecycle, route tracking)
+4. Command Handling (discrete actions, ACKed)
+5. Traffic Control Adapter (time-based setpoints from backend schedule)
+6. Motion Control (linear velocity, limits, soft accel/decel)
+7. Hardware Interface (drivers, safety interlocks)
+8. Telemetry & Status Reporting (publish state/health/task progress)
+
+
+========================================================
+2. MESSAGE TYPES & DATA FLOW
+========================================================
+
+There are SIX types of data flowing between backend and robot:
+
+A) COMMANDS (Low frequency, reliable, ordered)
+   - Move forward / backward
+   - Toggle left / right (cam/track)
+   - Hoist up / down
+   - Telescope in / out
+   - Grip on / off
+
+   Backend ---> Robot
+
+B) TASK / ROUTE (Low frequency, reliable)
+   - Assign task
+   - Assign route (list of segments / checkpoints)
+   - Cancel task
+   - Pause / resume
+   - Update route (reroute)
+
+   Backend ---> Robot Task/Route Executor
+
+C) TRAFFIC CONTROL (Time-based schedule, droppable updates)
+   - Time-indexed motion target (linear velocity setpoint)
+   - Optional “cam side” intent at upcoming decision points
+   - Constraint updates (stop windows, hold positions)
+
+   Backend Traffic Planner ---> Robot TrafficControl Adapter ---> Motion Controller
+
+D) TELEMETRY & STATE (Low to medium frequency + event based)
+   - Battery
+   - IP
+   - Location (pose)
+   - Robot state (mode, motion state, fault state)
+   - Task status
+
+   Robot ---> Backend
+
+E) CONFIG / LIMITS (Low frequency, reliable)
+   - maxDriveSpeed (forward/backward)
+   - maxAcceleration
+   - maxDeceleration
+   - runtimeMode: LIVE | SIM
+   - telescopeEnabled: true/false (user-controlled)
+   - optional safety tuning (radar stop distance bands, etc.)
+
+   Backend/User Settings ---> Robot StateStore + MotionLimits + RuntimeSwitch + FeatureFlags
+
+F) LOGGING (Event based, reliable)
+   - Robot application logs (info/warn/error)
+   - Fault/safety explanations beyond structured state fields
+
+   Robot ---> Backend
+
+
+========================================================
+3. CORE DESIGN RULES (DO NOT BREAK)
+========================================================
+
+1. Robot State is the only source of truth for status.
+2. Task/Route logic never touches hardware directly.
+3. Motion control never talks to NATS.
+4. Hardware drivers never talk to NATS.
+5. Traffic control is time-based and produces setpoints only.
+6. High-frequency/control updates must be droppable.
+7. Commands/tasks/routes are reliable and ordered.
+8. Telemetry publishing must never block motion.
+
+
+========================================================
+4. ROBOT STATE DOMAIN (SINGLE SOURCE OF TRUTH)
+========================================================
+
+Purpose:
+- Provide one consistent state model used by all robot modules
+- Apply state transitions from events (commands, task events, faults, watchdog)
+- Publish state to backend in a predictable way
+
+State Model (example):
+- Identity:
+  - robotId, firmware/software version
+- Capabilities:
+  - supportsCamToggle
+  - supportsRadar
+  - supportsQrReader
+  - supportsHoist
+  - supportsTelescope
+  - supportsGrip
+  - supportsRotate
+- Connectivity:
+  - natsConnected, lastBackendSeen
+- Runtime:
+  - runtimeMode: LIVE | SIM
+- Mode:
+  - IDLE | EXECUTING_TASK | PAUSED | E_STOP | FAULT | MANUAL
+- Teach:
+  - teachEnabled: true/false
+  - teachSessionId
+  - teachStepId
+- Motion:
+  - STOPPED | MOVING | HOLDING
+  - currentLinearVel, targetLinearVel
+  - camSide: CENTER | LEFT | RIGHT
+- Motion Limits (user-configurable):
+  - maxDriveSpeed
+  - maxAcceleration
+  - maxDeceleration
+- Feature Flags (user-configurable):
+  - telescopeEnabled
+- Actuators:
+  - hoistPosition
+  - telescopePosition
+  - gripState
+  - rotatePosition
+- Track Localization:
+  - lastQrCode, lastQrTime
+  - trackPosition (segmentId + offset) or (laneId + stationId)
+- Task:
+  - taskId, taskStatus: NONE | ASSIGNED | RUNNING | COMPLETED | CANCELED | FAILED
+  - routeId, routeProgress (segment index, distance/time progress)
+- Health:
+  - batteryPct, batteryVoltage, temperature, motorFaults, lastError
+- Safety:
+  - obstacleDetected (radar)
+  - estopActive
+  - safetyStopReason: NONE | RADAR | E_STOP | WATCHDOG | FAULT
+
+Rules:
+- State updates are event-driven and deterministic.
+- Only StateStore updates state; other modules emit events.
+- The robot publishes state changes and periodic snapshots.
+
+
+========================================================
+5. COMMAND DOMAIN (DISCRETE ACTIONS)
+========================================================
+
+Purpose:
+- Handle ON/OFF or step-based robot actions
+- NOT time-based
+- NOT high-frequency
+
+Examples:
+- Grip ON / OFF
+- Hoist UP / DOWN
+- Telescope IN / OUT (optional, only if supportsTelescope=true and telescopeEnabled=true)
+- Toggle LEFT / RIGHT (cam/track)
+- Rotate (optional, only if supportsRotate=true)
+- Move forward/backward as a discrete mode (optional; prefer traffic/motion setpoints for speed)
+
+Rules:
+- Commands are ACKed (application-level ACK/NAK with reason)
+- Commands are durable and ordered (JetStream work-queue semantics)
+- Commands do NOT set speed directly
+- Commands may change robot mode/state (e.g., pause, resume, manual, estop)
+ - During teaching, commands are issued in small increments and confirmed via state feedback.
+
+Command Handling Split:
+- CommandInbox: receives and validates command messages
+- CommandExecutor: triggers driver actions or emits state/task events
+- CommandAckPublisher: publishes ACK/NAK + correlationId
+
+
+========================================================
+6A. TEACH MODE (CLOSED-LOOP FINE CONTROL)
+========================================================
+
+Purpose:
+- Allow backend/operator UI to fine-control the robot to record repeatable missions
+- Ensure teaching behaves like production: every control action is confirmed by robot state feedback
+
+Teach Session Flow (concept):
+1) Backend sets robot into MANUAL mode and enables teach:
+   - cmd.mode to MANUAL
+   - optionally include teachEnabled=true and teachSessionId in the command payload
+2) Backend issues fine control actions using existing endpoints:
+   - Micro navigation:
+     - publish short-horizon traffic schedules (target velocity over time)
+   - Actuator steps:
+     - cmd.hoist / cmd.telescope / cmd.grip / cmd.cam_toggle with small increments (as enabled)
+     - optional: rotate if supportsRotate=true
+3) Robot publishes feedback continuously:
+   - state.event/state.snapshot (teachSessionId, teachStepId, mode, safetyStopReason)
+   - telemetry (pose/motion/qr/radar) as usual
+   - cmd_ack for each durable command with correlationId
+4) Backend records a mission step by saving:
+   - the command payload and correlationId
+   - the robot state snapshot/event after the action settles (including actuator states)
+
+Rules:
+- Teach mode must respect all safety rules (radar stop, E-stop, watchdog).
+- Teach mode must never bypass MotionLimits; traffic schedules must be clamped locally.
+- Teach mode is compatible with runtimeMode LIVE and SIM; only the driver implementation changes.
+
+
+========================================================
+6. TASK & ROUTE DOMAIN (RELIABLE EXECUTION)
+========================================================
+
+Purpose:
+- Own task lifecycle on the robot
+- Execute a route provided by backend (progress tracking, pause/resume, cancel)
+- Convert route progress into discrete intents (e.g., when to request cam side toggle)
+
+TaskExecutor Responsibilities:
+- Accept TaskAssignment and TaskControl (pause/resume/cancel)
+- Maintain task context (taskId, routeId, parameters)
+- Emit TaskEvents to StateStore (RUNNING/COMPLETED/FAILED) and Telemetry
+
+RouteExecutor Responsibilities:
+- Accept Route (segments/checkpoints) and route updates (reroute)
+- Track progress using track localization (QR reader) + odometry fallback
+- Emit RouteProgress events periodically (or on meaningful change)
+- At route “decision points”, request cam side changes:
+  - Example: upcoming segment requires LEFT camSide -> emit CamSideRequest
+
+Rules:
+- Task/Route never drive motors directly.
+- Task/Route communicate via events to Traffic/Motion (intent) and StateStore.
+- Backend is authoritative for global planning; robot is authoritative for local execution status.
+
+
+========================================================
+7. TRAFFIC CONTROL DOMAIN (TIME-BASED, MULTI-AMR)
+========================================================
+
+Purpose:
+- Enable many AMRs to share a map smoothly
+- Avoid collisions and deadlocks via backend planning
+- Provide time-based, smooth motion setpoints to each robot
+- Provide a closed-loop feedback path via robot telemetry/state
+
+Architecture:
+- Backend Traffic Planner (global):
+  - Takes map, reservations, route intents, and robot states
+  - Takes robot motion limits (max speed/accel/decel) from user settings
+  - Produces a per-robot time-indexed schedule of motion setpoints
+  - Coordinates “holds” at conflict points and releases them
+- Robot TrafficControl Adapter (local):
+  - Receives schedule updates (droppable)
+  - Selects the latest schedule and evaluates it against robot clock
+  - Outputs targetLinearVelocity(t) to MotionController
+  - Optionally outputs camSide intent windows (LEFT/RIGHT) for RouteExecutor
+
+Closed-Loop Feedback (backend):
+- Backend continuously consumes robot feedback:
+  - robot state snapshots/events (mode, safetyStopReason)
+  - motion telemetry (currentLinearVel vs targetLinearVel)
+  - track localization (QR-based position)
+- Backend replans/adjusts schedules based on:
+  - schedule tracking error (robot slower/faster than planned)
+  - safety stops (RADAR) and hold conditions
+  - updated motion limits from user settings
+
+Time-Based Schedule Concept:
+- Message contains:
+  - scheduleId, validFromTime, horizonMs
+  - piecewise setpoints: (t0,v0) (t1,v1) ... or spline parameters
+  - constraints: stop windows, hold-until times
+- Robot computes target velocity at “now” and feeds MotionController.
+
+Soft Acceleration / Deceleration:
+- Backend schedule is already smooth (preferred).
+- Robot still enforces local smoothing and limits as a safety layer.
+
+Rules:
+- Traffic control NEVER touches hardware.
+- Traffic control ONLY outputs motion targets and optional route-related intents.
+- If traffic schedule stops arriving, robot decelerates to a safe stop (watchdog).
+- Local safety (radar/E-stop) can override any traffic schedule.
+
+
+========================================================
+8. MOTION CONTROL DOMAIN (REALTIME)
+========================================================
+
+Purpose:
+- Apply realtime motion targets to the drivetrain safely
+- Enforce max linear speed, max acceleration, and safe stop behavior
+- Provide smooth changes (soft accel/decel) independent of message jitter
+
+This Robot’s Motion Interface:
+- Linear velocity target only (forward/backward)
+- No continuous angular velocity output
+- Lateral/turning behavior is handled by discrete camSide toggle (separate command/intent)
+
+MotionController Responsibilities:
+- Accept target linear velocity (from TrafficControl Adapter)
+- Smooth changes using SpeedProfile (accel/decel constraints)
+- Clamp values using MotionLimits
+- Output low-level setpoints to MotorDriver (RPM/PWM/CAN)
+- Enforce safety overrides (radar obstacle stop, E-stop, watchdog freshness)
+
+Important:
+- MotionController NEVER talks to NATS.
+- MotionController NEVER decides traffic rules or task logic.
+
+
+SpeedProfile (concept):
+- Inputs: targetVel, currentVel, maxAccel, maxDecel, dt
+- Output: nextVel (bounded slope)
+- Always prefer decel to zero on missing/invalid targets
+
+MotionLimits (concept, user-configurable):
+- maxDriveSpeed: clamp for forward/backward velocity magnitude
+- maxAcceleration: positive slope bound
+- maxDeceleration: negative slope bound (safe braking)
+- Backend traffic planner must honor these when generating schedules.
+
+========================================================
+9. HARDWARE INTERFACE
+========================================================
+
+Purpose:
+- Isolate physical hardware
+- Replaceable for simulation/testing
+- Provide safe primitives to upper layers
+
+Runtime Implementations:
+- LIVE:
+  - Drivers talk to real hardware.
+  - State updates must use hardware feedback (driver status, sensors).
+- SIM:
+  - Drivers do not talk to hardware.
+  - Driver outputs are simulated, and state updates are generated from simulation.
+  - The same command/task/route/traffic inputs must still update state and telemetry.
+
+Examples:
+- MotorDriver: sends RPM / PWM / CAN commands
+- CamTrackDriver: toggle left/right/center, report current side
+- RadarDriver: obstacle detection + distance bands + health status
+- QrReaderDriver: read track QR codes, report code + timestamp
+- HoistDriver: up/down control
+- GripDriver: open/close
+
+Safety Subsystem (part of hardware boundary):
+- E-stop input handling
+- Motor watchdog (command freshness)
+- Overcurrent/overtemp handling
+- Interlocks (e.g., prevent motion in unsafe configuration)
+
+Rules:
+- Hardware drivers do not know NATS.
+- Hardware drivers do not know traffic logic.
+- Hardware drivers expose state for telemetry (faults, temperatures, etc.).
+
+
+========================================================
+10. TELEMETRY & STATUS (ROBOT -> BACKEND)
+========================================================
+
+Purpose:
+- Provide robot info to backend for UI, monitoring, and planning
+- Publish both periodic health and event-based state/task transitions
+
+Telemetry Streams:
+LOW frequency:
+- Battery (1–5 seconds)
+- IP/network info (on startup + change)
+- Robot static info (on startup + version changes)
+
+MEDIUM frequency:
+- Pose / location (5–10 Hz)
+- Motion snapshot (2–10 Hz): currentVel, targetVel, camSide
+- Track position (2–10 Hz): derived from QR + odometry
+
+EVENT based:
+- RobotState changed (mode/fault transitions)
+- Task lifecycle events
+- Fault raised/cleared
+- E-stop pressed/released
+- Radar obstacle detected/cleared (safety stop events)
+- QR code read events (optional, can be sampled)
+
+Rules:
+- Telemetry is unidirectional (Robot → Backend).
+- Telemetry publishing must never block motion or safety loops.
+- Event messages are reliable; periodic telemetry can be best-effort/droppable.
+
+
+========================================================
+11. NATS JETSTREAM SUBJECTS & RELIABILITY POLICY
+========================================================
+
+All communication uses NATS JetStream, but with different stream policies to match message types.
+
+Subject Convention (proposed):
+
+Robot Registry / Presence:
+- robot.{robotId}.presence.hello
+- robot.{robotId}.presence.heartbeat
+
+Presence Payload (concept):
+- hello must include: software version, runtimeMode, and capability flags.
+
+Commands (durable, ordered, ACK required):
+- robot.{robotId}.cmd.grip
+- robot.{robotId}.cmd.hoist
+- robot.{robotId}.cmd.telescope
+- robot.{robotId}.cmd.cam_toggle
+- robot.{robotId}.cmd.rotate
+- robot.{robotId}.cmd.mode
+
+Command ACK (durable, ordered):
+- robot.{robotId}.cmd_ack
+
+Task & Route (durable, ordered, ACK required):
+- robot.{robotId}.task.assign
+- robot.{robotId}.task.control
+- robot.{robotId}.route.assign
+- robot.{robotId}.route.update
+
+Config / Limits (durable, ordered, ACK required):
+- robot.{robotId}.cfg.motion_limits
+- robot.{robotId}.cfg.runtime_mode
+- robot.{robotId}.cfg.features
+
+Traffic Schedule (droppable, latest-wins):
+- robot.{robotId}.traffic.schedule
+
+Telemetry (mixed):
+- robot.{robotId}.telemetry.battery
+- robot.{robotId}.telemetry.pose
+- robot.{robotId}.telemetry.health
+- robot.{robotId}.telemetry.motion
+- robot.{robotId}.telemetry.radar
+- robot.{robotId}.telemetry.qr
+
+Logs (reliable):
+- robot.{robotId}.log.event
+
+State & Task Events (reliable):
+- robot.{robotId}.state.snapshot
+- robot.{robotId}.state.event
+- robot.{robotId}.task.event
+- robot.{robotId}.route.progress
+
+JetStream Stream Policies (concept):
+1) Durable Work Streams (commands/tasks/routes):
+- Retention: WorkQueue
+- AckPolicy: Explicit
+- MaxDeliver: bounded + dead-letter subject on repeated failures
+- Replay: Instant
+- Ordered processing per subject
+
+2) Droppable Control Streams (traffic schedule):
+- Retention: Limits
+- MaxMsgsPerSubject: small (keep only latest few)
+- MaxAge: short (e.g., 1–3 seconds)
+- AckPolicy: None or Explicit with low max-deliver (depending on ops needs)
+
+3) Telemetry Streams:
+- Battery/health/state/task events: durable (Limits + longer MaxAge)
+- High-rate pose/motion: droppable (short MaxAge + small per-subject limits)
+4) Logs:
+- Durable suggested (Limits + longer MaxAge)
+
+========================================================
+12. ROBOT <-> BACKEND INTERACTION CONTRACTS
+========================================================
+
+Backend -> Robot:
+- Commands:
+  - Discrete actuator/mode changes, always ACKed
+- Task/Route:
+  - Assign + control, always ACKed
+- Config / Limits:
+  - Motion limits (max speed/accel/decel), always ACKed
+  - Runtime mode (LIVE/SIM), always ACKed
+- Traffic Schedule:
+  - Time-based velocity setpoints, droppable, updated continuously
+- Teach Mode:
+  - Uses cmd.mode=MANUAL + durable actuator commands + short traffic schedules
+  - Backend records mission steps using correlationId + robot state feedback
+
+Robot -> Backend:
+- State:
+  - Snapshot periodically + event deltas on change
+- Telemetry:
+  - Battery/health/pose/motion
+- Task/Route:
+  - Progress and lifecycle events
+ - Teach feedback:
+   - Uses state snapshots/events + cmd_ack + logs to confirm fine-control outcomes
+
+ACK Expectations:
+- Robot ACKs receipt and validation of command/task/route messages.
+- Robot publishes state/task events after applying changes.
+- Backend uses robot state/task events as the authoritative runtime view.
+- Backend traffic planner uses robot state + motion + QR localization for closed-loop control.
+
+========================================================
+13. DATA FREQUENCY STRATEGY (GUIDELINE)
+========================================================
+
+Traffic schedule updates:      10–30 Hz (droppable)
+Motion control loop:           50–200 Hz (local loop, not over NATS)
+Localization updates:          5–10 Hz (pose)
+Motion snapshot telemetry:     2–10 Hz
+Battery updates:               1–5 seconds
+Task status:                   On change only
+State snapshot:                1–2 Hz + on change
+Presence heartbeat:            1–2 seconds
+
+
+========================================================
+14. MODULE SEPARATION (WHO CAN TALK TO WHO)
+========================================================
+
+Allowed Dependencies (concept):
+- Messaging layer -> (CommandInbox, TaskInbox, RouteInbox, TrafficInbox)
+- Inbox modules -> emit events to StateStore / TaskExecutor / TrafficAdapter
+- TaskExecutor/RouteExecutor -> emit intents/events (cam side requests, progress)
+- TrafficAdapter -> MotionController targetVel
+- MotionController -> MotorDriver
+- CommandExecutor -> Drivers (grip/hoist/telescope/camera toggle) OR -> State events
+- TelemetryPublisher -> reads StateStore + Driver statuses -> publishes to backend
+
+Not Allowed:
+- MotionController -> Messaging
+- Drivers -> Messaging
+- TrafficAdapter -> Drivers (directly)
+
+
+========================================================
+15. SPECIAL NOTE: “LEFT/RIGHT” AS A TOGGLE (NOT STEERING)
+========================================================
+
+This design assumes:
+- The robot’s drivetrain is controlled by linear velocity only (forward/backward).
+- Choosing “left” or “right” behavior is achieved by toggling the cam into the track to change turning behavior.
+
+Implications:
+- Path decisions are discrete events (toggle requests), not continuous yaw control.
+- Route planning should encode decision points where a cam side is required.
+- Traffic planning focuses on timing/spacing and speed smoothing across AMRs.
+
+
+========================================================
+16. IMPLEMENTATION ENDPOINTS (BACKEND <-> ROBOT)
+========================================================
+
+Endpoints are NATS subjects. Each endpoint implies a payload schema and reliability policy.
+
+Backend -> Robot (subscribe on robot):
+- robot.{robotId}.cmd.grip (durable, ACK required)
+- robot.{robotId}.cmd.hoist (durable, ACK required)
+- robot.{robotId}.cmd.telescope (durable, ACK required)
+- robot.{robotId}.cmd.cam_toggle (durable, ACK required) (cam/track toggle)
+- robot.{robotId}.cmd.rotate (durable, ACK required) (optional, only if supportsRotate=true)
+- robot.{robotId}.cmd.mode (durable, ACK required)
+- robot.{robotId}.task.assign (durable, ACK required)
+- robot.{robotId}.task.control (durable, ACK required) (pause/resume/cancel)
+- robot.{robotId}.route.assign (durable, ACK required)
+- robot.{robotId}.route.update (durable, ACK required)
+- robot.{robotId}.cfg.motion_limits (durable, ACK required) (max speed/accel/decel)
+- robot.{robotId}.cfg.runtime_mode (durable, ACK required) (LIVE or SIM)
+- robot.{robotId}.cfg.features (durable, ACK required) (feature flags e.g., telescopeEnabled)
+- robot.{robotId}.traffic.schedule (droppable, latest-wins)
+
+Robot -> Backend (subscribe on backend):
+- robot.{robotId}.cmd_ack (durable) (ACK/NAK + correlationId)
+- robot.{robotId}.presence.hello (best-effort) (startup announce)
+- robot.{robotId}.presence.heartbeat (best-effort) (periodic)
+- robot.{robotId}.state.snapshot (durable) (periodic snapshot)
+- robot.{robotId}.state.event (durable) (on change)
+- robot.{robotId}.task.event (durable) (task lifecycle)
+- robot.{robotId}.route.progress (durable) (route progress)
+- robot.{robotId}.log.event (durable) (robot logs for backend replay/debug)
+- robot.{robotId}.telemetry.battery (mixed)
+- robot.{robotId}.telemetry.health (mixed)
+- robot.{robotId}.telemetry.pose (droppable suggested)
+- robot.{robotId}.telemetry.motion (droppable suggested)
+- robot.{robotId}.telemetry.radar (event + low rate status)
+- robot.{robotId}.telemetry.qr (event or sampled)
+
+Optional Debug Request/Reply (NATS core, not JetStream):
+- robot.{robotId}.rpc.ping
+- robot.{robotId}.rpc.get_state
+- robot.{robotId}.rpc.get_versions
+
+Backend Replay Endpoints (backend-internal, for tools/services):
+- backend.replay.start
+- backend.replay.stop
+- backend.replay.{replaySessionId}.event
+- backend.replay.{replaySessionId}.status
+
+Backend Simulation Endpoints (backend-internal, for tools/services):
+- backend.sim.start
+- backend.sim.stop
+- backend.sim.{simSessionId}.status
+
+
+========================================================
+END OF CONCEPTUAL IMPLEMENTATION FILE
+========================================================

@@ -1,0 +1,42 @@
+1. What should be implement
+- Ingest traffic schedule from backend and derive target velocity over time
+- Detect staleness of schedules; default to safe zero velocity if stale
+- Provide interpolated target velocity to motion subsystem
+
+2. What have been implement
+- TrafficAdapter holds latest TrafficSchedule and last update time; ApplySchedule, GetLatest, GetCurrentTargetVel(now), IsStale(now, staleMs)
+- ScheduleInterpolator.InterpolateTargetVel performs linear interpolation between schedule points based on elapsed ms
+- MotionTickWorker queries TrafficAdapter for target velocity and applies MotionTargetUpdated to store
+
+3. How does it implement
+- Accept traffic.schedule via CommandListenerService.ApplyTrafficSchedule
+- MotionTickWorker.Tick obtains target, clamps with safety/staleness, applies event and triggers MotionController.Tick
+- PeriodicScheduler drives MotionTickWorker at TickOptions.MotionMs cadence
+
+4. How the flow works between frontend, backend, robot, db
+- Backend sends traffic.schedule with schedule points; robot adapts velocity accordingly
+- No frontend/database integration in traffic module
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Subscribe: traffic.schedule
+- Publish: telemetry.motion via motion subsystem after ticks
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Non-linear interpolation strategies and route-aware speed profiles
+- Schedule validation and conflict resolution
+- Integration with route checkpoints and zones
+
+9. Requirements not implemented (per robotconcept)
+- Durable ingestion and auditing of schedule application
+- Health metrics and staleness alerts
+- Backpressure/rate-limiting on schedule updates
+
+10. Endpoints and compliance
+- NATS: traffic.schedule
+- Matches rbnats: Yes (subject naming)

@@ -1,0 +1,40 @@
+========================================================
+MODULE 06: ROUTE PLANNER (COST MODEL + ETA)
+========================================================
+
+Goal:
+- Compute a valid route through the active map graph
+- Respect maintenance closures and one-way constraints
+- Provide ETA and route segments for robot execution
+
+Primary Inputs:
+- REST: POST /api/v1/routes/plan (RoutePlanRequest)
+- Task Manager internal calls: plan route for task
+- Map snapshot: active map version graph (nodes/paths/points)
+- Optional: traffic and congestion cost inputs
+
+Primary Outputs:
+- Postgres: task.routes row (segments json)
+- DTO: RouteDto for frontend
+- NATS: route.assign/route.update (via Task Manager)
+- SignalR:
+  - route.updated
+
+Core Data:
+- map.nodes, map.paths, map.points
+- PostGIS functions for nearest node/path (dbmodel.txt functions)
+
+Planning Steps:
+1) Load map graph (exclude is_maintenance and inactive)
+2) Resolve start and goal:
+  - from robot location or last known node
+  - goal from map.points(pointId)
+3) Compute shortest path with cost:
+  - base distance + speed limits + optional congestion penalty
+  - enforce direction constraints (two_way=false)
+4) Build RouteAssign segments referencing path ids and checkpoints
+5) Estimate ETA using motion limits and speed limits
+
+Failure Handling:
+- If map disconnected: return 422 with reason (unreachable goal)
+- If inputs invalid: 400

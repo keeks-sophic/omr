@@ -1,0 +1,56 @@
+1. What should be implement
+- Robot identity resolution from configuration and CLI overrides
+- Resilient NATS connection with retry/backoff
+- Registration of all subscriptions/publications
+- Initial presence, heartbeat and state snapshot on startup
+- Boot periodic workers for heartbeat, snapshots, motion, route and telemetry
+
+2. What have been implement
+- Program wiring loads Robot, Nats and Tick options; parses --id/--name/--ip; resolves identity via IdentityService.Resolve
+- RobotStateStore seeded with identity; NATS connected via NatsService.TryConnect
+- RobotWorker.Start registers all command/task/route/config/RPC subscriptions and telemetry publications
+- PresencePublisher.PublishHello, HeartbeatWorker.SendHeartbeat and StateSnapshotWorker.PublishSnapshot emitted on connect
+- MotionController, MotionTickWorker, RouteProgressTracker, TaskRouteExecutor initialized
+- PeriodicScheduler starts timers for heartbeat, snapshot, motion ticks, route progress, battery and health telemetry
+
+3. How does it implement
+- Program.cs loads appsettings.json and CLI args, builds RobotOptions/NatsOptions/TickOptions, resolves identity and stores it
+- NatsService.TryConnect(url) attempts connection with exponential backoff; upon success workers start
+- RobotWorker calls CommandListenerService.RegisterAll(robotId) and TelemetryService.RegisterPublishers(robotId)
+- Presence/heartbeat/snapshot publish via Nats subjects derived from NatsSubjects
+- PeriodicScheduler drives periodic publishing and execution ticks
+
+4. How the flow works between frontend, backend, robot, db
+- Backend observes presence.hello, presence.heartbeat and state.snapshot/state.event via NATS
+- Robot produces telemetry and reacts to backend commands via subscribed subjects
+- No direct frontend/websocket involvement in robot startup
+- No database access on robot side for identity or startup
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Yes (robot ⇄ backend over NATS):
+- Publish: presence.hello, presence.heartbeat, state.snapshot, state.event, telemetry.* (battery/health/pose/motion/radar/qr), log.event, task.event, route.progress
+- Subscribe: cmd.* (grip/hoist/telescope/cam_toggle/rotate/mode), task.assign/control, route.assign/update, cfg.* (motion_limits/runtime_mode/features), traffic.schedule, rpc.* (ping/get_state/get_versions)
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Actual message payload serialization and send/receive bodies (subjects registered, payloads stubbed)
+- Graceful shutdown and reconnect handling
+- Startup health checks and warmup sequencing beyond initial emits
+- Authentication/authorization on NATS
+
+9. Requirements not implemented (per robotconcept)
+- Durable JetStream subscriptions and backpressure handling
+- Structured startup logs/events with standardized fields
+- Configuration validation and failure modes
+- Retry/backoff tuning and telemetry on connection lifecycle
+
+10. Endpoints and compliance
+- NATS Subjects:
+- Publish: presence.hello/heartbeat, state.snapshot/event, telemetry.battery/health/pose/motion/radar/qr, log.event, task.event, route.progress
+- Subscribe: cmd.*, task.*, route.*, cfg.*, traffic.schedule, rpc.*
+- Matches rbnats: Yes (subject naming conventions)

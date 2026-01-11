@@ -1,0 +1,62 @@
+1. What should be implement
+- Process presence.hello and presence.heartbeat to maintain robot registry and sessions
+- Track connected status, lastSeen, runtimeMode, capabilities, feature flags
+- Emit UI updates and trigger initial configuration publish
+
+2. What have been implement
+- RobotRegistryService for session and registry operations
+- RobotsController endpoints for listing robots, robot detail, session, and history (state/telemetry/logs)
+- OfflineDetectionWorker marking robots disconnected after threshold
+- DTOs: RobotDto, RobotSessionDto, RobotCapabilitiesDto, RobotFeatureFlagsDto
+- NATS presence consumers handling presence.hello and presence.heartbeat and emitting UI updates
+- Configuration publish triggered on hello via ConfigurationService
+
+3. How does it implement
+- Registry service reads/writes AppDbContext Core tables
+- Worker periodically updates connected state based on timestamps
+- Realtime hub provides RequestRobotSnapshots
+- NatsConsumersWorker subscribes to presence.hello and presence.heartbeat:
+-  - Upserts core.robots and core.robot_sessions
+-  - Persists capabilities/featureFlags from PresenceHello payloads
+-  - Emits SignalR robot.session.updated and presence echo topics
+-  - Triggers ConfigurationService.PublishCurrentAsync on first hello
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend queries robots and sessions via REST and subscribes to robot groups via SignalR
+- Backend maintains sessions via DB and emits updates on presence and changes
+- Robot sends presence events; backend consumes and updates registry/session + emits UI topics
+- DB holds core.robots and core.robot_sessions rows
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: Model/Core Robot, RobotSession
+- Updates connected, lastSeen, runtimeMode, capabilities, featureFlags
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended inputs: robot.{robotId}.presence.hello, robot.{robotId}.presence.heartbeat
+- Implemented: consumers active (core NATS subscription)
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/robots, /api/v1/robots/{robotId}, /api/v1/robots/{robotId}/session
+- SignalR: robot.session.updated, presence echo topics (concept)
+
+8. What have not be implemented
+- GET endpoints for capabilities and feature flags — Implemented: Yes
+- Additional snapshot emission hooks beyond presence/session echoes — Implemented: Yes (hub RequestPresenceSnapshot)
+
+9. Requirements not implemented (per backendconcept)
+- RuntimeMode (LIVE/SIM) end-to-end enforcement (partial: publish current cfg on hello)
+- Capabilities/feature flags UI endpoints (REST) not provided
+- Broader onboarding validation and policies beyond presence upsert
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- GET /api/v1/robots — Implemented: Yes
+- GET /api/v1/robots/{robotId} — Implemented: Yes
+- GET /api/v1/robots/{robotId}/session — Implemented: Yes
+- GET /api/v1/robots/{robotId}/capabilities — Implemented: Yes
+- GET /api/v1/robots/{robotId}/feature-flags — Implemented: Yes
+- SignalR: robot.session.updated, robot.presence.hello, robot.presence.heartbeat — Implemented: Yes (emission on presence handlers)
+Matches fbstream: No (partial coverage)
+NATS/JetStream (from rbnats):
+- Robot -> Backend: presence.hello, presence.heartbeat — Implemented: Yes (core NATS subscribe)
+- Matches rbnats: Partial (subjects align; core NATS used instead of JetStream durable)

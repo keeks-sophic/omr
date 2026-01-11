@@ -1,0 +1,10 @@
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.csproj.AssemblyReference.cache
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\rpswa.dswa.cache.json
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.AssemblyInfoInputs.cache
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.AssemblyInfo.cs
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.csproj.CoreCompileInputs.cache
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.MvcApplicationPartsAssemblyInfo.cs
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.MvcApplicationPartsAssemblyInfo.cache
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\EFCoreNpgsqlNetTopologySuite.cs
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV2\src\BackendV2.Api\obj\Release\net10.0\BackendV2.Api.sourcelink.json

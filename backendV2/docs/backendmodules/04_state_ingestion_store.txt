@@ -1,0 +1,50 @@
+========================================================
+MODULE 04: STATE INGESTION & STATE STORE (CLOSED-LOOP INPUTS)
+========================================================
+
+Goal:
+- Consume robot feedback streams and provide a normalized state view
+- Write replay/time-series to TimescaleDB
+- Feed Task/Traffic/Route decisions with fresh robot state
+
+Primary Inputs (NATS):
+- robot.{robotId}.state.snapshot (RobotStateDto)
+- robot.{robotId}.state.event (RobotStateEvent)
+- robot.{robotId}.telemetry.* (Telemetry payloads)
+- robot.{robotId}.task.event (RobotTaskEvent)
+- robot.{robotId}.route.progress (RouteProgress)
+- robot.{robotId}.log.event (RobotLogEvent)
+
+Primary Outputs:
+- In-memory state cache keyed by robotId (latest snapshot)
+- Postgres updates for lightweight list fields:
+  - core.robots.connected/state/battery/location/last_active
+  - core.robot_sessions.last_seen (via presence module)
+- TimescaleDB replay:
+  - replay.robot_events hypertable inserts
+  - optional replay.telemetry_pose inserts
+- SignalR:
+  - robot.state.snapshot / robot.state.event
+  - robot.telemetry.snapshot + telemetry channels
+  - robot.route.progress / task events / log events
+
+Normalization Strategy:
+- Treat RobotStateDto as the canonical shape end-to-end:
+  - Robot publishes -> backend stores -> backend streams to frontend
+- For state.event:
+  - either apply patch to cached state then emit full RobotStateDto
+  - or emit partial state events with changedFields
+
+Flow: ingest message
+1) Validate schema (basic required fields)
+2) Update latest state cache
+3) Persist to replay.robot_events (TimescaleDB)
+4) Update core.robots summary fields (optional)
+5) Emit SignalR message to robot:{robotId} group
+
+Failure Handling:
+- If Timescale write fails:
+  - continue realtime pipeline
+  - raise ops alert and retry asynchronously
+- If payload invalid:
+  - log + drop, optionally count for ops dashboards

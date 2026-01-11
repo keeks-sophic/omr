@@ -1,0 +1,49 @@
+========================================================
+MODULE 00: SECURITY (JWT + ROLE-BASED ACCESS CONTROL)
+========================================================
+
+Goal:
+- Authenticate users (JWT)
+- Authorize every operation by role and access policy
+- Provide audit trail for privileged actions
+
+Primary Inputs:
+- REST: /api/v1/auth/login, /api/v1/auth/me, /api/v1/admin/users/*
+- SignalR: connect to /hubs/realtime with access token
+
+Primary Outputs:
+- JWT access token (LoginResponse.accessToken)
+- Access decisions (allow/deny) for REST + SignalR
+- ops.audit_events rows (AuditEvent)
+
+Key Data Models (backenddata.txt):
+- auth.users, auth.roles, auth.user_roles, auth.user_access_policies
+- AuditEvent (persist to ops.audit_events)
+
+JWT Claims:
+- sub: userId
+- roles: Admin | Planner | Operator | Viewer
+- optional: allowedRobotIds / siteId constraints
+
+Authorization Rules (concept):
+- Viewer: read-only dashboards, robot status/telemetry, tasks list, traffic overview, replay viewing
+- Operator: Viewer + manual robot commands, task control, teach sessions, run missions
+- Planner: Viewer + map edits/publish, traffic holds, mission library, simulation
+- Admin: full access + user/role management
+
+SignalR Authorization:
+- Connection: token validation
+- Group join: enforce allowedRobotIds and role
+- Delivery filtering: enforce allowedRobotIds on every robot-scoped message
+
+Audit Flow:
+1) REST/SignalR action arrives
+2) Validate JWT and map roles to permissions
+3) If denied: write ops.audit_events(outcome=DENIED) and return 403
+4) If allowed: execute action and write ops.audit_events(outcome=OK/ERROR)
+
+Failure Handling:
+- Invalid/expired token: 401 (REST) or disconnect (SignalR)
+- Disabled user: 403
+- Missing permission: 403
+

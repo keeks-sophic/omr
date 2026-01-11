@@ -1,0 +1,70 @@
+00_security_rbac
+- JWT authentication, role-based authorization, access policies
+- SignalR authorization with per-robot access control
+- Audit trail for privileged/denied actions
+
+01_api_realtime_gateway
+- REST APIs for CRUD/actions/history across modules
+- SignalR realtime snapshots and updates for fleet/robots/traffic/tasks/maps
+- Do not expose NATS to frontend; gateway translates backend state to UI DTOs
+
+02_messaging_contracts_nats
+- Define NATS JetStream subjects and payload contracts for robot↔backend
+- Durable streams for commands/tasks/routes/config; droppable for traffic.schedule and some telemetry
+- Command correlation and ack handling
+
+03_robot_registry_sessions
+- Process presence.hello and presence.heartbeat to maintain robot registry and sessions
+- Track connected status, lastSeen, runtimeMode, capabilities, feature flags
+- Emit UI updates and trigger initial configuration publish
+
+04_state_ingestion_store
+- Consume robot state/telemetry/task/route/log streams and maintain normalized state
+- Persist replay/time-series to TimescaleDB
+- Emit SignalR snapshots/events for frontend
+
+05_task_manager
+- Accept task creation and control (pause/resume/cancel)
+- Auto-assign robots, plan routes, publish assignments/updates
+- Monitor feedback and update task status with SignalR notifications
+
+06_route_planner
+- Compute valid routes on the active map graph with ETA
+- Respect one-way and maintenance constraints; integrate congestion costs
+- Provide RouteDto and segments for robot execution
+
+07_traffic_control_service
+- Global scheduling to avoid conflicts; per-robot velocity/time schedules
+- React to feedback and holds; enforce motion limits and headway
+- Emit UI summaries and publish schedules to robots
+
+08_schedule_publisher
+- Publish per-robot schedules frequently with short horizon
+- Use droppable latest-wins JetStream policy
+- Respect robot liveness; stop publishing when offline
+
+09_configuration_service
+- Manage motion limits, runtime mode, and feature flags per robot
+- Validate constraints and publish configs reliably to robots
+- Emit UI updates and maintain config history (optional)
+
+10_map_management_service
+- Versioned map CRUD and validation; publish active version
+- Manage nodes, paths, points, QR anchors, maintenance toggles
+- Collaborate via SignalR map events
+
+11_teaching_mission_service
+- Teach sessions to capture operator actions into mission steps
+- Validate missions against capabilities and feature flags
+- Execute missions via Task Manager
+
+12_simulation_orchestrator
+- Orchestrate simulation sessions mirroring production pipeline
+- Register simulated robots, run tasks/routes/traffic, inject simulated state
+- Provide session status/events/metrics via SignalR
+
+13_observability_ops_replay
+- Ops visibility: health, JetStream status, alerts
+- Replay sessions streaming events from TimescaleDB
+- SignalR topics for ops and replay
+

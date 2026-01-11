@@ -1,0 +1,38 @@
+========================================================
+MODULE 04: COMMAND HANDLING (DISCRETE, ACKED)
+========================================================
+
+Goal:
+- Execute discrete actuator commands and mode changes
+- ACK/NAK each command with correlationId
+
+Primary Inputs (durable):
+- cmd.grip
+- cmd.hoist
+- cmd.telescope
+- cmd.cam_toggle
+- cmd.rotate
+- cmd.mode
+
+Primary Outputs:
+- cmd_ack for each command
+- state.event updates via StateStore (actuator states, mode changes)
+
+Validation Rules:
+- Capability gating:
+  - rotate requires supportsRotate=true
+  - telescope requires supportsTelescope=true
+- Feature flag gating:
+  - telescope actions require telescopeEnabled=true
+- Safety gating (policy):
+  - disallow actuator moves when estopActive or FAULT
+
+ACK Strategy:
+- ACK after the command is accepted and scheduled for execution
+- If command fails during execution, publish:
+  - state.event with fault fields
+  - log.event with details
+
+Cross-check with backendmodules:
+- backendmodules/09_configuration_service.txt expects telescopeEnabled enforcement.
+

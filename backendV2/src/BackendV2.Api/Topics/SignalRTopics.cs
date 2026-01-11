@@ -1,0 +1,54 @@
+namespace BackendV2.Api.Topics;
+
+public static class SignalRTopics
+{
+    public const string FleetSummarySnapshot = "fleet.summary.snapshot";
+    public const string FleetSummaryUpdated = "fleet.summary.updated";
+    public const string FleetIncidentRaised = "fleet.incident.raised";
+    public const string FleetIncidentCleared = "fleet.incident.cleared";
+    public const string FleetIncidentAcked = "fleet.incident.acked";
+    public const string RobotStateSnapshot = "robot.state.snapshot";
+    public const string RobotStateEvent = "robot.state.event";
+    public const string RobotTelemetrySnapshot = "robot.telemetry.snapshot";
+    public const string TaskCreated = "task.created";
+    public const string TaskAssigned = "task.assigned";
+    public const string TaskStatusChanged = "task.status.changed";
+    public const string TaskCompleted = "task.completed";
+    public const string TaskFailed = "task.failed";
+    public const string TrafficOverviewSnapshot = "traffic.overview.snapshot";
+    public const string ReplayEvent = "replay.event";
+    public const string RobotSessionUpdated = "robot.session.updated";
+    public const string RobotPresenceHello = "robot.presence.hello";
+    public const string RobotPresenceHeartbeat = "robot.presence.heartbeat";
+    public const string RobotTelemetryBattery = "robot.telemetry.battery";
+    public const string RobotTelemetryHealth = "robot.telemetry.health";
+    public const string RobotTelemetryPose = "robot.telemetry.pose";
+    public const string RobotTelemetryMotion = "robot.telemetry.motion";
+    public const string RobotTelemetryRadar = "robot.telemetry.radar";
+    public const string RobotTelemetryQr = "robot.telemetry.qr";
+    public const string RobotLogEvent = "robot.log.event";
+    public const string RobotCmdAck = "robot.cmd.ack";
+    public const string RouteUpdated = "route.updated";
+    public const string TrafficOverviewUpdated = "traffic.overview.updated";
+    public const string TrafficHoldCreated = "traffic.hold.created";
+    public const string TrafficHoldReleased = "traffic.hold.released";
+    public const string TrafficScheduleSummaryUpdated = "traffic.schedule.summary.updated";
+    public const string RobotConfigUpdated = "robot.config.updated";
+    public const string MissionCreated = "mission.created";
+    public const string MissionUpdated = "mission.updated";
+    public const string TeachSessionStarted = "teach.session.started";
+    public const string TeachSessionStopped = "teach.session.stopped";
+    public const string TeachStepCaptured = "teach.step.captured";
+    public const string TeachStepUpdated = "teach.step.updated";
+    public const string MapVersionCreated = "map.version.created";
+    public const string MapVersionPublished = "map.version.published";
+    public const string MapEntityUpdated = "map.entity.updated";
+    public const string SimSessionStatus = "sim.session.status";
+    public const string SimEvent = "sim.event";
+    public const string SimMetricsUpdated = "sim.metrics.updated";
+    public const string ReplaySessionStatus = "replay.session.status";
+    public const string OpsAlertRaised = "ops.alert.raised";
+    public const string OpsAlertCleared = "ops.alert.cleared";
+    public const string OpsJetStreamUpdated = "ops.jetstream.updated";
+    public const string AdminUserUpdated = "admin.user.updated";
+}

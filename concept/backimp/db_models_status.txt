@@ -1,0 +1,97 @@
+Overview
+- EF Core DbContext: AppDbContext configured with schemas auth/core/map/task/traffic/ops/sim/replay and geometry types via NetTopologySuite; compiles against Microsoft.EntityFrameworkCore.
+- Entities present: Auth (User, Role, UserRole, UserAccessPolicy), Core (Robot, RobotSession), Map (MapVersion, MapNode, MapPath, MapPoint, QrAnchor), Task (Task, Route, Mission, TeachSession, TaskEvent), Traffic (TrafficHold), Ops (AuditEvent), Sim (SimSession), Replay (ReplaySession, RobotEvent).
+- Repositories/services: CRUD implemented primarily in services (ConfigurationService, TaskManagerService, MapManagementService, TeachingService, MissionService, ReplayService, OpsService, RobotRegistryService) and small repositories (AuditRepository, User/Role/AccessPolicy repositories).
+
+Per Module Status (Models vs Concept and CRUD)
+00 Security (JWT + RBAC)
+- Models: User, Role, UserRole, UserAccessPolicy, AuditEvent; EF mapped with keys and tables under auth/ops.
+- CRUD location: AuthController (login/me), AdminUsersController (placeholder), repositories for list/get, AuditRepository write.
+- Concept coverage: roles/claims present; admin user management endpoints not implemented; audit present but partial.
+- Implementation: Partial.
+
+01 API + Realtime Gateway
+- Models: Uses domain models across modules; no separate data model.
+- CRUD location: Controllers in Api/* and hub; services fetch DTOs; snapshots service.
+- Concept coverage: gateway layer exists; many endpoints partial/missing.
+- Implementation: Partial.
+
+02 Messaging & Contracts (NATS JetStream)
+- Models: Contracts under Contracts/*; not EF entities.
+- CRUD location: N/A; messaging via NatsPublisherStub.
+- Concept coverage: subjects and payloads defined; JetStream client/consumers missing.
+- Implementation: Not implemented (runtime messaging).
+
+03 Robot Registry & Sessions
+- Models: Robot, RobotSession; EF mapped (geometry for Robot.Location; RobotSession keyed by RobotId).
+- CRUD location: RobotRegistryService, RobotsController; OfflineDetectionWorker.
+- Concept coverage: presence consumers missing; capabilities/feature flags stored as JSON fields.
+- Implementation: Partial.
+
+04 State Ingestion & Store
+- Models: Core summary fields exist; Replay.RobotEvent exists (jsonb payload).
+- CRUD location: StateStore/StateIngestionService scaffold; ReplayService intended; Ops/Replay services.
+- Concept coverage: Timescale hypertable not configured; consumers not wired; history endpoints missing.
+- Implementation: Partial for models; ingestion/replay Not implemented.
+
+05 Task Manager
+- Models: Task, TaskEvent, Route; EF mapped (Route Start/Goal as geometry, ETA fields present).
+- CRUD location: TaskManagerService, TasksController; RoutePlannerService writes Route.
+- Concept coverage: lifecycle fields present; auto-assignment logic minimal; feedback consumers missing.
+- Implementation: Partial.
+
+06 Route Planner
+- Models: Route; Map graph entities present; EF mappings configured.
+- CRUD location: RoutePlannerService, RoutesController; AppDbContext Routes.
+- Concept coverage: cost model/ETA fields present; detailed validation/replanning not wired.
+- Implementation: Partial.
+
+07 Traffic Control Service
+- Models: TrafficHold; no schedule persistence model.
+- CRUD location: TrafficController, TrafficControlService; holds stored in DB.
+- Concept coverage: reservation/schedule model not persisted; closed-loop reactions not implemented.
+- Implementation: Partial.
+
+08 Schedule Publisher
+- Models: None DB-specific; schedules published over NATS (stub).
+- CRUD location: SchedulePublisherService/Worker.
+- Concept coverage: JetStream droppable latest-wins not configured.
+- Implementation: Not implemented (runtime publish).
+
+09 Configuration Service
+- Models: RobotSession FeatureFlagsJson, MotionLimitsJson, RuntimeMode; EF mapped.
+- CRUD location: ConfigurationService; RobotsController config endpoints.
+- Concept coverage: durable ack and history missing; presence-triggered publish missing.
+- Implementation: Partial.
+
+10 Map Management Service
+- Models: MapVersion, MapNode (geometry POINT), MapPath (geometry LINESTRING), MapPoint, QrAnchor; EF mapped.
+- CRUD location: MapsController, MapManagementService; mapping helpers.
+- Concept coverage: validation and nearest-node/path utilities not implemented; many GET endpoints missing.
+- Implementation: Partial.
+
+11 Teaching & Mission Service
+- Models: TeachSession, Mission; EF mapped; Mission steps embedded (DTO-driven).
+- CRUD location: TeachingService, MissionService; Teach/Missions controllers.
+- Concept coverage: capture pipeline and mission execution not implemented; validation partial.
+- Implementation: Partial.
+
+12 Simulation Orchestrator
+- Models: SimSession; EF mapped.
+- CRUD location: SimulationService/Orchestrator; SimulationController.
+- Concept coverage: backend.sim subjects handlers missing; state injection not implemented.
+- Implementation: Partial.
+
+13 Observability & Ops (Replay)
+- Models: AuditEvent, ReplaySession, RobotEvent (jsonb).
+- CRUD location: OpsService, ReplayService, ReplaySessionRepository; Ops/Replay controllers.
+- Concept coverage: JetStream health placeholder; replay streaming from DB not implemented.
+- Implementation: Partial.
+
+EF Core Compatibility
+- DbContext configured with DbSet properties and OnModelCreating mapping including schema names and geometry column types; consistent with EF Core and Npgsql NetTopologySuite.
+- Project references Microsoft.EntityFrameworkCore and Npgsql; controllers/services compile around EF Core usage.
+
+CRUD Implementation Summary
+- Implemented: create/update for maps, points, paths, nodes; holds; tasks create/control; routes plan/persist; config PUT; missions create/update/validate; teach session lifecycle; replay session create/start/stop/seek; ops health/jetstream/alerts/audit; robots list/detail/session.
+- Not implemented: many GET endpoints for listing and detail across maps/missions/tasks/routes; state/telemetry/log history; admin user management; command endpoints; schedule queries; map validate; capabilities/feature-flags GET; simulation/replay GETs; JetStream consumers/publishers (real).

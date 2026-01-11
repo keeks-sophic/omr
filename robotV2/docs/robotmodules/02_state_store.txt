@@ -1,0 +1,38 @@
+========================================================
+MODULE 02: ROBOT STATE STORE (SINGLE SOURCE OF TRUTH)
+========================================================
+
+Goal:
+- Maintain one authoritative robot state model
+- Apply transitions deterministically from events
+
+Primary Inputs:
+- Hardware events:
+  - radar obstacle detected, estop, driver faults
+- Backend events:
+  - cmd.mode (MANUAL/PAUSED/IDLE)
+  - cfg.* updates (limits/runtime/feature flags)
+  - task/route assignments and control
+- Internal module events:
+  - motion started/stopped, actuator settled
+
+Primary Outputs:
+- Robot publishes:
+  - robot.{robotId}.state.snapshot (periodic)
+  - robot.{robotId}.state.event (on change)
+
+Core Rules:
+- Only StateStore mutates state.
+- Other modules emit events; StateStore reduces events into new state.
+- State publishing must never block motion.
+
+State -> Backend contract:
+- state.snapshot/event include:
+  - identity (robotId/name, optional ip metadata)
+  - runtimeMode, mode, safetyStopReason
+  - motion limits and feature flags
+  - actuator states
+  - taskId/routeId + progress
+
+Cross-check with backendmodules:
+- backendmodules/04_state_ingestion_store.txt expects RobotStateDto-like payloads.

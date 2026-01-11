@@ -1,0 +1,63 @@
+1. What should be implement
+- REST APIs for CRUD/actions/history across modules
+- SignalR realtime snapshots and updates for fleet/robots/traffic/tasks/maps
+- Do not expose NATS to frontend; gateway translates backend state to UI DTOs
+
+2. What have been implement
+- Controllers: Auth, Maps, Missions, Tasks, Routes, Teach, Replay, Ops, Fleet(health)
+- SignalR: RealtimeHub with JoinFleet/JoinRobot, RequestRobotSnapshots
+- RealtimeSnapshotService producing initial snapshots (fleet summary, traffic overview, robot session/state/telemetry, tasks overview, active map)
+- DTOs for FleetSummary, TrafficOverview, RobotSession/State/Telemetry, Task, Route, MapVersion, Mission, ReplaySession
+
+3. How does it implement
+- Controllers mapped via ApiRoutes; app.MapControllers()
+- Hub route /hubs/realtime; groups "robots" and "robot:{robotId}"
+- On join, hub sends snapshot DTOs via SignalRTopics; per-robot snapshots on request
+- Services query AppDbContext and map entities to DTOs; MapsController emits SignalR updates on entity changes
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend makes REST calls for CRUD/actions and connects SignalR for live views
+- Backend handles REST, queries DB, emits SignalR snapshots and updates
+- Robot state intended to arrive via ingestion; current project uses StateStore placeholders
+- DB persists entities and provides query results for snapshots
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: broad usage of AppDbContext across Auth/Core/Map/Task/Traffic/Ops/Sim/Replay schemas
+- Models include Robot, RobotSession, MapVersion/Node/Path/Point/QrAnchor, Task/Route/Mission/TeachSession, TrafficHold, ReplaySession, AuditEvent
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Not directly in gateway; robot comm is via other services using NatsPublisherStub (no real NATS client)
+- Intended subjects defined in NatsTopics (robot.*)
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- WebSocket: /hubs/realtime (SignalR)
+- REST: /api/v1/* for all domain controllers
+
+8. What have not be implemented
+- Full realtime streaming from ingestion to hub across all topics (delta updates partial)
+ 
+9. Requirements not implemented (per backendconcept)
+- Snapshot-on-subscribe for all “live view” topics across fleet/robot/traffic/tasks/maps
+- Message delivery filtering for all hub messages (allowedRobotIds) across topics
+- Consistent authorization policies per endpoint as per roles (read/write distinctions)
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- Hub  /hubs/realtime — Implemented: Yes
+- Fleet: GET /api/v1/fleet/incidents, POST /api/v1/fleet/incidents/{incidentId}/ack — Implemented: Yes
+- Robots: GET /api/v1/robots*, session/state/telemetry/logs — Implemented: Yes
+- Commands: POST /api/v1/robots/{robotId}/commands/* — Implemented: Yes
+- Tasks: GET /api/v1/tasks, GET /api/v1/tasks/{taskId}, POST create, POST pause/resume/cancel — Implemented: Yes
+- Routes: POST /api/v1/routes/plan, GET /api/v1/routes/{routeId}, GET /api/v1/routes/{routeId}/eta — Implemented: Yes
+- Traffic: conflicts/holds/schedule — Implemented: Partial (holds present in DB; explicit endpoints not verified)
+- Config: robot config GET/PUT — Implemented: Partial (services exist; explicit API coverage limited)
+- Missions: GET/POST/PUT/{id}, clone, validate — Implemented: Yes
+- Teach: sessions create/start/stop/capture/save-mission — Implemented: Yes
+- Maps: versions CRUD + publish; nodes/paths/points/qrs CRUD + maintenance/rest toggle; validate — Implemented: Yes
+- Simulation: sessions create/start/stop/pause/resume; GET session/metrics — Implemented: Partial (simulation workers exist; API coverage limited)
+- Replay: sessions create/start/stop/seek; GET session — Implemented: Yes
+- Ops: GET health/jetstream/alerts/audit — Implemented: Yes
+- SignalR topics: fleet/robot/task/traffic/map/replay — Implemented: Partial (snapshots on join; ongoing emission coverage varies)
+Matches fbstream: No (partial coverage)
+NATS/JetStream (from rbnats): gateway does not expose NATS
+Matches rbnats: Yes (not applicable)

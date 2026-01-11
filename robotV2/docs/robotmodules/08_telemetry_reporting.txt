@@ -1,0 +1,34 @@
+========================================================
+MODULE 08: TELEMETRY & STATUS REPORTING (PUBLISHER)
+========================================================
+
+Goal:
+- Publish telemetry streams and logs without blocking motion
+
+Primary Inputs:
+- StateStore snapshots/events
+- Hardware sensor data (battery, pose, radar, QR)
+- Internal errors/exceptions
+
+Primary Outputs (Robot -> Backend):
+- state.snapshot (periodic)
+- state.event (on change)
+- telemetry.* (mixed frequency)
+- log.event (errors and explanations)
+- presence.hello and presence.heartbeat
+
+Publishing Policy:
+- High-rate telemetry (pose/motion) should be droppable if needed.
+- Low-rate telemetry (battery/health) can be durable.
+- Logs are durable suggested.
+
+Presence:
+- presence.hello:
+  - robotId, softwareVersion, runtimeMode, capabilities, feature flags
+- presence.heartbeat:
+  - uptime, quick health summary
+
+Cross-check with backendmodules:
+- backendmodules/03_robot_registry_sessions.txt ingests presence.*.
+- backendmodules/04_state_ingestion_store.txt ingests state/telemetry/logs and writes Timescale replay.
+

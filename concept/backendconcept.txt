@@ -1,0 +1,588 @@
+========================================================
+AMR BACKEND – CONCEPTUAL IMPLEMENTATION ARCHITECTURE
+========================================================
+
+Goal
+----
+Provide a clean, scalable backend software structure that:
+- Manages many AMRs on a shared map
+- Plans routes and traffic schedules on the backend (authoritative planning)
+- Uses NATS JetStream for reliable command/task/route delivery and telemetry ingestion
+- Maintains a closed-loop feedback system using robot state + telemetry
+- Keeps traffic control as an independent module that can be replaced or upgraded
+
+
+========================================================
+0. SECURITY (JWT + ROLE-BASED ACCESS CONTROL)
+========================================================
+
+Purpose:
+- Ensure only authorized users can view and control robots
+- Enforce least-privilege across UI features and backend APIs
+- Apply consistent authorization to REST and realtime streams
+
+Authentication:
+- Backend issues JWT access tokens to users after login.
+- JWT is required for:
+  - REST API requests (Authorization: Bearer <token>)
+  - SignalR connections (access token on connect)
+
+JWT Claims (concept):
+- sub (userId)
+- roles: [Admin | Planner | Operator | Viewer]
+- exp/iat
+- iss/aud
+- optional: tenantId/siteId, scope/permissions, allowedRobotIds
+
+Authorization:
+- Backend enforces role-based policies on every API/action:
+  - Validate claims, map to permissions, and reject unauthorized requests.
+- Backend must enforce authorization for any action that can affect robots:
+  - issuing commands
+  - starting teach sessions
+  - creating/canceling tasks
+  - publishing map versions and maintenance closures
+  - starting simulations and replays
+
+Suggested Role Permissions (concept):
+- Viewer:
+  - read-only dashboards, robot status, task status, traffic overview, replay viewing
+- Operator:
+  - everything Viewer can do
+  - manual control commands, task pause/resume/cancel, teach sessions, run missions
+- Planner:
+  - everything Viewer can do
+  - map edits/version publish, traffic holds, simulation runs, mission library management
+- Admin:
+  - full access
+  - user management, global settings, policy overrides
+
+Audit:
+- All privileged actions must be auditable:
+  - actor (sub), role, timestamp, action, target (robotId/taskId/mapVersionId), outcome
+
+
+========================================================
+0A. BACKEND API & REALTIME GATEWAY (REST + SIGNALR)
+========================================================
+
+Purpose:
+- Provide a frontend-friendly interface to backend services without exposing NATS to browsers
+- Offer:
+  - REST APIs for CRUD and command-style actions
+  - SignalR topics for realtime snapshots and event streams
+
+Rules:
+- Frontend must never connect directly to NATS.
+- REST endpoints must enforce JWT + role-based authorization.
+- SignalR must enforce JWT + role-based authorization at:
+  - connection time
+  - subscription/group join time
+  - message delivery filtering (e.g., allowedRobotIds)
+- SignalR topics that represent “live views” must support an initial snapshot on subscribe so the UI does not need redundant REST calls.
+
+Admin Capabilities (concept):
+- Admin users can manage users and roles:
+  - create users, disable users, reset credentials
+  - assign roles (Admin/Planner/Operator/Viewer)
+
+
+========================================================
+1. BACKEND CORE DOMAINS
+========================================================
+
+Backend is divided into 12 core domains:
+
+1. Messaging & Contracts (NATS JetStream subjects, schemas, stream policies)
+2. Robot Registry & Sessions (robot onboarding, liveness, capabilities)
+3. State Ingestion & State Store (closed-loop feedback inputs)
+4. Task Manager (user-driven tasks + auto-assignment)
+5. Route Planner (route cost model + ETA)
+6. Traffic Control Service (global multi-robot time-based scheduling)
+7. Schedule Publisher (per-robot traffic schedules to robots)
+8. Configuration Service (motion limits and safety tuning from user settings)
+9. Observability & Ops (monitoring, replay, audit, event logging)
+10. Simulation Orchestrator (sim robots, scenario playback)
+11. Map Management Service (PostGIS map, maintenance, rest paths, QR anchors)
+12. Teaching & Mission Service (record/playback missions with nested missions)
+
+
+========================================================
+2. MESSAGE TYPES & CLOSED-LOOP FEEDBACK
+========================================================
+
+Backend -> Robot (authoritative planning outputs):
+A) Commands (durable, ordered)
+B) Task/Route (durable, ordered)
+C) Traffic Schedule (droppable, latest-wins)
+D) Config/Limits (durable, ordered)
+
+Robot -> Backend (closed-loop feedback inputs):
+E) Presence (hello/heartbeat)
+F) State snapshots + state events (mode, safetyStopReason, motion limits, etc.)
+G) Telemetry (battery, pose, motion, radar, QR)
+H) Task/Route progress + task events
+I) Command ACK/NAK
+J) Logs (robot application logs, fault explanations)
+
+Closed-Loop Control Principle:
+- Backend traffic control and route ETA continuously adapt using robot feedback.
+- Robot feedback is authoritative for:
+  - actual speed and motion state (currentLinearVel)
+  - safety stops (RADAR, E_STOP, FAULT)
+  - track localization from QR reader
+- Backend planning is authoritative for:
+  - route selection and reroutes
+  - multi-robot coordination and schedule generation
+  - task assignment and priorities
+
+
+========================================================
+3. ROBOT ONBOARDING (INIT STATUS + TELEMETRY ACCEPTANCE)
+========================================================
+
+Startup Flow (typical):
+1) Robot publishes:
+   - robot.{robotId}.presence.hello
+   - robot.{robotId}.state.snapshot
+   - robot.{robotId}.telemetry.health (optional early)
+2) Backend Robot Registry:
+   - creates/updates the robot session (connected, lastSeen)
+   - stores robot capabilities (cam/track toggle support, radar, QR reader)
+   - stores runtimeMode (LIVE or SIM)
+   - resolves robot identity using robotId:
+     - robotId is a stable string identifier (recommended: serial number)
+     - backend uses robotId as the primary key for robot records and sessions
+     - IP is treated as telemetry metadata and must not be used as identity (it can change)
+3) Backend Configuration Service publishes:
+   - robot.{robotId}.cfg.motion_limits
+   - robot.{robotId}.cfg.runtime_mode
+4) Backend Task Manager may publish:
+   - robot.{robotId}.task.assign and robot.{robotId}.route.assign
+5) Backend Traffic Control Service begins publishing:
+   - robot.{robotId}.traffic.schedule
+
+
+========================================================
+4. TASK MANAGER (USER CONTROL + AUTO ASSIGNMENT)
+========================================================
+
+Purpose:
+- Provide a single backend entry point for user intent
+- Support:
+  - direct control: “send robot to point X” (pick/drop point)
+  - task templates: pick/drop/inspect
+  - automatic assignment: choose a robot based on availability and cost
+
+Responsibilities:
+- Validate user requests and translate them into:
+  - TaskAssignment (taskId, parameters)
+  - RouteRequest (start, goal, constraints)
+- Maintain task lifecycle:
+  - ASSIGNED -> RUNNING -> COMPLETED/FAILED/CANCELED
+- React to robot feedback:
+  - safety stop -> pause traffic schedule and/or reroute
+  - slow progress -> update ETA and possibly replan
+- Support missions (from Teaching & Mission Service) by expanding missions into executable tasks.
+
+Task Selection (auto assignment concept):
+- Choose robot that minimizes:
+  - estimated time to start + estimated time to finish + congestion_penalty
+- Exclude robots in FAULT/E_STOP or with insufficient battery.
+
+
+========================================================
+4A. TEACHING & MISSION SERVICE (RECORDED WORKFLOWS)
+========================================================
+
+Purpose:
+- Allow users to “teach” robot workflows and save them as missions
+- Missions can be replayed and can call other missions (composition)
+- Missions provide repeatable task definitions for Task Manager
+
+Teaching Mode (concept):
+- User guides the workflow:
+  - navigate to a point (pickup/drop/charge/other)
+  - perform actuator actions with parameters:
+    - hoist (height or steps)
+    - telescope (extension)
+    - grip (open/close or force)
+    - cam/track toggle (left/right/center)
+    - rotate (only if robot declares capability)
+- Backend records a mission definition as a sequence of steps.
+
+Closed-Loop Teach Control (concept):
+- Backend sends fine-control actions to the robot and waits for state feedback to confirm results.
+- Fine-control can reuse the same durable command topics used in production, but with small step sizes.
+- Backend continuously reads robot state/telemetry during teach:
+  - currentLinearVel, camSide, safetyStopReason
+  - actuator positions/status (if exposed through state/telemetry)
+  - QR-based track position for precise alignment
+- Backend persists “taught outcomes” by saving:
+  - the commanded action parameters
+  - the observed robot state after the action settles (state snapshot/event)
+  - timestamps/correlationIds to link commands with feedback
+
+Mission Model (concept):
+- Mission:
+  - missionId, name, version, metadata
+  - steps[] where step is one of:
+    - NAVIGATE(pointId) or NAVIGATE(nodeId)
+    - WAIT(durationMs) or WAIT_UNTIL(condition)
+    - ACTUATE(actionType, parameters)
+    - CALL_MISSION(missionId, inputs)
+    - ASSERT(condition) (optional guard)
+
+Teach Captures (concept):
+- For ACTUATE steps, mission can optionally store a verification state:
+  - expected/recorded actuator state after completion (position/limit/fault-free)
+  - tolerance values for future runs (acceptable deviation)
+
+Execution (concept):
+- Task Manager can create a TaskAssignment referencing a missionId.
+- Mission service expands mission steps into:
+  - route planning requests (NAVIGATE steps)
+  - robot commands for actuators (ACTUATE steps) using durable command topics
+- Mission calling:
+  - CALL_MISSION resolves into the referenced mission steps (with recursion limits).
+
+State/Telemetry Integration:
+- Backend monitors robot feedback during execution:
+  - route progress + task events for NAVIGATE
+  - state/telemetry events for actuator completion/faults
+- On failure, backend can:
+  - retry a step
+  - pause and request operator intervention
+  - cancel the mission and mark task FAILED
+
+
+========================================================
+5. ROUTE PLANNER (COST MODEL + ETA)
+========================================================
+
+Purpose:
+- Compute routes on the backend, considering global traffic context
+- Provide an estimated arrival time to destination (ETA)
+
+Route Cost Model:
+TotalCost = travel_time + wait_time + congestion_penalty
+
+Definitions:
+- travel_time:
+  - sum over path segments of (segment_length / expected_speed)
+  - expected_speed is bounded by robot motion limits and segment limits
+- wait_time:
+  - predicted holding time due to reservations, stop windows, or priority rules
+  - includes expected time waiting for conflicts to clear
+- congestion_penalty:
+  - penalty proportional to predicted density on segments within the planning horizon
+  - derived from current traffic schedules and planned reservations
+
+Map Constraints Considered:
+- Exclude nodes/paths in maintenance.
+- Respect path direction (one-way/two-way).
+- Prefer routing idle robots to rest paths when instructed (Task Manager policy).
+
+ETA Output:
+- Each planned route includes:
+  - routeId
+  - estimatedStartTime
+  - estimatedArrivalTime (ETA)
+  - per-segment ETA breakdown (optional)
+
+Replanning Triggers:
+- Robot deviates from expected progress (QR/localization + motion telemetry)
+- Radar/E-stop stops create unexpected wait_time
+- Congestion rises or map conditions change
+
+
+========================================================
+6. TRAFFIC CONTROL SERVICE (INDEPENDENT MODULE)
+========================================================
+
+Purpose:
+- Coordinate all robots on the map
+- Produce per-robot time-based schedules (accelerate, decelerate, move speed)
+- Be an independent module with a stable interface so it can be upgraded later
+
+Inputs:
+- Map topology + rules (track graph, conflict zones, stop points)
+- Active routes for each robot (from Route Planner)
+- Robot state + telemetry feedback (closed-loop):
+  - currentLinearVel, motion state, safetyStopReason
+  - QR trackPosition updates
+- Robot motion limits (maxDriveSpeed, maxAcceleration, maxDeceleration)
+- Task priorities (from Task Manager)
+
+Outputs:
+- Per-robot Traffic Schedule:
+  - time-indexed target linear velocities for forward/backward motion
+  - optional cam side intent windows at decision points
+  - stop/hold windows for conflict resolution
+
+Same-Direction Sharing Rule:
+- Robots may occupy the same path in the same direction concurrently if they maintain a safe following distance.
+- Traffic control enforces a minimum headway between robots on the same path:
+  - distance-based: minFollowingDistanceMeters
+  - time-based (derived): minFollowingTimeSeconds = minFollowingDistanceMeters / max(estimatedLeadSpeed, epsilon)
+- In opposite directions, paths are treated as mutually exclusive unless the path is physically multi-lane (not assumed here).
+
+Closed-Loop Behavior:
+- If a robot reports slower actual speed than scheduled:
+  - shift its schedule forward in time, or replan reservations
+- If a robot reports RADAR stop:
+  - freeze its schedule at 0 velocity and update other robots to avoid deadlock
+- If a robot goes FAULT/E_STOP:
+  - remove it from active scheduling and re-route others if needed
+
+Independence Contract:
+- Traffic Control Service exposes:
+  - PlanSchedules(robotsState, activeRoutes, motionLimits, horizonMs) -> schedules
+  - UpdateInputs(eventStream) -> internal state updates
+- Only the Schedule Publisher knows how to publish schedules to NATS.
+
+
+========================================================
+6A. MAP MANAGEMENT SERVICE (POSTGIS MAP)
+========================================================
+
+Purpose:
+- Provide a versioned map that route planning and traffic control can use
+- Support maintenance states and operational constraints
+- Support rest paths to reduce congestion by parking idle robots off the main flow
+- Anchor track localization using QR points
+
+Storage (PostGIS):
+- All map data is stored in a database using PostGIS geometry.
+- Typical geometry types:
+  - Nodes, Points, QR anchors: POINT
+  - Paths: LINESTRING
+- Spatial indexes are required for fast lookup (nearest path/node, QR anchor queries).
+
+Map Entities:
+1) Nodes:
+- Junctions on the map
+- Fields (concept): nodeId, name, geom(POINT), isActive, isMaintenance, metadata
+
+2) Paths:
+- Connect exactly two nodes (fromNodeId -> toNodeId)
+- Can be one-way or two-way
+- Fields (concept):
+  - pathId, fromNodeId, toNodeId, geom(LINESTRING)
+  - direction: ONE_WAY | TWO_WAY
+  - isActive, isMaintenance
+  - speedLimit (optional)
+  - isRestPath (true/false)
+  - restCapacity (optional) and restDwellPolicy (optional)
+
+3) Points:
+- Named operational points used by tasks:
+  - pick/drop point
+  - charge point
+- Fields (concept): pointId, type, name, geom(POINT), attachedNodeId (optional)
+
+4) QRs:
+- QR anchors along paths
+- Robot scans QR and backend can map it to a known absolute track position
+- Fields (concept):
+  - qrId, qrCode, geom(POINT), pathId, distanceAlongPath, metadata
+
+Operational Rules:
+- If a node/path is in maintenance, route planner must not use it.
+- Traffic control must treat maintenance closures as hard constraints.
+- Rest paths:
+  - When a robot is idle (or waiting for its next task), backend can assign it to a rest path.
+  - Rest paths are used to reduce congestion by clearing busy paths and junctions.
+  - Rest path assignment should consider capacity and proximity.
+
+Interfaces (concept):
+- Map CRUD (admin):
+  - create/update nodes, paths, points, qrs
+  - mark node/path maintenance on/off
+  - mark rest paths and capacity
+- Map query (planning):
+  - get active graph snapshot (excluding maintenance)
+  - nearest path/node lookup by position (for validation/debug)
+
+
+========================================================
+7. CONFIGURATION SERVICE (USER LIMITS)
+========================================================
+
+Purpose:
+- Provide user-configurable constraints that shape both:
+  - route planning expected travel_time
+  - traffic schedule generation (accel/decel shaping)
+
+Motion Limits:
+- maxDriveSpeed (forward/backward)
+- maxAcceleration
+- maxDeceleration
+
+Runtime Mode:
+- runtimeMode: LIVE | SIM
+
+Feature Flags:
+- telescopeEnabled: true/false
+
+Rules:
+- Backend stores the latest motion limits per robot.
+- Traffic control and route planning must always honor these limits.
+- Backend publishes new limits to robot:
+  - robot.{robotId}.cfg.motion_limits (durable, ACK required)
+  - robot.{robotId}.cfg.runtime_mode (durable, ACK required)
+  - robot.{robotId}.cfg.features (durable, ACK required)
+
+
+========================================================
+8. NATS JETSTREAM ENDPOINTS (BACKEND <-> ROBOT)
+========================================================
+
+Backend subscribes (Robot -> Backend):
+- robot.{robotId}.presence.hello
+- robot.{robotId}.presence.heartbeat
+- robot.{robotId}.cmd_ack
+- robot.{robotId}.log.event
+- robot.{robotId}.state.snapshot
+- robot.{robotId}.state.event
+- robot.{robotId}.task.event
+- robot.{robotId}.route.progress
+- robot.{robotId}.telemetry.battery
+- robot.{robotId}.telemetry.health
+- robot.{robotId}.telemetry.pose
+- robot.{robotId}.telemetry.motion
+- robot.{robotId}.telemetry.radar
+- robot.{robotId}.telemetry.qr
+
+Backend publishes (Backend -> Robot):
+- robot.{robotId}.cmd.grip
+- robot.{robotId}.cmd.hoist
+- robot.{robotId}.cmd.telescope
+- robot.{robotId}.cmd.cam_toggle
+- robot.{robotId}.cmd.rotate
+- robot.{robotId}.cmd.mode
+- robot.{robotId}.task.assign
+- robot.{robotId}.task.control
+- robot.{robotId}.route.assign
+- robot.{robotId}.route.update
+- robot.{robotId}.cfg.motion_limits
+- robot.{robotId}.cfg.runtime_mode
+- robot.{robotId}.cfg.features
+- robot.{robotId}.traffic.schedule
+
+Backend Replay Endpoints (backend-internal, for tools/services):
+- backend.replay.start
+- backend.replay.stop
+- backend.replay.{replaySessionId}.event
+- backend.replay.{replaySessionId}.status
+
+Backend Simulation Endpoints (backend-internal, for tools/services):
+- backend.sim.start
+- backend.sim.stop
+- backend.sim.{simSessionId}.status
+
+Reliability Policy (concept):
+1) Durable, ordered, ACK-required (commands/tasks/routes/config):
+- Retention: WorkQueue
+- AckPolicy: Explicit
+- MaxDeliver: bounded + dead-letter on repeated failure
+
+2) Droppable schedules:
+- Retention: Limits
+- MaxMsgsPerSubject: small (latest-wins)
+- MaxAge: short (seconds)
+
+3) Telemetry:
+- Battery/health/state/task events: durable (Limits + longer MaxAge)
+- High-rate pose/motion: droppable suggested
+4) Logs:
+- Durable suggested (Limits + longer MaxAge)
+
+
+========================================================
+9. BACKEND INTERNAL DATA STORES (CONCEPT)
+========================================================
+
+Robot Session Store:
+- robotId -> connection status, lastSeen, capabilities
+
+State Store (closed-loop inputs):
+- robotId -> latest state snapshot + latest telemetry summaries
+- supports event history for debugging (bounded retention)
+
+Map & Track Model:
+- graph representation of track with:
+  - segment lengths and speed constraints
+  - conflict zones (shared resources)
+  - QR code anchors and their absolute positions on track
+
+Task Store:
+- taskId -> assigned robotId, status, timestamps, ETA, routeId
+
+
+========================================================
+10. LOGGING & REPLAY (ROBOT TIMELINE)
+========================================================
+
+Purpose:
+- Persist a complete timeline of robot activity for debugging and operations
+- Support replaying historical robot activity into backend modules and UI tools
+- Enable incident review: “why did robot stop” (radar) or “why was ETA wrong”
+
+What Gets Logged (concept):
+- All robot -> backend messages:
+  - presence, state snapshots/events, telemetry, task events, route progress, cmd_ack
+- All backend -> robot messages:
+  - commands, tasks, routes, config updates, traffic schedules
+
+Logging Strategy:
+- Backend subscribes to robot subjects and writes an append-only event log.
+- Each log entry contains:
+  - robotId, timestamp, subject, payload, correlationId (if any), direction (in/out)
+- Logs are stored in:
+  - a JetStream “event log” stream for short/medium retention
+  - optional long-term store (database/object store) for retention beyond JetStream limits
+
+Replay Strategy:
+- A replay is a controlled re-publication of logged events to dedicated replay subjects.
+- Replays are read-only and never sent back to real robots.
+- Replay consumers can be:
+  - UI playback tools
+  - offline traffic/route simulations
+  - debugging services
+
+Replay Controls (concept):
+- StartReplay(robotId, fromTime, toTime, subjectFilter, playbackSpeed) -> replaySessionId
+- StopReplay(replaySessionId)
+- Replay publishes events to:
+  - backend.replay.{replaySessionId}.event
+  - backend.replay.{replaySessionId}.status
+
+Retention (example policy):
+- JetStream event log retention: hours/days (configurable)
+- Long-term archive retention: weeks/months (configurable)
+
+
+========================================================
+11. SIMULATION VS LIVE (BACKEND VIEW)
+========================================================
+
+LIVE:
+- Backend publishes commands/tasks/routes/schedules to a physical robot.
+- Robot state is updated from real hardware feedback and published back to backend.
+
+SIM:
+- Backend publishes the same commands/tasks/routes/schedules to a simulated robot process.
+- The simulated robot does not execute real hardware actions.
+- The simulated robot updates state by simulating hardware actions and publishes state/telemetry back to backend.
+- Backend must treat SIM robots the same as LIVE for planning and closed-loop feedback.
+
+Rules:
+- A robot session must declare runtimeMode (LIVE or SIM).
+- Backend must never send replay streams back to live robot subjects.
+
+
+========================================================
+END OF BACKEND CONCEPTUAL IMPLEMENTATION FILE
+========================================================
+

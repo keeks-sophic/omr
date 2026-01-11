@@ -1,0 +1,47 @@
+1. What should be implement
+- Publish per-robot schedules frequently with short horizon
+- Use droppable latest-wins JetStream policy
+- Respect robot liveness; stop publishing when offline
+
+2. What have been implement
+- SchedulePublisherService with PublishSchedulesAsync
+- SchedulePublisherWorker background task invoking publisher
+- NatsPublisherStub.PublishTrafficScheduleAsync
+
+3. How does it implement
+- Iterates connected robots from session/state services
+- Builds schedule envelopes and calls stub publisher
+- Worker loops at interval to keep schedules fresh
+
+4. How the flow works between frontend, backend, robot, db
+- Backend scheduling generates schedules → publisher sends to robot
+- Robot consumes schedules; backend would adjust on feedback
+- Frontend sees schedule summaries via SignalR, not direct schedules
+- DB stores session/robot connectivity for gating
+
+5. Does it communicate with db, if yes what is the data model used
+- Indirect: uses RobotSession connected/lastSeen
+- No schedule persistence implemented
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- robot.{robotId}.traffic.schedule
+- Actual implementation uses stub; JetStream client missing
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- SignalR summaries only: traffic.schedule.summary.updated
+
+8. What have not be implemented
+- Real JetStream publishing with subject configuration
+- Backoff/retry and ops alerting on sustained publish failures
+ 
+9. Requirements not implemented (per backendconcept)
+- Droppable latest-wins stream configuration on JetStream
+- Publish horizon and generatedAt metadata consistently
+- Stop/pause behavior when robot offline enforced by liveness checks in publisher
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream): none specific to publisher
+Matches fbstream: Yes (not applicable)
+NATS/JetStream (from rbnats):
+- Backend -> Robot: robot.{robotId}.traffic.schedule — Implemented: No (stub only)
+Matches rbnats: No

@@ -1,0 +1,87 @@
+========================================================
+MODULE 14: TIMESCALEDB INTEGRATION (TIME-SERIES + REPLAY)
+========================================================
+
+Goal:
+- Provide time-series storage and replay for robot telemetry/state/task/route/log events
+- Enable efficient range queries, aggregates, and historical streaming to UIs
+
+Primary Inputs:
+- NATS (from ingestion pipeline):
+  - robot.{robotId}.state.snapshot / state.event
+  - robot.{robotId}.telemetry.battery|health|pose|motion|radar|qr
+  - robot.{robotId}.task.event
+  - robot.{robotId}.route.progress
+  - robot.{robotId}.log.event
+
+Primary Outputs:
+- Postgres/TimescaleDB:
+  - Hypertable replay.robot_events (generic event stream: robotId, type, timestamp, payload jsonb)
+  - Optional specialized hypertables (e.g., replay.telemetry_pose) for frequent channels
+  - Continuous aggregates (battery trends, speed trends, route ETA progression)
+  - Retention/compression policies
+- REST:
+  - GET replay events by type/robot/time-range
+  - GET telemetry channel ranges and downsampled aggregates
+  - GET route progress history and computed ETA series
+- SignalR:
+  - Replay result streaming into existing topics (robot.telemetry.*, robot.state.*, route.progress, robot.log.event)
+
+Related REST endpoints (fbstream.txt):
+- GET /api/v1/robots/{robotId}/state/history
+- GET /api/v1/robots/{robotId}/telemetry
+- GET /api/v1/robots/{robotId}/logs
+- Proposed:
+  - GET /api/v1/replay/events?robotId={id}&type={type}&from={t}&to={t}
+  - GET /api/v1/robots/{robotId}/telemetry/{channel}?from={t}&to={t}&downsample={ms}
+  - GET /api/v1/routes/{routeId}/progress?from={t}&to={t}
+
+Related NATS endpoints (rbnats.txt):
+- Inputs listed above; TimescaleDB integration consumes from ingestion pipeline, not directly from NATS
+
+Core Logic (concept):
+1) Database setup:
+   - Enable TimescaleDB extension
+   - Create schema replay and base table robot_events(robot_id text, type text, timestamp timestamptz, payload jsonb)
+   - Convert robot_events to hypertable on timestamp with chunk time interval (e.g., 1 day)
+   - Add indexes on (robot_id, timestamp) and (type, timestamp)
+2) Specialized hypertables (optional):
+   - Create channel-specific tables (pose, motion, battery) with typed columns
+   - Use continuous aggregates for downsampled series (e.g., pose every 500ms, battery 1min avg)
+3) Writer service:
+   - Insert events from ingestion handlers into robot_events (and specialized tables if enabled)
+   - Batch writes where possible; fall back to single event inserts on error
+   - On failure, queue for retry and raise ops alert
+4) Retention & compression:
+   - Apply retention policy per stream (e.g., 90 days for generic events, shorter for high-rate telemetry)
+   - Enable TimescaleDB compression on older chunks
+5) Query layer:
+   - Implement REST queries with filters robotId/type/time-range and optional downsampling
+   - Use continuous aggregates when available; otherwise GROUP BY time_bucket
+6) Replay streaming:
+   - Query historical ranges and emit results over SignalR topics for UI visualizations
+7) Security & access control:
+   - Enforce role-based access; filter by allowedRobotIds for multi-tenant scenarios
+
+Data Flow:
+- Ingestion consumes NATS → validates payload → updates Core summaries → writes to Timescale (robot_events / specialized) → emits SignalR
+- Query endpoints read from Timescale hypertables and continuous aggregates → stream results or return page responses
+
+Query Patterns:
+- Time range: WHERE timestamp BETWEEN $from AND $to AND robot_id = $id
+- Downsampling: SELECT time_bucket($bucket, timestamp) AS ts, avg(value) FROM ...
+- Type filter: WHERE type IN ('telemetry.pose','telemetry.motion',...)
+
+Failure Handling:
+- If write fails: continue realtime emission; enqueue for retry; emit ops alert with subject/reason
+- If hypertable missing: create on demand or fail safe with clear error
+
+Operational Concerns:
+- Chunk interval tuning based on ingest rate (e.g., 1 day or 6 hours for high-rate telemetry)
+- Compression policy on chunks older than retention threshold (e.g., 7 days)
+- Continuous aggregate refresh policies for common dashboards
+- Migrations: maintain schema changes via migration scripts and idempotent checks
+
+Integration Notes:
+- Start with generic replay.robot_events, then evolve specialized hypertables for hot paths
+- Use jsonb for flexible payloads; extract frequently queried fields into typed columns over time

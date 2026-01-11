@@ -1,0 +1,114 @@
+========================================================
+ROBOT <-> BACKEND NATS / JETSTREAM CONNECTION LIST
+========================================================
+
+Notation:
+- Pub: publisher
+- Sub: subscriber
+- Reliability: Durable (JetStream) | Droppable (JetStream latest-wins) | Best-effort (NATS core)
+
+
+========================================================
+1) BACKEND -> ROBOT (ROBOT SUBSCRIBES)
+========================================================
+
+Commands (Durable):
+- robot.{robotId}.cmd.grip
+- robot.{robotId}.cmd.hoist
+- robot.{robotId}.cmd.telescope
+- robot.{robotId}.cmd.cam_toggle
+- robot.{robotId}.cmd.rotate
+- robot.{robotId}.cmd.mode
+
+Task / Route (Durable):
+- robot.{robotId}.task.assign
+- robot.{robotId}.task.control
+- robot.{robotId}.route.assign
+- robot.{robotId}.route.update
+
+Config / Limits (Durable):
+- robot.{robotId}.cfg.motion_limits
+- robot.{robotId}.cfg.runtime_mode
+- robot.{robotId}.cfg.features
+
+Traffic Schedule (Droppable, latest-wins):
+- robot.{robotId}.traffic.schedule
+
+Teach Mode (uses existing endpoints):
+- robot.{robotId}.cmd.mode (set MANUAL + teachEnabled/session metadata)
+- robot.{robotId}.traffic.schedule (short schedules for micro navigation)
+- robot.{robotId}.cmd.hoist / robot.{robotId}.cmd.telescope / robot.{robotId}.cmd.grip / robot.{robotId}.cmd.cam_toggle / robot.{robotId}.cmd.rotate (fine actuator steps)
+
+
+========================================================
+2) ROBOT -> BACKEND (BACKEND SUBSCRIBES)
+========================================================
+
+Presence (Best-effort suggested):
+- robot.{robotId}.presence.hello
+- robot.{robotId}.presence.heartbeat
+
+Presence Payload (concept):
+- hello should include: software version, runtimeMode, and capability flags.
+
+Command ACK (Durable suggested):
+- robot.{robotId}.cmd_ack
+
+State (Durable suggested):
+- robot.{robotId}.state.snapshot
+- robot.{robotId}.state.event
+
+State Payload (concept):
+- snapshot/event should include: teach session fields (if active) and actuator states (hoist/telescope/grip/cam, optional rotate).
+
+Task / Route (Durable suggested):
+- robot.{robotId}.task.event
+- robot.{robotId}.route.progress
+
+Telemetry (Mixed):
+- robot.{robotId}.telemetry.battery
+- robot.{robotId}.telemetry.health
+- robot.{robotId}.telemetry.pose
+- robot.{robotId}.telemetry.motion
+- robot.{robotId}.telemetry.radar
+- robot.{robotId}.telemetry.qr
+
+Logs (Durable suggested):
+- robot.{robotId}.log.event
+
+Teach Feedback (uses existing endpoints):
+- robot.{robotId}.cmd_ack
+- robot.{robotId}.state.snapshot
+- robot.{robotId}.state.event
+- robot.{robotId}.telemetry.pose / motion / qr / radar
+
+
+========================================================
+3) OPTIONAL DEBUG RPC (NATS CORE)
+========================================================
+
+Backend -> Robot (request), Robot -> Backend (reply):
+- robot.{robotId}.rpc.ping
+- robot.{robotId}.rpc.get_state
+- robot.{robotId}.rpc.get_versions
+
+
+========================================================
+4) BACKEND-INTERNAL (TOOLS/SERVICES)
+========================================================
+
+Replay:
+- backend.replay.start
+- backend.replay.stop
+- backend.replay.{replaySessionId}.event
+- backend.replay.{replaySessionId}.status
+
+Simulation Sessions:
+- backend.sim.start
+- backend.sim.stop
+- backend.sim.{simSessionId}.status
+
+
+========================================================
+END OF NATS CONNECTION LIST
+========================================================

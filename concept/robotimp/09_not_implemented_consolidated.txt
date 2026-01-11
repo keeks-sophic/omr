@@ -1,0 +1,76 @@
+1. Scope
+- Consolidate current gaps from robot implementation docs (00–08) and align with c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\concept\robotconcept.txt expectations.
+
+2. Module-wise “What have not be implemented”
+- 00 Startup & Identity:
+- - Payload serialization for startup emits
+- - Graceful shutdown/reconnect
+- - Startup health checks/warmup sequencing
+- - NATS authentication/authorization
+- 01 Messaging & Contracts:
+- - Payload serialization and validation
+- - Versioning and schema evolution
+- - RPC request/response plumbing
+- 02 Robot State:
+- - Persistent storage/recovery on restart
+- - State schema versioning/migration
+- - Concurrency control on event application
+- - Full actuator/hardware coverage in mapping
+- 03 Task & Route Execution:
+- - Real progress computation (odometry + checkpoints)
+- - Effective application of route updates
+- - Integration of task executor with motion/path planner
+- 04 Command Handling:
+- - Detailed ACK payloads (correlation/status/reason body)
+- - Hardware side-effects for camera toggle and others
+- - Extended safety interlocks (zones/speed caps/role-based blocks)
+- 05 Traffic Adapter:
+- - Non-linear interpolation and route-aware speed profiles
+- - Schedule validation and conflict resolution
+- - Checkpoint/zone integration
+- 06 Motion Control:
+- - Pose/odometry-coupled closed-loop speed control
+- - Multi-axis motion and curvature handling
+- - Mode-specific/environmental limit management
+- 07 Hardware Interface:
+- - Real hardware IO bindings for all drivers
+- - Calibration/diagnostics/failure recovery routines
+- - Comprehensive actuator feedback into state
+- 08 Telemetry & Status:
+- - Structured telemetry payload content
+- - Rate limiting and batching
+- - Error handling and retry on publish failures
+
+3. “Requirements not implemented” (per robotconcept)
+- Reliability & JetStream Policies:
+- - Durable consumers and ordered processing for commands/tasks/routes
+- - Backpressure handling; MaxDeliver + dead-letter on repeated failures
+- - Droppable control streams for traffic with short MaxAge/limits
+- Unified Envelope & Traceability:
+- - Standard envelope including: actor, role, timestamp, action, target, outcome
+- - CorrelationId and traceId propagation across messages and ACKs
+- - Consistent event field taxonomy (progress, failures, safety reasons)
+- Auditing & Observability:
+- - Audit standardization for privileged actions and state transitions
+- - Health metrics for state application, motion smoothing, schedule staleness
+- - Startup logs/events and configuration validation with clear failure modes
+- Safety & Policies:
+- - Configurable safety policies (radar/E-stop/watchdog overrides)
+- - Interlock cascades and safety source configuration
+- Teach Mode:
+- - Full teach session plumbing (enable/disable, step recording, feedback)
+- - Mission recording with correlations to state/ACK events
+- Telemetry Durability:
+- - Durable pipelines and replay for key streams
+- - Source values for battery/health beyond stubs
+- RPC & Diagnostics:
+- - Structured request/response schemas for rpc.ping/get_state/get_versions
+- - Driver-level diagnostics export and telemetry
+
+4. Suggested Next Steps (incremental)
+- Define unified envelope schema and adopt across publishers/subscribers
+- Introduce JetStream stream/consumer configurations per robotconcept reliability matrix
+- Implement payload structures for ACK, state.event, route.progress, telemetry streams
+- Add teach mode fields and flows to state, command handling, and telemetry
+- Add safety policy config and enforcement hooks in motion/command/task layers
+- Implement persistence for RobotState and configuration validation on startup

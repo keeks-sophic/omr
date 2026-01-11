@@ -1,0 +1,42 @@
+1. What should be implement
+- Motion target computation and application respecting limits and safety
+- Acceleration/deceleration smoothing and clamping to max drive speed
+- Publishing motion telemetry and state changes
+
+2. What have been implement
+- MotionTickWorker derives target from TrafficAdapter, zeroes on staleness/obstacle, applies MotionTargetUpdated and triggers MotionController
+- MotionController clamps target, applies acceleration/deceleration per tick, drives DriveDriver.SetLinearSetpoint, applies MotionCurrentUpdated and publishes snapshot and telemetry.motion
+- Safety overrides: estop/obstacle force zero velocity
+
+3. How does it implement
+- Tick cadence controlled by TickOptions.MotionMs via PeriodicScheduler
+- Store reflects motion target/current and motion state transitions (MOVING/STOPPED)
+- Snapshot worker emits changed fields; TelemetryService.PublishMotion publishes motion telemetry
+
+4. How the flow works between frontend, backend, robot, db
+- Backend influences motion via traffic.schedule and commands; robot computes and publishes motion updates
+- No frontend/database in motion module
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Publish: telemetry.motion and state.event for motion changes
+- Subscribe: indirect via traffic.schedule and command control
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Pose/odometry coupling and closed-loop speed control
+- Multi-axis motion and curvature handling
+- Limit management per mode and environmental constraints
+
+9. Requirements not implemented (per robotconcept)
+- Comprehensive audit on motion state changes and overrides
+- Configurable safety policies for motion suppression
+- Durable telemetry and smoothing parameter tuning
+
+10. Endpoints and compliance
+- NATS: telemetry.motion, state.event
+- Matches rbnats: Yes (subject naming)

@@ -15,12 +15,6 @@ using System.Collections.Concurrent;
 
 namespace Backend.Worker;
 
-/// <summary>
-/// TrafficControlWorker listens to robot route-segment requests and telemetry over NATS.
-/// It decides per-request whether the robot can proceed, how far (limitMeters),
-/// and at what speed, while enforcing collision avoidance via node/edge reservations.
-/// It also triggers rerouting if a robot is stopped on a two-way path.
-/// </summary>
 public class TrafficControlWorker : BackgroundService
 {
     private readonly ILogger<TrafficControlWorker> _logger;
@@ -29,14 +23,10 @@ public class TrafficControlWorker : BackgroundService
     private readonly IOptions<NatsOptions> _opts;
     private readonly object _lock = new();
 
-    // Per-map occupancy state: node and directed edge reservations with short leases
     private readonly Dictionary<int, Dictionary<int, Occupancy>> _nodeOccupancyByMap = new();
     private readonly Dictionary<int, Dictionary<(int from, int to), Occupancy>> _edgeOccupancyByMap = new();
-    // Robot's last reserved node/edge so we can release previous reservations
     private readonly Dictionary<string, (int? nodeId, (int from, int to)? edge)> _robotLast = new();
-    // Latest telemetry snapshot per robot IP (position/state/map)
     private readonly ConcurrentDictionary<string, RobotSnap> _latest = new();
-    // Last reroute time per robot to throttle reroute triggers
     private readonly ConcurrentDictionary<string, DateTime> _lastReroute = new();
 
     public TrafficControlWorker(ILogger<TrafficControlWorker> logger, IServiceProvider sp, NatsService nats, IOptions<NatsOptions> opts)
@@ -49,17 +39,14 @@ public class TrafficControlWorker : BackgroundService
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Connect to NATS and ensure streams exist
         _ = _nats.ConnectAsync(_opts.Value.Url, stoppingToken);
         _ = _nats.EnsureStreamAsync(_opts.Value.RouteWildcardStream ?? "ROBOTS_ROUTE", $"{NatsTopics.RouteSegmentPrefix}.>");
         _ = _nats.EnsureStreamAsync(_opts.Value.ControlWildcardStream ?? "ROBOTS_CONTROL", $"{NatsTopics.ControlPrefix}.>");
         _ = _nats.EnsureStreamAsync(_opts.Value.TelemetryWildcardStream ?? "ROBOTS_TELEMETRY", $"{NatsTopics.TelemetryPrefix}.>");
-        // Subscribe to route-segment commands (decision path)
         _nats.Subscribe($"{NatsTopics.RouteSegmentPrefix}.>", async (s, e) =>
         {
             await HandleRouteSegmentMessage(e, stoppingToken);
         });
-        // Subscribe to telemetry to keep latest position/state per robot
         _nats.Subscribe($"{NatsTopics.TelemetryPrefix}.>", (s, e) =>
         {
             try
@@ -85,7 +72,6 @@ public class TrafficControlWorker : BackgroundService
     {
         try
         {
-            // Parse incoming command payload
             var text = e.Message.Data != null ? Encoding.UTF8.GetString(e.Message.Data) : "{}";
             var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
             var command = doc.RootElement.TryGetProperty("command", out var cmd) ? cmd.GetString() : null;
@@ -98,7 +84,6 @@ public class TrafficControlWorker : BackgroundService
             var mapId = mapEl.GetInt32();
             if (!routeEl.TryGetProperty("points", out var ptsEl) || ptsEl.ValueKind != JsonValueKind.Array) return;
             var segLen = routeEl.TryGetProperty("length", out var lenEl) && lenEl.ValueKind == JsonValueKind.Number ? lenEl.GetDouble() : 5.0;
-            // Extract segment polyline points
             var pts = ptsEl.EnumerateArray().Select(p =>
             {
                 var x = p.TryGetProperty("x", out var xx) && xx.ValueKind == JsonValueKind.Number ? xx.GetDouble() : 0;
@@ -111,7 +96,6 @@ public class TrafficControlWorker : BackgroundService
             int? endNodeId;
             using (var scope = _sp.CreateScope())
             {
-                // Resolve robot entity and nearest graph nodes for segment endpoints
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var robotEntity = await db.Robots.AsNoTracking().FirstOrDefaultAsync(r => r.Ip == ip, stoppingToken);
                 var robotId = robotEntity?.Id ?? 0;
@@ -121,11 +105,9 @@ public class TrafficControlWorker : BackgroundService
                 endNodeId = await NearestNodeIdAsync(db, mapId, lastPt.x, lastPt.y, stoppingToken);
                 if (startNodeId == null || endNodeId == null)
                 {
-                    // If endpoints can't be mapped to nodes, allow with default speed
-                    await SendAllowAsync(ip!, robotId, true, segLen, 1.5, stoppingToken);
+                    await SendAllowAsync(ip!, robotId, true, segLen, 1.5, stoppingToken, "moving");
                     return;
                 }
-                // Find path entity between nodes or closest active path as fallback
                 var path = await db.Paths.AsNoTracking()
                     .FirstOrDefaultAsync(p => p.MapId == mapId && p.StartNodeId == startNodeId && p.EndNodeId == endNodeId, stoppingToken)
                     ?? await db.Paths.AsNoTracking()
@@ -154,7 +136,6 @@ public class TrafficControlWorker : BackgroundService
                     path = bestPath;
                     if (path != null)
                     {
-                        // Orient start/end nodes based on which endpoint is closer to segment start
                         var a = nodesMap[path.StartNodeId];
                         var b = nodesMap[path.EndNodeId];
                         var dax = Math.Abs((a.Location?.X ?? a.X) - firstPt.x);
@@ -168,7 +149,6 @@ public class TrafficControlWorker : BackgroundService
                     }
                 }
 
-                // Compute the allowed forward travel limit based on robots ahead on the same path
                 var endNode = await db.Nodes.AsNoTracking().FirstOrDefaultAsync(n => n.Id == endNodeId, stoppingToken);
                 var endDist = double.MaxValue;
                 if (endNode != null)
@@ -184,15 +164,29 @@ public class TrafficControlWorker : BackgroundService
                     .Select(r => new { r.Ip, X = (double?)r.X, Y = (double?)r.Y, r.State })
                     .ToList();
                 var line = path?.Location as LineString;
+                var wrongWay = false;
+                if (line != null && path?.TwoWay == false)
+                {
+                    var lirCheck = new LengthIndexedLine(line);
+                    var startIdxC = lirCheck.Project(new Coordinate(firstPt.x, firstPt.y));
+                    var endIdxC = lirCheck.Project(new Coordinate(lastPt.x, lastPt.y));
+                    wrongWay = endIdxC < startIdxC;
+                }
                 var aheadLimit = ComputeAheadLimit(line, ip!, segLen, firstPt.x, firstPt.y, lastPt.x, lastPt.y, robotEntity, mapId);
                 bool allowed;
                 double? limitMeters = null;
                 double speedLimit = 0;
-                // Degree of end node; high-degree implies junction handling
                 var deg = await db.Paths.AsNoTracking().CountAsync(p => p.MapId == mapId && (p.StartNodeId == endNodeId || p.EndNodeId == endNodeId), stoppingToken);
-                // Decide conflict-free reservation and speed, and record occupancy
-                (allowed, limitMeters, speedLimit) = DecideAndReserve(mapId, startNodeId!.Value, endNodeId!.Value, ip!, segLen, aheadLimit, deg);
-                // If robot is stopped on a two-way path, trigger reroute (throttled)
+                if (wrongWay)
+                {
+                    allowed = false;
+                    limitMeters = 0;
+                    speedLimit = 0;
+                }
+                else
+                {
+                    (allowed, limitMeters, speedLimit) = DecideAndReserve(mapId, startNodeId!.Value, endNodeId!.Value, ip!, segLen, aheadLimit, deg, path?.TwoWay == true);
+                }
                 if (path?.TwoWay == true && IsStopped(ip!) && ShouldReroute(ip!))
                 {
                     var rx = _latest.TryGetValue(ip!, out var snapR) ? snapR.X : (robotEntity?.Location != null ? robotEntity.Location.X : (robotEntity?.X ?? lastPt.x));
@@ -201,8 +195,8 @@ public class TrafficControlWorker : BackgroundService
                     await queue.EnqueueAsync(new RoutePlanTask { Ip = ip!, MapId = mapId, X = rx, Y = ry }, stoppingToken);
                     _lastReroute[ip!] = DateTime.UtcNow;
                 }
-                // Send final allow/limit/speed command for robot to execute
-                await SendAllowAsync(ip!, robotId, allowed, limitMeters, speedLimit, stoppingToken);
+                var newState = !allowed ? "stop" : (endDist <= 0.5 ? "idle" : "moving");
+                await SendAllowAsync(ip!, robotId, allowed, limitMeters, speedLimit, stoppingToken, newState);
             }
         }
         catch (Exception ex)
@@ -213,7 +207,6 @@ public class TrafficControlWorker : BackgroundService
 
     private async Task<int?> NearestNodeIdAsync(AppDbContext db, int mapId, double x, double y, CancellationToken ct)
     {
-        // Pick nearest node by Euclidean distance; supports nodes with geometry Location or X/Y
         var nodes = await db.Nodes.AsNoTracking().Where(n => n.MapId == mapId).Select(n => new { n.Id, n.X, n.Y, n.Location }).ToArrayAsync(ct);
         if (nodes.Length == 0) return null;
         var best = nodes.Select(n =>
@@ -226,23 +219,22 @@ public class TrafficControlWorker : BackgroundService
         return best.Id;
     }
 
-    private async Task SendAllowAsync(string ip, int robotId, bool allow, double? limitMeters, double speedLimit, CancellationToken ct)
+    private async Task SendAllowAsync(string ip, int robotId, bool allow, double? limitMeters, double speedLimit, CancellationToken ct, string state)
     {
-        // Publish decision to robot-specific control topic
         var payload = new
         {
             command = NatsTopics.CommandTrafficControl,
             ip,
             allow,
             limitMeters,
-            speedLimit
+            speedLimit,
+            state
         };
         await _nats.PublishCoreAsync($"{NatsTopics.ControlPrefix}.{robotId}", payload, ct);
     }
 
     private static double DistanceToSegment(double px, double py, double ax, double ay, double bx, double by)
     {
-        // Point-to-segment distance for path fallback/orientation
         var vx = bx - ax;
         var vy = by - ay;
         var wx = px - ax;
@@ -259,7 +251,6 @@ public class TrafficControlWorker : BackgroundService
 
     private class RobotSnap
     {
-        // Latest telemetry data per robot IP
         public string Ip { get; set; } = "";
         public double X { get; set; }
         public double Y { get; set; }
@@ -270,7 +261,6 @@ public class TrafficControlWorker : BackgroundService
 
     private class Occupancy
     {
-        // Reservation metadata for nodes/edges
         public string Ip { get; set; } = "";
         public double Priority { get; set; }
         public DateTime Updated { get; set; }
@@ -278,7 +268,6 @@ public class TrafficControlWorker : BackgroundService
 
     private double ComputePriority(string ip)
     {
-        // Priority favors moving robots over idle/stopped, with deterministic tie-breaker
         if (_latest.TryGetValue(ip, out var snap))
         {
             var baseScore = 1.0;
@@ -291,11 +280,6 @@ public class TrafficControlWorker : BackgroundService
         return 1.0;
     }
 
-    /// <summary>
-    /// Projects the requesting robot and nearby robots onto the path geometry and
-    /// computes the safe forward travel limit (meters) by enforcing a buffer
-    /// to the nearest robot ahead on the same line.
-    /// </summary>
     private double ComputeAheadLimit(LineString? line, string ip, double segLen, double sx, double sy, double ex, double ey, dynamic? robotEntity, int mapId)
     {
         var limit = segLen;
@@ -342,12 +326,7 @@ public class TrafficControlWorker : BackgroundService
         return limit;
     }
 
-    /// <summary>
-    /// Cleans up expired reservations, releases previous reservations for this robot,
-    /// checks for conflicts on end node and forward/reverse edges, and if allowed,
-    /// reserves resources and computes speed scaling based on allowed distance.
-    /// </summary>
-    private (bool allowed, double? limitMeters, double speed) DecideAndReserve(int mapId, int startNodeId, int endNodeId, string ip, double segLen, double aheadLimit, int deg)
+    private (bool allowed, double? limitMeters, double speed) DecideAndReserve(int mapId, int startNodeId, int endNodeId, string ip, double segLen, double aheadLimit, int deg, bool isTwoWay)
     {
         bool allowed = true;
         double? limitMeters = null;
@@ -365,7 +344,7 @@ public class TrafficControlWorker : BackgroundService
                 _edgeOccupancyByMap[mapId] = edgeOcc;
             }
             var now = DateTime.UtcNow;
-            var leaseMs = 6000;
+            var leaseMs = 20000;
             if (nodeOcc.Count > 0)
             {
                 var expiredNodes = nodeOcc.Where(kv => (now - kv.Value.Updated).TotalMilliseconds > leaseMs).Select(kv => kv.Key).ToList();
@@ -390,7 +369,7 @@ public class TrafficControlWorker : BackgroundService
             var forward = (from: startNodeId, to: endNodeId);
             var reverse = (from: endNodeId, to: startNodeId);
             var myPriority = ComputePriority(ip);
-            if (deg > 2)
+            if (isTwoWay || deg > 2)
             {
                 if (nodeOcc.TryGetValue(endNodeId, out var nocc) && nocc.Ip != ip) allowed = false;
             }
@@ -408,7 +387,7 @@ public class TrafficControlWorker : BackgroundService
             {
                 var occ = new Occupancy { Ip = ip, Priority = myPriority, Updated = now };
                 edgeOcc[forward] = occ;
-                if (deg > 2) nodeOcc[endNodeId] = occ;
+                if (isTwoWay || deg > 2) nodeOcc[endNodeId] = occ;
                 _robotLast[ip] = (endNodeId, forward);
                 var ratio = Math.Max(0, Math.Min(1, (limitMeters ?? 0) / Math.Max(0.1, segLen)));
                 speedLimit = Math.Max(0.1, Math.Min(2.0, 0.5 + 1.5 * ratio));
@@ -417,9 +396,6 @@ public class TrafficControlWorker : BackgroundService
         return (allowed, limitMeters, speedLimit);
     }
 
-    /// <summary>
-    /// Returns true if telemetry indicates the robot is stopped.
-    /// </summary>
     private bool IsStopped(string ip)
     {
         if (_latest.TryGetValue(ip, out var snap))
@@ -430,9 +406,6 @@ public class TrafficControlWorker : BackgroundService
         return false;
     }
 
-    /// <summary>
-    /// Throttles reroute triggers per robot to avoid spamming; minimum interval applies.
-    /// </summary>
     private bool ShouldReroute(string ip)
     {
         var now = DateTime.UtcNow;

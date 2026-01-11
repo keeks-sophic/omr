@@ -1,0 +1,63 @@
+1. What should be implement
+- Accept task creation and control (pause/resume/cancel)
+- Auto-assign robots, plan routes, publish assignments/updates
+- Monitor feedback and update task status with SignalR notifications
+
+2. What have been implement
+- TasksController for REST endpoints
+- TaskManagerService handling creation, assignment, control
+- DTOs: TaskCreateRequest, TaskDto
+- Contracts: TaskAssignment, TaskControl; RouteAssign/Update integration
+- RoutePlannerService integration for route planning
+- NatsPublisherStub used for publishing
+
+3. How does it implement
+- Validates requests, persists task rows, plans route, updates DB
+- Publishes TaskAssignment and RouteAssign via stub
+- Emits SignalR task events (topics defined)
+- Uses AppDbContext Task schema: Task, TaskEvent, Route
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend POST /api/v1/tasks → backend creates task → DB persists
+- Backend plans route, publishes assign/update to robot (stub)
+- Robot would report progress via route.progress/task.event (not consumed)
+- Frontend receives task.* SignalR updates
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: Model/Task (Task, Route, TaskEvent)
+- Stores lifecycle events and planned route segments
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended: robot.{robotId}.task.assign|control, robot.{robotId}.route.assign|update
+- Feedback intended: robot.{robotId}.task.event, robot.{robotId}.route.progress
+- Actual: publisher stub only
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/tasks and control endpoints
+- SignalR: task.created/assigned/status.changed/completed/failed
+
+8. What have not be implemented
+- Real JetStream publish with ack correlation and retry
+- Feedback consumers to reconcile robot events into task status
+- Advanced auto-assignment and cost model beyond basic placeholder
+ 
+9. Requirements not implemented (per backendconcept)
+- Task lifecycle reconciliation with closed-loop feedback (safety stops, slow progress)
+- Auto-assignment cost function considering congestion penalty and wait_time
+- Mission expansion into executable tasks for RUN_MISSION
+- Robust status transitions and incident integration
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- GET  /api/v1/tasks — Implemented: No
+- POST /api/v1/tasks — Implemented: Yes
+- GET  /api/v1/tasks/{taskId} — Implemented: No
+- POST /api/v1/tasks/{taskId}/pause — Implemented: Yes
+- POST /api/v1/tasks/{taskId}/resume — Implemented: Yes
+- POST /api/v1/tasks/{taskId}/cancel — Implemented: Yes
+- SignalR: task.created, task.assigned, task.status.changed, task.failed, task.completed — Implemented: Partial (topics defined, emission partial)
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend -> Robot: robot.{robotId}.task.assign|control; robot.{robotId}.route.assign|update — Implemented: No (stub only)
+- Robot -> Backend: robot.{robotId}.task.event; robot.{robotId}.route.progress — Implemented: No (consumers missing)
+Matches rbnats: No

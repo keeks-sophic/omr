@@ -1,0 +1,65 @@
+1. What should be implement
+- JWT authentication, role-based authorization, access policies
+- SignalR authorization with per-robot access control
+- Audit trail for privileged/denied actions
+
+2. What have been implement
+- AuthController: /api/v1/auth/login, /api/v1/auth/me, /api/v1/auth/logout (token revocation), /api/v1/auth/refresh (token rotation)
+- AdminUsersController: list, create, update, disable users; assign roles
+- JwtTokenService issuing access and refresh tokens with claims (sub, unique_name, jti, roles, allowedRobotIds)
+- AuthorizationPolicies with Admin/Planner/Operator/Viewer policies and default authenticated fallback
+- AuthorizationAuditHandler: global audit on authorization.denied outcomes
+- SignalR hub [RealtimeHub] protected by [Authorize]; per-robot checks via RealtimeAuthorizer; group-based filtering
+- AuditRepository used across auth/admin and multiple domain controllers (expanded coverage in Maps/Replay)
+ - RevokedToken model and JwtBearer event checks for disabled/missing user and revoked token
+
+3. How does it implement
+- Program.cs configures JwtBearer with issuer/audience/key and role claims
+- JwtTokenService builds claims: sub, unique_name, roles, allowedRobotIds; refresh tokens use separate audience with rotation
+- Controllers enforce [Authorize] with role policies on privileged endpoints
+- RealtimeHub validates allowedRobotIds before joining robot groups; deliveries filtered via group membership
+- AuditRepository writes OK/DENIED/ERROR outcomes for actions; AuthorizationAuditHandler writes authorization.denied on failed authorization
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend calls /api/v1/auth/login, receives JWT, uses it for REST and SignalR /hubs/realtime
+- Backend authorizes REST actions and hub group joins using roles and allowedRobotIds
+- Robot not involved in auth flow
+- DB stores users/roles/policies and audit events
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: Model/Auth (User, Role, UserRole, UserAccessPolicy), Model/Ops (AuditEvent)
+- AppDbContext exposes corresponding DbSets
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- No direct auth-to-robot NATS communication
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/auth/*, /api/v1/admin/users/*
+- SignalR: /hubs/realtime (authorization enforced)
+
+8. What have not be implemented
+- Universal audit logging standardization across all modules (some actions still missing)
+- Fine-grained per-action permission scopes beyond coarse roles
+- Security hardening: broader admin tooling for token/JTI management; additional delivery-time checks if needed
+ 
+9. Requirements not implemented (per backendconcept)
+- Ensure consistent role-based enforcement across every privileged action (commands, teach, tasks, map publish, sim, replay)
+- Full audit coverage with standardized fields: actor, role, timestamp, action, target, outcome
+- Lifecycle hardening for refresh rotation and admin tooling
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- POST /api/v1/auth/login — Implemented: Yes
+- POST /api/v1/auth/logout — Implemented: Yes
+- GET  /api/v1/auth/me — Implemented: Yes
+- POST /api/v1/auth/refresh — Implemented: Yes
+- Hub  /hubs/realtime — Implemented: Yes
+- Admin:
+-  - GET  /api/v1/admin/users — Implemented: Yes
+-  - POST /api/v1/admin/users — Implemented: Yes
+-  - PUT  /api/v1/admin/users/{userId} — Implemented: Yes
+-  - POST /api/v1/admin/users/{userId}/disable — Implemented: Yes
+-  - POST /api/v1/admin/users/{userId}/roles — Implemented: Yes
+Matches fbstream: No (partial coverage)
+NATS/JetStream (from rbnats): none for security
+Matches rbnats: Yes (not applicable)

@@ -1,0 +1,203 @@
+========================================================
+ROBOT FILE STRUCTURE (MAINTAINABLE IMPLEMENTATION PLAN)
+========================================================
+
+Goal:
+- Provide a folder structure for the robot C# project that can implement every function in robotconcept.txt
+- Keep robot modules independent and testable (no “god module”)
+- Align with robotmodules/* documentation modules
+- Keep NATS/JetStream communication aligned with rbnats.txt
+
+Project root:
+Robot/
+
+
+========================================================
+1) HIGH-LEVEL LAYOUT
+========================================================
+
+Robot/
+  Program.cs
+  Robot.csproj
+  appsettings.json
+  run.ps1
+
+  Options/
+    RobotOptions.cs            // config values (defaults + binding)
+    NatsOptions.cs             // JetStream stream/consumer options
+    IdentityOptions.cs         // defaults for robotId/name/ip
+
+  Topics/
+    NatsSubjects.cs            // robot.{robotId}.* subjects (rbnats.txt)
+
+  Contracts/                   // strongly typed message payloads (robot <-> backend)
+    NatsEnvelope.cs
+    Presence/
+      PresenceHello.cs
+      PresenceHeartbeat.cs
+    Commands/
+      GripCommand.cs
+      HoistCommand.cs
+      TelescopeCommand.cs
+      CamToggleCommand.cs
+      RotateCommand.cs
+      ModeCommand.cs
+      CommandAck.cs
+    Tasks/
+      TaskAssignment.cs
+      TaskControl.cs
+      RobotTaskEvent.cs
+    Routes/
+      RouteAssign.cs
+      RouteUpdate.cs
+      RouteProgress.cs
+    Telemetry/
+      BatteryTelemetry.cs
+      HealthTelemetry.cs
+      PoseTelemetry.cs
+      MotionTelemetry.cs
+      RadarTelemetry.cs
+      QrTelemetry.cs
+    Logs/
+      RobotLogEvent.cs
+    Traffic/
+      TrafficSchedule.cs
+
+  Domain/
+    Identity/
+      RobotIdentity.cs         // robotId (stable string), name, ip
+      IdentityResolver.cs      // CLI/config resolution
+    State/
+      RobotState.cs            // in-memory state model
+      RobotStateStore.cs       // reducer/event applier (single source of truth)
+      RobotStateEvents.cs      // event types used between modules
+    TaskRoute/
+      TaskRouteExecutor.cs     // task.assign, route.assign/update, task.control
+      RouteProgressTracker.cs  // computes segment index + distance along
+    Commands/
+      CommandInbox.cs          // decode/validate inbound cmd.*
+      CommandExecutor.cs       // actuator step execution orchestration
+      CommandValidation.cs     // capability/feature/safety checks
+    Traffic/
+      TrafficAdapter.cs        // traffic.schedule -> targetLinearVel
+      ScheduleInterpolator.cs  // time-indexed interpolation
+    Motion/
+      MotionController.cs      // apply accel/decel limits to targetVel
+      MotionLimits.cs          // max speed/accel/decel
+    Hardware/
+      Drivers/
+        DriveDriver.cs
+        RadarDriver.cs
+        QrReaderDriver.cs
+        HoistDriver.cs
+        TelescopeDriver.cs
+        GripDriver.cs
+        CamToggleDriver.cs
+        RotateDriver.cs
+      Safety/
+        SafetyInterlocks.cs    // hard stop overrides
+    Telemetry/
+      TelemetryPublisher.cs    // telemetry.* + state snapshot/event publishing
+      LogPublisher.cs          // log.event publishing
+      PresencePublisher.cs     // presence.hello + heartbeat publishing
+    Config/
+      ConfigApplier.cs         // cfg.motion_limits/runtime_mode/features -> state
+      FeatureFlags.cs          // telescopeEnabled, etc.
+
+  Services/                    // infrastructure adapters (NATS, OS, timers)
+    NatsService.cs             // connection + JetStream subscriptions/publishing
+    TelemetryService.cs        // periodic telemetry scheduler (can move to Domain/Telemetry)
+    CommandListenerService.cs  // subscription wiring (can move to Domain/Commands)
+    IdentityService.cs         // identity resolution (can move to Domain/Identity)
+
+  Workers/
+    RobotWorker.cs             // hosted service wiring (starts modules)
+    HeartbeatWorker.cs         // periodic presence.heartbeat
+    StateSnapshotWorker.cs     // periodic state.snapshot
+    MotionTickWorker.cs        // control tick for TrafficAdapter + MotionController
+
+
+========================================================
+2) PROGRAM STARTUP (CLI FLAGS)
+========================================================
+
+Program.cs responsibilities:
+- Bind config from appsettings.json + CLI
+- Construct RobotIdentity using precedence rules
+- Wire NATS subscriptions and module dependencies
+
+CLI flags (robotconcept.txt):
+- --id: robotId (string; recommended: serial number)
+- --name / -n: display name
+- --ip / -i: ip metadata
+
+Implementation notes (current project state):
+- Program.cs already maps --name/-n and --ip
+- Add --id mapping to RobotOptions (Robot:Id) and extend RobotOptions with Id property
+- Build NATS subjects using robotId for robot.{robotId}.*
+
+
+========================================================
+3) MODULE MAPPING (robotmodules -> code folders)
+========================================================
+
+- robotmodules/00_startup_identity.txt
+  - Domain/Identity/*
+  - Options/IdentityOptions.cs
+
+- robotmodules/01_messaging_contracts.txt
+  - Topics/NatsSubjects.cs
+  - Services/NatsService.cs
+  - Contracts/*
+
+- robotmodules/02_state_store.txt
+  - Domain/State/RobotStateStore.cs
+  - Domain/State/RobotState.cs
+
+- robotmodules/03_task_route_execution.txt
+  - Domain/TaskRoute/TaskRouteExecutor.cs
+  - Domain/TaskRoute/RouteProgressTracker.cs
+
+- robotmodules/04_command_handling.txt
+  - Domain/Commands/CommandInbox.cs
+  - Domain/Commands/CommandExecutor.cs
+  - Domain/Commands/CommandValidation.cs
+
+- robotmodules/05_traffic_adapter.txt
+  - Domain/Traffic/TrafficAdapter.cs
+  - Domain/Traffic/ScheduleInterpolator.cs
+
+- robotmodules/06_motion_control.txt
+  - Domain/Motion/MotionController.cs
+  - Domain/Motion/MotionLimits.cs
+
+- robotmodules/07_hardware_interface.txt
+  - Domain/Hardware/Drivers/*
+  - Domain/Hardware/Safety/SafetyInterlocks.cs
+
+- robotmodules/08_telemetry_reporting.txt
+  - Domain/Telemetry/TelemetryPublisher.cs
+  - Domain/Telemetry/PresencePublisher.cs
+  - Domain/Telemetry/LogPublisher.cs
+
+
+========================================================
+4) COMMUNICATION ALIGNMENT (ROBOT <-> BACKEND)
+========================================================
+
+Robot identity:
+- robotId is the stable string identity used in NATS subjects robot.{robotId}.*
+- IP is optional metadata and must not be used for identity
+
+Robot subscribes (Backend -> Robot):
+- cmd.* , task.assign/control , route.assign/update , cfg.* , traffic.schedule
+
+Robot publishes (Robot -> Backend):
+- presence.* , cmd_ack , state.* , task.event , route.progress , telemetry.* , log.event
+
+All message shapes should come from Contracts/* to keep backend and robot aligned.
+
+
+========================================================
+END OF ROBOT FILE STRUCTURE
+========================================================

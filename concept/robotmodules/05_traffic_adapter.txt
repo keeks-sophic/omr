@@ -1,0 +1,33 @@
+========================================================
+MODULE 05: TRAFFIC CONTROL ADAPTER (TIME-BASED SETPOINTS)
+========================================================
+
+Goal:
+- Convert backend traffic schedules into motion setpoints over time
+- Provide smooth targetLinearVel updates to Motion Control
+
+Primary Inputs (droppable latest-wins):
+- robot.{robotId}.traffic.schedule
+
+Primary Outputs:
+- targetLinearVel setpoints fed into Motion Control
+- state.event updates (targetLinearVel, motionState)
+
+Schedule Model:
+- schedule contains time-indexed points:
+  - (tMs, targetVel)
+- The adapter interprets schedule time relative to generatedAt and local clock.
+
+Flow:
+1) Receive new schedule:
+   - replace current schedule (latest wins)
+2) Periodic tick (e.g., 20–50ms):
+   - compute current targetVel by interpolating schedule points
+   - apply safety overrides:
+     - radar obstacle -> force targetVel=0
+3) Emit targetVel to Motion Control
+
+Cross-check with backendmodules:
+- backendmodules/07_traffic_control_service.txt describes time windows/headway.
+- backendmodules/08_schedule_publisher.txt publishes droppable schedule updates.
+

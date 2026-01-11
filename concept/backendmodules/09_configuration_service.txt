@@ -1,0 +1,38 @@
+========================================================
+MODULE 09: CONFIGURATION SERVICE (LIMITS + RUNTIME + FEATURES)
+========================================================
+
+Goal:
+- Manage per-robot motion limits and runtime mode
+- Manage user feature flags (telescopeEnabled)
+- Publish configs to robots reliably
+
+Primary Inputs:
+- REST:
+  - PUT /api/v1/robots/{robotId}/config/motion-limits
+  - PUT /api/v1/robots/{robotId}/config/runtime-mode
+  - PUT /api/v1/robots/{robotId}/config/feature-flags
+- Robot presence.hello (trigger initial publish)
+
+Primary Outputs:
+- Postgres:
+  - core.robot_sessions.feature_flags
+  - core.robot_sessions.capabilities (read-only input for validation)
+  - optional config history table (not required)
+- NATS:
+  - robot.{robotId}.cfg.motion_limits
+  - robot.{robotId}.cfg.runtime_mode
+  - robot.{robotId}.cfg.features
+- SignalR:
+  - robot.config.updated
+
+Logic:
+1) Validate user permissions (Planner/Admin, or Operator if policy allows)
+2) Validate constraints (non-negative, sane ranges)
+3) Persist latest config (jsonb)
+4) Publish to robot with correlationId and await cmd_ack semantics (durable)
+5) Emit robot.config.updated to UI
+
+Safety Rules:
+- Feature flags can be restricted while task RUNNING (policy)
+- Telescope commands must be rejected when telescopeEnabled=false

@@ -1,0 +1,56 @@
+1. What should be implement
+- Compute valid routes on the active map graph with ETA
+- Respect one-way and maintenance constraints; integrate congestion costs
+- Provide RouteDto and segments for robot execution
+
+2. What have been implement
+- RoutesController with plan endpoint
+- RoutePlannerService building routes and DTOs
+- DTOs: RoutePlanRequest, RouteDto, RouteSegmentDto, PointDto
+- Map graph entities and mappers present
+
+3. How does it implement
+- Loads map nodes/paths/points via AppDbContext
+- Builds path segments and estimates route
+- Integrates with TaskManagerService to attach routes to tasks
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend requests route plan → backend computes using DB map
+- Backend stores planned route (for tasks) and returns RouteDto
+- Robot receives route.assign via messaging (stub)
+- Frontend sees route.updated via SignalR
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: Model/Map (MapVersion, MapNode, MapPath, MapPoint, QrAnchor)
+- Task.Route persistence via Model/Task Route
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended: robot.{robotId}.route.assign|update
+- Actual: published via NatsPublisherStub
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/routes/plan and related endpoints
+- SignalR: route.updated
+
+8. What have not be implemented
+- PostGIS nearest-node/path projection functions for precise routing
+- Congestion-aware cost integration with TrafficControlService
+- Robust unreachable detection and detailed validation responses
+ 
+9. Requirements not implemented (per backendconcept)
+- Route cost model integrating travel_time, wait_time, congestion_penalty
+- ETA output fields including start/arrival and per-segment breakdown
+- Replanning triggers wired from closed-loop feedback
+- Validation and error responses aligned with concept (422 unreachable)
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- POST /api/v1/routes/plan — Implemented: Yes
+- GET  /api/v1/routes/{routeId} — Implemented: No
+- GET  /api/v1/routes/{routeId}/eta — Implemented: No
+- SignalR: route.updated — Implemented: Partial (emitted)
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend -> Robot: robot.{robotId}.route.assign|update — Implemented: No (stub only)
+- Robot -> Backend: robot.{robotId}.route.progress — Implemented: No (consumer missing)
+Matches rbnats: No

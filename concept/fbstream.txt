@@ -1,0 +1,352 @@
+========================================================
+FRONTEND <-> BACKEND STREAMS (API + SIGNALR TOPICS)
+========================================================
+
+Assumptions:
+- Backend exposes REST APIs at: /api/v1
+- Backend exposes SignalR hubs at: /hubs/*
+- Authentication is required for all endpoints unless stated otherwise.
+
+Data Access Rules (effective default):
+- Use REST for:
+  - create/update/delete actions
+  - list/search with paging and filters
+  - historical queries (time windows) and exports
+- Use SignalR for:
+  - realtime updates and event streams
+  - live telemetry/state/logs
+- For data that is shown as “live”, SignalR topics should send an initial snapshot on subscribe,
+  so the frontend does not need a separate REST call for the same “current” data.
+
+
+========================================================
+1) AUTH / SESSION
+========================================================
+
+REST:
+- POST   /api/v1/auth/login
+- POST   /api/v1/auth/logout
+- GET    /api/v1/auth/me
+
+JWT (concept):
+- Access token is JWT.
+- Claims include: sub, roles, exp/iat, iss/aud, optional allowedRobotIds.
+
+SignalR:
+- Hub:   /hubs/realtime
+- Auth:  access token on connect
+
+
+========================================================
+2) FLEET DASHBOARD (SUMMARY)
+========================================================
+
+REST:
+- GET    /api/v1/fleet/incidents?from=&to=&severity=
+- POST   /api/v1/fleet/incidents/{incidentId}/ack
+
+SignalR (hub: /hubs/realtime):
+- Topic: fleet.summary.snapshot
+- Topic: fleet.summary.updated
+- Topic: fleet.incident.raised
+- Topic: fleet.incident.cleared
+- Topic: fleet.incident.acked
+
+
+========================================================
+3) ROBOT REGISTRY & SESSIONS
+========================================================
+
+REST:
+- GET    /api/v1/robots
+- GET    /api/v1/robots/{robotId}
+- GET    /api/v1/robots/{robotId}/session
+- GET    /api/v1/robots/{robotId}/capabilities
+- GET    /api/v1/robots/{robotId}/feature-flags
+
+SignalR:
+- Topic: robot.session.updated
+- Topic: robot.presence.hello
+- Topic: robot.presence.heartbeat
+
+Grouping suggestion:
+- Group: robots (all robots)
+- Group: robot:{robotId}
+
+Authorization (concept):
+- Backend restricts group joins and message delivery by JWT roles and allowedRobotIds.
+
+
+========================================================
+4) ROBOT STATE, TELEMETRY, LOGS
+========================================================
+
+REST:
+- GET    /api/v1/robots/{robotId}/state/history?from=&to=
+- GET    /api/v1/robots/{robotId}/telemetry?type=&from=&to=
+- GET    /api/v1/robots/{robotId}/logs?from=&to=&level=
+
+SignalR:
+- Topic: robot.state.snapshot
+- Topic: robot.state.event
+- Topic: robot.telemetry.snapshot
+- Topic: robot.telemetry.battery
+- Topic: robot.telemetry.health
+- Topic: robot.telemetry.pose
+- Topic: robot.telemetry.motion
+- Topic: robot.telemetry.radar
+- Topic: robot.telemetry.qr
+- Topic: robot.log.event
+
+
+========================================================
+5) MANUAL CONTROL (COMMANDS)
+========================================================
+
+REST:
+- POST   /api/v1/robots/{robotId}/commands/mode
+- POST   /api/v1/robots/{robotId}/commands/grip
+- POST   /api/v1/robots/{robotId}/commands/hoist
+- POST   /api/v1/robots/{robotId}/commands/telescope
+- POST   /api/v1/robots/{robotId}/commands/cam-toggle
+- POST   /api/v1/robots/{robotId}/commands/rotate
+
+SignalR:
+- Topic: robot.cmd.ack
+
+Notes:
+- Backend should reject commands not supported by robot capabilities.
+- Backend should reject telescope actions when telescopeEnabled=false.
+
+
+========================================================
+6) TASKS (USER-DRIVEN + AUTO ASSIGNMENT)
+========================================================
+
+REST:
+- GET    /api/v1/tasks?status=&robotId=&from=&to=
+- POST   /api/v1/tasks
+  - body supports:
+    - assignmentMode: AUTO | MANUAL
+    - robotId (required for MANUAL)
+    - taskType: GO_TO_POINT | PICK_DROP | CHARGE | RUN_MISSION
+    - GO_TO_POINT: pointId (PICK_DROP point)
+    - PICK_DROP: fromPointId + toPointId (PICK_DROP points)
+    - CHARGE: pointId (CHARGE point)
+    - RUN_MISSION: missionId
+    - priority
+- GET    /api/v1/tasks/{taskId}
+- POST   /api/v1/tasks/{taskId}/pause
+- POST   /api/v1/tasks/{taskId}/resume
+- POST   /api/v1/tasks/{taskId}/cancel
+
+SignalR:
+- Topic: task.created
+- Topic: task.assigned
+- Topic: task.status.changed
+- Topic: task.failed
+- Topic: task.completed
+
+
+========================================================
+7) ROUTES (PREVIEW + PROGRESS)
+========================================================
+
+REST:
+- POST   /api/v1/routes/plan
+  - body: mapVersionId, start, goal, constraints
+- GET    /api/v1/routes/{routeId}
+- GET    /api/v1/routes/{routeId}/eta
+
+SignalR:
+- Topic: robot.route.progress
+- Topic: route.updated
+
+
+========================================================
+8) TRAFFIC (SCHEDULES + HOLDS)
+========================================================
+
+REST:
+- GET    /api/v1/traffic/robots/{robotId}/schedule?from=&to=&downsampleMs=
+- GET    /api/v1/traffic/conflicts?from=&to=
+- POST   /api/v1/traffic/holds
+  - body: mapVersionId, nodeId|pathId, reason, startTime, endTime
+- DELETE /api/v1/traffic/holds/{holdId}
+
+SignalR:
+- Topic: traffic.overview.snapshot
+- Topic: traffic.overview.updated
+- Topic: traffic.hold.created
+- Topic: traffic.hold.released
+- Topic: traffic.schedule.summary.updated
+
+
+========================================================
+9) CONFIGURATION (LIMITS + RUNTIME MODE + FEATURE FLAGS)
+========================================================
+
+REST:
+- GET    /api/v1/robots/{robotId}/config
+- PUT    /api/v1/robots/{robotId}/config/motion-limits
+- PUT    /api/v1/robots/{robotId}/config/runtime-mode
+- PUT    /api/v1/robots/{robotId}/config/feature-flags
+
+SignalR:
+- Topic: robot.config.updated
+
+
+========================================================
+10) MISSIONS (LIBRARY)
+========================================================
+
+REST:
+- GET    /api/v1/missions
+- POST   /api/v1/missions
+- GET    /api/v1/missions/{missionId}
+- POST   /api/v1/missions/{missionId}/clone
+- POST   /api/v1/missions/{missionId}/validate
+  - body: robotId or capabilities/featureFlags override
+
+SignalR:
+- Topic: mission.created
+- Topic: mission.updated
+
+
+========================================================
+11) TEACH MODE (SESSION-BASED)
+========================================================
+
+REST:
+- POST   /api/v1/teach/sessions
+  - body: robotId, mapVersionId
+- POST   /api/v1/teach/sessions/{teachSessionId}/start
+- POST   /api/v1/teach/sessions/{teachSessionId}/stop
+- POST   /api/v1/teach/sessions/{teachSessionId}/capture-step
+  - body: stepName, commandCorrelationId, settleMs
+- GET    /api/v1/teach/sessions/{teachSessionId}
+- POST   /api/v1/teach/sessions/{teachSessionId}/save-mission
+  - body: missionName, metadata
+
+SignalR:
+- Topic: teach.session.started
+- Topic: teach.session.stopped
+- Topic: teach.step.captured
+- Topic: teach.step.updated
+
+
+========================================================
+12) MAP MANAGEMENT (POSTGIS)
+========================================================
+
+REST (map versions):
+- GET    /api/v1/maps
+- POST   /api/v1/maps
+- GET    /api/v1/maps/{mapVersionId}
+- POST   /api/v1/maps/{mapVersionId}/clone
+- POST   /api/v1/maps/{mapVersionId}/publish
+
+REST (graph entities):
+- GET    /api/v1/maps/{mapVersionId}/nodes
+- POST   /api/v1/maps/{mapVersionId}/nodes
+- PUT    /api/v1/maps/{mapVersionId}/nodes/{nodeId}
+- POST   /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance/on
+- POST   /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance/off
+
+- GET    /api/v1/maps/{mapVersionId}/paths
+- POST   /api/v1/maps/{mapVersionId}/paths
+- PUT    /api/v1/maps/{mapVersionId}/paths/{pathId}
+- POST   /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance/on
+- POST   /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance/off
+- POST   /api/v1/maps/{mapVersionId}/paths/{pathId}/rest/on
+- POST   /api/v1/maps/{mapVersionId}/paths/{pathId}/rest/off
+
+- GET    /api/v1/maps/{mapVersionId}/points
+- POST   /api/v1/maps/{mapVersionId}/points
+- PUT    /api/v1/maps/{mapVersionId}/points/{pointId}
+
+- GET    /api/v1/maps/{mapVersionId}/qrs
+- POST   /api/v1/maps/{mapVersionId}/qrs
+- PUT    /api/v1/maps/{mapVersionId}/qrs/{qrId}
+
+REST (validation):
+- POST   /api/v1/maps/{mapVersionId}/validate
+
+SignalR:
+- Topic: map.version.created
+- Topic: map.version.published
+- Topic: map.entity.updated
+
+
+========================================================
+13) SIMULATION (PRODUCTION-LIKE)
+========================================================
+
+REST:
+- POST   /api/v1/sim/sessions
+  - body: mapVersionId, robots[], initialTasks[], speedMultiplier
+- POST   /api/v1/sim/sessions/{simSessionId}/start
+- POST   /api/v1/sim/sessions/{simSessionId}/stop
+- POST   /api/v1/sim/sessions/{simSessionId}/pause
+- POST   /api/v1/sim/sessions/{simSessionId}/resume
+- GET    /api/v1/sim/sessions/{simSessionId}
+- GET    /api/v1/sim/sessions/{simSessionId}/metrics
+
+SignalR:
+- Topic: sim.session.status
+- Topic: sim.event
+- Topic: sim.metrics.updated
+
+
+========================================================
+14) REPLAY (INCIDENT REVIEW)
+========================================================
+
+REST:
+- POST   /api/v1/replay/sessions
+  - body: robotId, fromTime, toTime, playbackSpeed, subjectFilter
+- POST   /api/v1/replay/sessions/{replaySessionId}/start
+- POST   /api/v1/replay/sessions/{replaySessionId}/stop
+- POST   /api/v1/replay/sessions/{replaySessionId}/seek
+  - body: timestamp
+- GET    /api/v1/replay/sessions/{replaySessionId}
+
+SignalR:
+- Topic: replay.session.status
+- Topic: replay.event
+
+
+========================================================
+15) OBSERVABILITY & OPS
+========================================================
+
+REST:
+- GET    /api/v1/ops/health
+- GET    /api/v1/ops/jetstream
+- GET    /api/v1/ops/alerts?from=&to=
+- GET    /api/v1/ops/audit?from=&to=&actor=
+
+SignalR:
+- Topic: ops.alert.raised
+- Topic: ops.alert.cleared
+- Topic: ops.jetstream.updated
+
+
+========================================================
+16) ADMIN (USERS + ROLES)
+========================================================
+
+REST:
+- GET    /api/v1/admin/users
+- POST   /api/v1/admin/users
+- PUT    /api/v1/admin/users/{userId}
+- POST   /api/v1/admin/users/{userId}/disable
+- POST   /api/v1/admin/users/{userId}/roles
+
+SignalR:
+- Topic: admin.user.updated
+
+
+========================================================
+END OF FRONTEND <-> BACKEND STREAMS
+========================================================

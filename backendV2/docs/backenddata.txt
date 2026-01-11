@@ -1,0 +1,838 @@
+========================================================
+BACKEND DATA MODEL + DTO + STREAM CONTRACTS (CONCEPT)
+========================================================
+
+Scope:
+- Database data model (EF Core + Postgres/PostGIS)
+- REST DTOs for frontend (CRUD + actions)
+- SignalR stream payload DTOs (snapshots + events)
+- NATS JetStream message contracts (backend <-> robot)
+
+Type Conventions:
+- Id: string for external ids (robotId, missionId), Guid for internal ids where useful
+- RobotId: stable string identifier (recommended: serial number); IP is metadata and can change
+- Time: DateTimeOffset (ISO-8601 over the wire)
+- Geometry:
+  - Stored in PostGIS using NetTopologySuite geometry types
+  - SRID: 0 (local facility coordinates) unless you choose EPSG:4326
+- Decimal vs double:
+  - Distances/speeds: double
+  - Money-like values: decimal (not used here)
+
+
+========================================================
+1) DATABASE ENTITIES (PERSISTENCE MODEL)
+========================================================
+
+1.1 Users / Roles (JWT RBAC)
+
+Entity: User
+- UserId (Guid)
+- Username (string)
+- DisplayName (string)
+- PasswordHash (string)
+- IsDisabled (bool)
+- CreatedAt (DateTimeOffset)
+- UpdatedAt (DateTimeOffset)
+
+Entity: Role
+- RoleId (Guid)
+- Name (string)  // Admin | Planner | Operator | Viewer
+
+Entity: UserRole
+- UserId (Guid)
+- RoleId (Guid)
+
+Entity: UserAccessPolicy
+- PolicyId (Guid)
+- UserId (Guid)
+- AllowedRobotIds (string[]) (optional)
+- AllowedSiteIds (string[]) (optional)
+
+
+1.2 Robot Registry / State Summary
+
+Entity: Robot
+- RobotId (string) [PK]
+- Name (string)
+- Ip (string)
+- MapVersionId (Guid?)  // current map assignment
+- Location (Point)      // latest known XY (optional if you prefer telemetry-only)
+- X (double?) / Y (double?)  // legacy support if needed
+- State (string)        // simplified state for list views
+- Battery (double)
+- Connected (bool)
+- LastActive (DateTimeOffset)
+
+Entity: RobotSession
+- RobotId (string) [PK]
+- Connected (bool)
+- LastSeen (DateTimeOffset)
+- RuntimeMode (string)          // LIVE | SIM
+- CapabilitiesJson (string)     // store as jsonb in Postgres if preferred
+- FeatureFlagsJson (string)     // store as jsonb
+- SoftwareVersion (string)
+
+Entity: RobotStateLog (optional, for state history)
+- Id (Guid)
+- RobotId (string)
+- Timestamp (DateTimeOffset)
+- StateJson (string)           // jsonb if preferred
+- SourceSubject (string)       // NATS subject source (state.snapshot/state.event)
+
+
+1.3 Map Management (PostGIS)
+
+Entity: MapVersion
+- MapVersionId (Guid) [PK]
+- Name (string)
+- Version (int)
+- IsActive (bool)
+- CreatedBy (Guid) (UserId)
+- CreatedAt (DateTimeOffset)
+- PublishedAt (DateTimeOffset?)
+- ChangeSummary (string?)
+
+Entity: MapNode
+- NodeId (Guid) [PK]
+- MapVersionId (Guid) [FK]
+- Name (string)
+- Location (Point)  // junction coordinate
+- IsActive (bool)
+- IsMaintenance (bool)
+- MetadataJson (string?)
+
+Entity: MapPath
+- PathId (Guid) [PK]
+- MapVersionId (Guid) [FK]
+- FromNodeId (Guid) [FK]
+- ToNodeId (Guid) [FK]
+- Location (LineString)  // geometry of the path
+- TwoWay (bool)          // if false -> one-way From->To
+- IsActive (bool)
+- IsMaintenance (bool)
+- SpeedLimit (double?)   // optional
+- IsRestPath (bool)
+- RestCapacity (int?)
+- RestDwellPolicyJson (string?)
+- MinFollowingDistanceMeters (double?)   // optional, for same-direction shared occupancy
+- MetadataJson (string?)
+
+Entity: MapPoint
+- PointId (Guid) [PK]
+- MapVersionId (Guid) [FK]
+- Name (string)
+- Type (string)  // PICK_DROP | CHARGE | OTHER
+- Location (Point)
+- AttachedNodeId (Guid?)
+- MetadataJson (string?)
+
+Entity: QrAnchor
+- QrId (Guid) [PK]
+- MapVersionId (Guid) [FK]
+- QrCode (string)        // printed QR content
+- Location (Point)
+- PathId (Guid) [FK]
+- DistanceAlongPath (double)   // meters from start of path polyline
+- MetadataJson (string?)
+
+
+1.4 Tasks / Routes / Missions
+
+Entity: Task
+- TaskId (Guid) [PK]
+- CreatedAt (DateTimeOffset)
+- CreatedBy (Guid) (UserId)
+- Priority (int)
+- Status (string)   // ASSIGNED | RUNNING | COMPLETED | FAILED | CANCELED
+- AssignmentMode (string) // AUTO | MANUAL
+- RobotId (string?)        // null until assigned
+- MapVersionId (Guid)
+- TaskType (string)        // GO_TO_POINT | PICK_DROP | CHARGE | RUN_MISSION
+- ParametersJson (string)  // json payload describing points/mission inputs
+- MissionId (Guid?)        // if TaskType is RUN_MISSION
+- CurrentRouteId (Guid?)
+- Eta (DateTimeOffset?)
+
+Entity: Route
+- RouteId (Guid) [PK]
+- MapVersionId (Guid)
+- CreatedAt (DateTimeOffset)
+- Start (Point)
+- Goal (Point)
+- SegmentsJson (string)    // store segment/path ids + direction + checkpoints
+- EstimatedStartTime (DateTimeOffset?)
+- EstimatedArrivalTime (DateTimeOffset?)
+
+Entity: Mission
+- MissionId (Guid) [PK]
+- Name (string)
+- Version (int)
+- CreatedBy (Guid)
+- CreatedAt (DateTimeOffset)
+- MetadataJson (string?)
+- StepsJson (string)        // mission steps array
+
+Entity: TeachSession
+- TeachSessionId (Guid) [PK]
+- RobotId (string)
+- MapVersionId (Guid)
+- CreatedBy (Guid)
+- Status (string)           // CREATED | STARTED | STOPPED | SAVED
+- StartedAt (DateTimeOffset?)
+- StoppedAt (DateTimeOffset?)
+- CapturedStepsJson (string)
+
+
+1.5 Traffic / Holds
+
+Entity: TrafficHold
+- HoldId (Guid) [PK]
+- MapVersionId (Guid)
+- NodeId (Guid?) or PathId (Guid?)
+- Reason (string)
+- StartTime (DateTimeOffset)
+- EndTime (DateTimeOffset)
+- CreatedBy (Guid)
+
+Entity: RobotScheduleSummary (optional cache)
+- RobotId (string) [PK]
+- UpdatedAt (DateTimeOffset)
+- SummaryJson (string)      // downsampled/aggregated schedule
+
+
+1.6 Replay / Simulation
+
+Entity: ReplaySession
+- ReplaySessionId (Guid) [PK]
+- RobotId (string)
+- FromTime (DateTimeOffset)
+- ToTime (DateTimeOffset)
+- PlaybackSpeed (double)
+- Status (string)
+- CreatedBy (Guid)
+- CreatedAt (DateTimeOffset)
+
+Entity: SimSession
+- SimSessionId (Guid) [PK]
+- MapVersionId (Guid)
+- Status (string)
+- SpeedMultiplier (double)
+- CreatedBy (Guid)
+- CreatedAt (DateTimeOffset)
+- ConfigJson (string)
+
+
+1.7 Observability / Audit / Event Log
+
+Entity: AuditEvent
+- AuditEventId (Guid) [PK]
+- Timestamp (DateTimeOffset)
+- ActorUserId (Guid?)
+- ActorRoles (string?)
+- Action (string)
+- TargetType (string?)
+- TargetId (string?)
+- Outcome (string)     // OK | DENIED | ERROR
+- DetailsJson (string?)
+
+Entity: EventLogEntry (optional unified log)
+- EventLogEntryId (Guid) [PK]
+- Timestamp (DateTimeOffset)
+- Direction (string)  // IN | OUT
+- RobotId (string?)
+- Subject (string)
+- CorrelationId (string?)
+- PayloadJson (string)
+
+
+========================================================
+2) REST DTOs (FRONTEND-FACING)
+========================================================
+
+2.1 Auth / Users
+
+DTO: LoginRequest
+- username (string)
+- password (string)
+
+DTO: LoginResponse
+- accessToken (string)  // JWT
+- expiresAt (DateTimeOffset)
+- user (UserDto)
+
+DTO: UserDto
+- userId (Guid)
+- username (string)
+- displayName (string)
+- roles (string[])
+- isDisabled (bool)
+
+DTO: UpdateUserRolesRequest
+- roles (string[])
+
+
+2.2 Robots / Sessions / Config
+
+DTO: RobotDto
+- robotId (string)
+- name (string)
+- ip (string)
+- mapVersionId (Guid?)
+- x (double)
+- y (double)
+- state (string)
+- battery (double)
+- connected (bool)
+- lastActive (DateTimeOffset)
+
+DTO: RobotSessionDto
+- robotId (string)
+- connected (bool)
+- lastSeen (DateTimeOffset)
+- runtimeMode (string)           // LIVE | SIM
+- softwareVersion (string)
+- capabilities (RobotCapabilitiesDto)
+- featureFlags (RobotFeatureFlagsDto)
+
+DTO: RobotCapabilitiesDto
+- supportsCamToggle (bool)
+- supportsRadar (bool)
+- supportsQrReader (bool)
+- supportsHoist (bool)
+- supportsTelescope (bool)
+- supportsGrip (bool)
+- supportsRotate (bool)
+
+DTO: RobotFeatureFlagsDto
+- telescopeEnabled (bool)
+
+DTO: RobotConfigDto
+- motionLimits (MotionLimitsDto)
+- runtimeMode (string)
+- featureFlags (RobotFeatureFlagsDto)
+
+DTO: MotionLimitsDto
+- maxDriveSpeed (double)
+- maxAcceleration (double)
+- maxDeceleration (double)
+
+
+2.3 Commands (manual control)
+
+DTO: CommandRequestBase
+- robotId (string)
+- correlationId (string)
+- requestedAt (DateTimeOffset)
+
+DTO: GripCommandRequest : CommandRequestBase
+- state (string)  // OPEN | CLOSE
+
+DTO: HoistCommandRequest : CommandRequestBase
+- delta (double) or target (double)
+
+DTO: TelescopeCommandRequest : CommandRequestBase
+- delta (double) or target (double)
+
+DTO: CamToggleCommandRequest : CommandRequestBase
+- camSide (string)  // LEFT | RIGHT | CENTER
+
+DTO: RotateCommandRequest : CommandRequestBase
+- delta (double) or target (double)
+
+DTO: ModeCommandRequest : CommandRequestBase
+- mode (string)     // IDLE | MANUAL | PAUSED
+- teachEnabled (bool?)
+- teachSessionId (Guid?)
+
+DTO: CommandAckDto
+- robotId (string)
+- correlationId (string)
+- status (string)    // ACK | NAK
+- reason (string?)
+- timestamp (DateTimeOffset)
+
+
+2.4 Tasks / Routes
+
+DTO: TaskCreateRequest
+- assignmentMode (string)  // AUTO | MANUAL
+- robotId (string?)         // required if MANUAL
+- mapVersionId (Guid)
+- taskType (string)         // GO_TO_POINT | PICK_DROP | CHARGE | RUN_MISSION
+- priority (int)
+- parameters (object)       // see below
+
+Task Parameters (concept):
+- GO_TO_POINT:
+  - pointId (Guid)          // must reference a MapPoint where type=PICK_DROP
+- PICK_DROP:
+  - fromPointId (Guid)      // type=PICK_DROP
+  - toPointId (Guid)        // type=PICK_DROP
+- CHARGE:
+  - pointId (Guid)          // must reference a MapPoint where type=CHARGE
+- RUN_MISSION:
+  - missionId (Guid)
+
+DTO: TaskDto
+- taskId (Guid)
+- createdAt (DateTimeOffset)
+- createdBy (Guid)
+- status (string)
+- assignmentMode (string)
+- robotId (string?)
+- mapVersionId (Guid)
+- taskType (string)
+- parameters (object)
+- missionId (Guid?)
+- currentRouteId (Guid?)
+- eta (DateTimeOffset?)
+
+DTO: TaskControlRequest
+- action (string)   // PAUSE | RESUME | CANCEL
+
+DTO: RoutePlanRequest
+- mapVersionId (Guid)
+- start (PointDto)
+- goal (PointDto)
+- constraints (object?)
+
+DTO: RouteDto
+- routeId (Guid)
+- mapVersionId (Guid)
+- start (PointDto)
+- goal (PointDto)
+- segments (RouteSegmentDto[])
+- estimatedStartTime (DateTimeOffset?)
+- estimatedArrivalTime (DateTimeOffset?)
+
+DTO: RouteSegmentDto
+- pathId (Guid)
+- direction (string)  // FORWARD | REVERSE
+- checkpoints (PointDto[]?)
+
+
+2.5 Missions / Teaching
+
+DTO: MissionDto
+- missionId (Guid)
+- name (string)
+- version (int)
+- createdBy (Guid)
+- createdAt (DateTimeOffset)
+- metadata (object?)
+- steps (MissionStepDto[])
+
+DTO: MissionStepDto
+- stepId (string)
+- type (string)       // NAVIGATE | ACTUATE | WAIT | CALL_MISSION | ASSERT
+- payload (object)    // depends on type
+- verification (object?) // optional recorded expected state/tolerance
+
+DTO: TeachSessionCreateRequest
+- robotId (string)
+- mapVersionId (Guid)
+
+DTO: TeachSessionDto
+- teachSessionId (Guid)
+- robotId (string)
+- mapVersionId (Guid)
+- status (string)
+- createdBy (Guid)
+- startedAt (DateTimeOffset?)
+- stoppedAt (DateTimeOffset?)
+- capturedSteps (TeachCapturedStepDto[])
+
+DTO: TeachCapturedStepDto
+- teachStepId (string)
+- name (string)
+- correlationId (string)
+- capturedAt (DateTimeOffset)
+- settledState (RobotStateDto)
+
+DTO: TeachCaptureStepRequest
+- stepName (string)
+- commandCorrelationId (string)
+- settleMs (int)
+
+DTO: TeachSaveMissionRequest
+- missionName (string)
+- metadata (object?)
+
+
+2.6 Map DTOs (editor)
+
+DTO: MapVersionDto
+- mapVersionId (Guid)
+- name (string)
+- version (int)
+- isActive (bool)
+- createdBy (Guid)
+- createdAt (DateTimeOffset)
+- publishedAt (DateTimeOffset?)
+- changeSummary (string?)
+
+DTO: NodeDto
+- nodeId (Guid)
+- mapVersionId (Guid)
+- name (string)
+- x (double)
+- y (double)
+- isActive (bool)
+- isMaintenance (bool)
+- metadata (object?)
+
+DTO: PathDto
+- pathId (Guid)
+- mapVersionId (Guid)
+- fromNodeId (Guid)
+- toNodeId (Guid)
+- twoWay (bool)
+- isActive (bool)
+- isMaintenance (bool)
+- speedLimit (double?)
+- isRestPath (bool)
+- restCapacity (int?)
+- restDwellPolicy (object?)
+- points (PointDto[])   // polyline points
+
+DTO: MapPointDto
+- pointId (Guid)
+- mapVersionId (Guid)
+- name (string)
+- type (string)
+- x (double)
+- y (double)
+- attachedNodeId (Guid?)
+
+DTO: QrAnchorDto
+- qrId (Guid)
+- mapVersionId (Guid)
+- qrCode (string)
+- x (double)
+- y (double)
+- pathId (Guid)
+- distanceAlongPath (double)
+
+DTO: PointDto
+- x (double)
+- y (double)
+
+
+2.7 Traffic / Replay / Sim DTOs
+
+DTO: TrafficOverviewDto
+- mapVersionId (Guid)
+- robots (TrafficRobotDto[])
+- holds (TrafficHoldDto[])
+- congestion (object?)  // heatmap or aggregated metrics
+
+DTO: TrafficRobotDto
+- robotId (string)
+- routeId (Guid?)
+- currentNodeId (Guid?)
+- state (RobotStateDto)
+
+DTO: TrafficHoldDto
+- holdId (Guid)
+- nodeId (Guid?) / pathId (Guid?)
+- reason (string)
+- startTime (DateTimeOffset)
+- endTime (DateTimeOffset)
+
+DTO: RobotScheduleSummaryDto
+- robotId (string)
+- updatedAt (DateTimeOffset)
+- points (SchedulePointDto[])
+
+DTO: SchedulePointDto
+- tMs (int)
+- targetVel (double)
+
+DTO: ReplaySessionDto
+- replaySessionId (Guid)
+- robotId (string)
+- fromTime (DateTimeOffset)
+- toTime (DateTimeOffset)
+- playbackSpeed (double)
+- status (string)
+
+DTO: SimSessionDto
+- simSessionId (Guid)
+- mapVersionId (Guid)
+- status (string)
+- speedMultiplier (double)
+
+
+2.8 Robot State DTO (frontend)
+
+DTO: RobotStateDto
+- robotId (string)
+- timestamp (DateTimeOffset)
+- runtimeMode (string)
+- mode (string)
+- motionState (string)
+- currentLinearVel (double)
+- targetLinearVel (double)
+- camSide (string)
+- safetyStopReason (string)
+- batteryPct (double?)
+- lastQrCode (string?)
+- trackPosition (object?)  // segmentId+offset or lane+station model
+- teachEnabled (bool)
+- teachSessionId (Guid?)
+- teachStepId (string?)
+- actuators (RobotActuatorsDto)
+
+DTO: RobotActuatorsDto
+- hoistPosition (double?)
+- telescopePosition (double?)
+- gripState (string?)
+- rotatePosition (double?)
+
+
+========================================================
+3) SIGNALR STREAM DTOs (REALTIME)
+========================================================
+
+SignalR Envelope (recommended):
+
+DTO: RealtimeMessage<TPayload>
+- topic (string)
+- timestamp (DateTimeOffset)
+- correlationId (string?)
+- robotId (string?)
+- payload (TPayload)
+
+Snapshot pattern:
+- <topic>.snapshot is sent immediately after subscribe/join group.
+- <topic>.updated or <topic>.event is sent on change.
+
+Examples (payload types):
+- fleet.summary.snapshot -> FleetSummaryDto
+- robot.state.snapshot -> RobotStateDto
+- robot.state.event -> RobotStateDto (partial allowed, but full is simpler)
+- robot.telemetry.snapshot -> RobotTelemetryDto
+- task.status.changed -> TaskDto
+- traffic.overview.snapshot -> TrafficOverviewDto
+- replay.event -> ReplayEventDto
+
+DTO: FleetSummaryDto
+- updatedAt (DateTimeOffset)
+- robotCountsByMode (object)
+- activeTaskCount (int)
+- incidentCountBySeverity (object)
+
+DTO: RobotTelemetryDto
+- robotId (string)
+- timestamp (DateTimeOffset)
+- battery (object?)
+- health (object?)
+- pose (object?)
+- motion (object?)
+- radar (object?)
+- qr (object?)
+
+DTO: ReplayEventDto
+- replaySessionId (Guid)
+- timestamp (DateTimeOffset)
+- subject (string)
+- payload (object)
+
+
+========================================================
+4) NATS JETSTREAM CONTRACTS (BACKEND <-> ROBOT)
+========================================================
+
+Message Envelope (recommended for all durable messages):
+
+Contract: NatsEnvelope<TPayload>
+- robotId (string)
+- correlationId (string)
+- timestamp (DateTimeOffset)
+- source (string)        // backend | robot
+- payload (TPayload)
+
+
+4.1 Backend -> Robot Subjects (durable unless noted)
+
+Subject: robot.{robotId}.cmd.grip
+Payload: GripCommand
+- action (string)  // OPEN | CLOSE
+
+Subject: robot.{robotId}.cmd.hoist
+Payload: HoistCommand
+- mode (string)    // DELTA | TARGET
+- value (double)
+
+Subject: robot.{robotId}.cmd.telescope
+Payload: TelescopeCommand
+- mode (string)    // DELTA | TARGET
+- value (double)
+
+Subject: robot.{robotId}.cmd.cam_toggle
+Payload: CamToggleCommand
+- camSide (string)  // LEFT | RIGHT | CENTER
+
+Subject: robot.{robotId}.cmd.rotate
+Payload: RotateCommand
+- mode (string)    // DELTA | TARGET
+- value (double)
+
+Subject: robot.{robotId}.cmd.mode
+Payload: ModeCommand
+- mode (string)        // IDLE | MANUAL | PAUSED
+- teachEnabled (bool?)
+- teachSessionId (string?)
+
+Subject: robot.{robotId}.task.assign
+Payload: TaskAssignment
+- taskId (string)
+- taskType (string)
+- parameters (object)       // mirrors Task Parameters concept above
+- missionId (string?)       // if taskType requires it
+- mapVersionId (string)
+
+Subject: robot.{robotId}.task.control
+Payload: TaskControl
+- taskId (string)
+- action (string)           // PAUSE | RESUME | CANCEL
+
+Subject: robot.{robotId}.route.assign
+Payload: RouteAssign
+- routeId (string)
+- mapVersionId (string)
+- segments (object)
+
+Subject: robot.{robotId}.route.update
+Payload: RouteUpdate
+- routeId (string)
+- segments (object)
+
+Subject: robot.{robotId}.cfg.motion_limits
+Payload: MotionLimitsConfig
+- maxDriveSpeed (double)
+- maxAcceleration (double)
+- maxDeceleration (double)
+
+Subject: robot.{robotId}.cfg.runtime_mode
+Payload: RuntimeModeConfig
+- runtimeMode (string)   // LIVE | SIM
+
+Subject: robot.{robotId}.cfg.features
+Payload: FeaturesConfig
+- telescopeEnabled (bool)
+
+Subject: robot.{robotId}.traffic.schedule  (droppable latest-wins)
+Payload: TrafficSchedule
+- scheduleId (string)
+- generatedAt (DateTimeOffset)
+- horizonMs (int)
+- points (SchedulePoint[])
+  - tMs (int)
+  - targetVel (double)
+
+
+4.2 Robot -> Backend Subjects
+
+Subject: robot.{robotId}.cmd_ack
+Payload: CommandAck
+- correlationId (string)
+- status (string)     // ACK | NAK
+- reason (string?)
+
+Subject: robot.{robotId}.presence.hello
+Payload: PresenceHello
+- softwareVersion (string)
+- runtimeMode (string)
+- capabilities (RobotCapabilitiesDto)
+- featureFlags (RobotFeatureFlagsDto)
+
+Subject: robot.{robotId}.presence.heartbeat
+Payload: PresenceHeartbeat
+- uptimeMs (long)
+- lastError (string?)
+
+Subject: robot.{robotId}.state.snapshot
+Payload: RobotStateDto  // same structure as frontend, can be identical for simplicity
+
+Subject: robot.{robotId}.state.event
+Payload: RobotStateEvent
+- changedFields (string[])
+- state (RobotStateDto)  // full or partial, but full simplifies replay/debug
+
+Subject: robot.{robotId}.task.event
+Payload: RobotTaskEvent
+- taskId (string)
+- status (string)
+- detail (string?)
+
+Subject: robot.{robotId}.route.progress
+Payload: RouteProgress
+- routeId (string)
+- segmentIndex (int)
+- distanceAlong (double)
+- eta (DateTimeOffset?)
+
+Subject: robot.{robotId}.telemetry.battery
+Payload: BatteryTelemetry
+- batteryPct (double)
+- voltage (double?)
+
+Subject: robot.{robotId}.telemetry.health
+Payload: HealthTelemetry
+- temperature (double?)
+- motorFaults (string[]?)
+- lastError (string?)
+
+Subject: robot.{robotId}.telemetry.pose
+Payload: PoseTelemetry
+- x (double)
+- y (double)
+- heading (double?)
+
+Subject: robot.{robotId}.telemetry.motion
+Payload: MotionTelemetry
+- currentLinearVel (double)
+- targetLinearVel (double)
+- motionState (string)
+
+Subject: robot.{robotId}.telemetry.radar
+Payload: RadarTelemetry
+- obstacleDetected (bool)
+- distance (double?)
+
+Subject: robot.{robotId}.telemetry.qr
+Payload: QrTelemetry
+- qrCode (string)
+- scannedAt (DateTimeOffset)
+
+Subject: robot.{robotId}.log.event
+Payload: RobotLogEvent
+- level (string)  // INFO | WARN | ERROR
+- message (string)
+- detail (string?)
+
+
+========================================================
+5) MAPPING NOTES (ROBOT <-> BACKEND <-> FRONTEND)
+========================================================
+
+Principle:
+- Keep one shared “core state” shape end-to-end where possible:
+  - Robot publishes RobotStateDto-like structure to backend
+  - Backend stores it (optional), and republishes the same shape to frontend SignalR
+
+Recommended approach:
+- Robot NATS payloads are strongly typed DTOs (C# records/classes).
+- Backend converts:
+  - NATS -> internal domain objects (optional)
+  - internal -> SignalR RealtimeMessage<T>
+- For “live views”:
+  - use SignalR snapshot topics (robot.state.snapshot, traffic.overview.snapshot, fleet.summary.snapshot)
+  - REST remains for history and management operations
+
+
+========================================================
+END OF BACKEND DATA MODEL FILE
+========================================================

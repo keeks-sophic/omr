@@ -1,0 +1,62 @@
+1. What should be implement
+- Consume robot state/telemetry/task/route/log streams and maintain normalized state
+- Persist replay/time-series to TimescaleDB
+- Emit SignalR snapshots/events for frontend
+
+2. What have been implement
+- StateStore and StateIngestionService scaffolding
+- NatsConsumersWorker subscribing to state/telemetry/task/route/logs (core NATS)
+- StateIngestionService updating core.robots summaries, persisting replay.robot_events, and emitting SignalR
+- RealtimeSnapshotService emitting snapshots to hub
+- DTOs for RobotStateDto and telemetry contracts
+- RobotsController history endpoints (state/telemetry/logs)
+
+3. How does it implement
+- StateStore provides in-memory cache by robotId (scaffold)
+- NatsConsumersWorker wires core NATS subscriptions for:
+-  - state.snapshot/event → StateIngestionService updates DB summaries, persists robot_events, emits SignalR
+-  - telemetry channels → persists robot_events and emits SignalR; battery updates core.robots
+-  - task.event → updates task status and emits SignalR
+-  - route.progress → updates route ETA and emits SignalR
+-  - log.event → persists robot_events and emits SignalR
+- TimescaleDB writes not implemented (robot_events stored in replay schema)
+
+4. How the flow works between frontend, backend, robot, db
+- Robot would publish state/telemetry → backend ingestion → cache/DB → SignalR to frontend
+- Frontend subscribes to robot groups and receives snapshots/updates
+- DB optionally updates summary fields and writes replay tables
+- Current code only supports hub-side snapshots from service methods
+
+5. Does it communicate with db, if yes what is the data model used
+- Intended: core.robots summary fields, replay.robot_events hypertable
+- Implemented: EF entities exist; Timescale/replay not wired
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended inputs: robot.{robotId}.state.snapshot|event, telemetry channels, task.event, route.progress, log.event
+- Consumers implemented (core NATS subscribe); JetStream durable consumers pending
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- SignalR: robot.state.snapshot, robot.state.event, robot.telemetry.snapshot + per-channel topics
+
+8. What have not be implemented
+- Full schema validation and normalization for all payloads — Partial (basic validator checks added)
+- TimescaleDB inserts and replay querying — Not implemented
+- JetStream durable consumers for ingestion — Implemented: Yes (state/telemetry durable push subscriptions)
+- Comprehensive droppable policy for high-rate telemetry streams — Partial (rate limiter drops fast pose/motion)
+ 
+9. Requirements not implemented (per backendconcept)
+- Closed-loop feedback driving ETA and schedule adjustments from actual speed/QR localization — Partial (motion/radar telemetry triggers schedule summary emission)
+- Durable logging of all robot->backend and backend->robot events — Partial (many robot->backend are logged; backend->robot DLQ logged)
+- Telemetry channels coverage and droppable policy implementation — Partial (channels covered; droppable policy not fully enforced)
+- Replay query and streaming into SignalR topics — Partial (events logged and many topics emitted; query endpoints pending)
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- REST: GET /api/v1/robots/{robotId}/state/history — Implemented: Yes
+- REST: GET /api/v1/robots/{robotId}/telemetry — Implemented: Yes
+- REST: GET /api/v1/robots/{robotId}/logs — Implemented: Yes
+- SignalR topics: robot.state.snapshot, robot.state.event, robot.telemetry.snapshot|battery|health|pose|motion|radar|qr, robot.log.event — Implemented: Yes (emission active across handlers)
+Matches fbstream: No
+NATS/JetStream (from rbnats):
+- Robot -> Backend: state.snapshot|event, telemetry.*, task.event, route.progress, log.event — Implemented: Yes (core NATS consumers)
+- Matches rbnats: Partial (subjects align; durable consumer semantics pending)

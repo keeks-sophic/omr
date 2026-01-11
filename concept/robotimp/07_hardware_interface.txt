@@ -1,0 +1,43 @@
+1. What should be implement
+- Drivers for hardware interfaces (drive, grip, hoist, rotate, telescope, radar, QR)
+- Safety interlocks for estop/fault and snapshot emission
+- Publishing telemetry upon hardware events
+
+2. What have been implement
+- DriveDriver.SetLinearSetpoint stores last setpoint
+- RadarDriver.SetObstacleDetected applies RadarObstacleChanged and publishes telemetry.radar
+- QrReaderDriver.OnScan applies QrScanned and publishes telemetry.qr
+- SafetyInterlocks toggles EStopChanged, FaultRaised/FaultCleared and publishes state events
+- CommandExecutor updates RobotActuators based on commands
+
+3. How does it implement
+- Hardware drivers operate on RobotStateStore via event application and use StateSnapshotWorker to emit state changes
+- TelemetryService publishes corresponding telemetry subjects after hardware events
+- SafetyInterlocks centralizes safety changes and event emission
+
+4. How the flow works between frontend, backend, robot, db
+- Backend may visualize telemetry/logs; robot emits on hardware events
+- No direct frontend sockets; no database writes from hardware module
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Publish: telemetry.radar, telemetry.qr, state.event
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Actual hardware IO and device binding (drivers are stubs)
+- Calibration, diagnostics and failure recovery routines
+- Comprehensive actuator feedback into state (only basic fields updated)
+
+9. Requirements not implemented (per robotconcept)
+- Audit coverage for hardware-triggered events
+- Configurable safety sources and interlock cascades
+- Durable telemetry for hardware health
+
+10. Endpoints and compliance
+- NATS: telemetry.radar, telemetry.qr, state.event
+- Matches rbnats: Yes (subject naming)

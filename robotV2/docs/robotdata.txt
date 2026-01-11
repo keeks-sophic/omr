@@ -1,0 +1,449 @@
+========================================================
+ROBOT DATA MODEL + DTO + NATS CONTRACTS (CONCEPT)
+========================================================
+
+Scope:
+- Robot internal domain entities/state used to implement robotconcept.txt
+- NATS/JetStream message payloads used for robot <-> backend communication (rbnats.txt)
+- Robot-side DTOs should align with backenddata.txt contracts where possible
+
+Identity Rule:
+- robotId is a stable string identifier (recommended: serial number)
+- robotId is used in NATS subjects: robot.{robotId}.*
+- IP is metadata only (may change)
+
+
+========================================================
+1) ROBOT INTERNAL DOMAIN ENTITIES (IN-MEMORY)
+========================================================
+
+1.1 Identity
+
+Entity: RobotIdentity
+- robotId (string)          // required, stable
+- name (string)             // display name
+- ip (string?)              // optional metadata
+- interfaceName (string?)   // optional network interface
+- softwareVersion (string)
+
+
+1.2 Capabilities + Feature Flags
+
+Entity: RobotCapabilities
+- supportsCamToggle (bool)
+- supportsRadar (bool)
+- supportsQrReader (bool)
+- supportsHoist (bool)
+- supportsTelescope (bool)
+- supportsGrip (bool)
+- supportsRotate (bool)
+
+Entity: RobotFeatureFlags
+- telescopeEnabled (bool)
+
+
+1.3 Motion limits + motion state
+
+Entity: MotionLimits
+- maxDriveSpeed (double)
+- maxAcceleration (double)
+- maxDeceleration (double)
+
+Entity: MotionState
+- motionState (string)          // STOPPED | MOVING | HOLDING
+- currentLinearVel (double)
+- targetLinearVel (double)
+- camSide (string)              // CENTER | LEFT | RIGHT
+
+
+1.4 Actuator state
+
+Entity: RobotActuators
+- hoistPosition (double?)
+- telescopePosition (double?)
+- gripState (string?)           // OPEN | CLOSE
+- rotatePosition (double?)
+
+
+1.5 Task and route execution
+
+Entity: ActiveTask
+- taskId (string)
+- taskType (string)             // GO_TO_POINT | PICK_DROP | CHARGE | RUN_MISSION
+- status (string)               // NONE | ASSIGNED | RUNNING | COMPLETED | CANCELED | FAILED
+- parameters (object)           // fromPointId/toPointId/pointId/missionId
+
+Entity: ActiveRoute
+- routeId (string)
+- segments (RouteSegment[])
+
+Entity: RouteSegment
+- pathId (string)
+- direction (string)            // FORWARD | REVERSE
+- checkpoints (Point2D[]?)
+
+Entity: RouteProgress
+- routeId (string)
+- segmentIndex (int)
+- distanceAlong (double)
+- eta (DateTimeOffset?)
+
+
+1.6 Safety + health
+
+Entity: SafetyState
+- obstacleDetected (bool)
+- estopActive (bool)
+- safetyStopReason (string)     // NONE | RADAR | E_STOP | WATCHDOG | FAULT
+
+Entity: HealthState
+- batteryPct (double?)
+- batteryVoltage (double?)
+- temperature (double?)
+- motorFaults (string[]?)
+- lastError (string?)
+
+
+1.7 Track localization
+
+Entity: TrackLocalization
+- lastQrCode (string?)
+- lastQrTime (DateTimeOffset?)
+- trackPosition (object?)       // segmentId+offset, or lane+station model
+
+
+1.8 Robot global state (single source of truth)
+
+Entity: RobotState
+- identity (RobotIdentity)
+- runtimeMode (string)          // LIVE | SIM
+- mode (string)                 // IDLE | EXECUTING_TASK | PAUSED | E_STOP | FAULT | MANUAL
+- teachEnabled (bool)
+- teachSessionId (string?)
+- teachStepId (string?)
+- motionLimits (MotionLimits)
+- featureFlags (RobotFeatureFlags)
+- capabilities (RobotCapabilities)
+- motion (MotionState)
+- actuators (RobotActuators)
+- safety (SafetyState)
+- health (HealthState)
+- localization (TrackLocalization)
+- activeTask (ActiveTask?)
+- activeRoute (ActiveRoute?)
+- lastBackendSeen (DateTimeOffset?)
+
+
+========================================================
+2) ROBOT EVENT TYPES (INTERNAL)
+========================================================
+
+Event: RobotEvent (base)
+- timestamp (DateTimeOffset)
+- source (string)               // Hardware | Backend | Internal
+
+Identity events:
+- IdentityResolved(robotId, name, ip)
+
+Config events:
+- MotionLimitsUpdated(MotionLimits)
+- RuntimeModeUpdated(runtimeMode)
+- FeatureFlagsUpdated(RobotFeatureFlags)
+
+Command events:
+- CommandAccepted(correlationId, commandType)
+- CommandRejected(correlationId, reason)
+- ActuatorStateChanged(RobotActuators)
+
+Task/route events:
+- TaskAssigned(taskId, taskType, parameters)
+- TaskStatusChanged(taskId, status, reason?)
+- RouteAssigned(routeId, segments)
+- RouteProgressUpdated(RouteProgress)
+
+Safety events:
+- RadarObstacleChanged(obstacleDetected)
+- EStopChanged(estopActive)
+- FaultRaised(reason)
+- FaultCleared()
+
+
+========================================================
+3) SHARED DTOs (ROBOT <-> BACKEND)
+========================================================
+
+These DTOs should match backenddata.txt as closely as possible.
+
+DTO: RobotCapabilitiesDto
+- supportsCamToggle (bool)
+- supportsRadar (bool)
+- supportsQrReader (bool)
+- supportsHoist (bool)
+- supportsTelescope (bool)
+- supportsGrip (bool)
+- supportsRotate (bool)
+
+DTO: RobotFeatureFlagsDto
+- telescopeEnabled (bool)
+
+DTO: MotionLimitsDto
+- maxDriveSpeed (double)
+- maxAcceleration (double)
+- maxDeceleration (double)
+
+DTO: RobotActuatorsDto
+- hoistPosition (double?)
+- telescopePosition (double?)
+- gripState (string?)
+- rotatePosition (double?)
+
+DTO: RobotStateDto
+- robotId (string)
+- timestamp (DateTimeOffset)
+- runtimeMode (string)
+- mode (string)
+- motionState (string)
+- currentLinearVel (double)
+- targetLinearVel (double)
+- camSide (string)
+- safetyStopReason (string)
+- batteryPct (double?)
+- lastQrCode (string?)
+- trackPosition (object?)
+- teachEnabled (bool)
+- teachSessionId (string?)
+- teachStepId (string?)
+- actuators (RobotActuatorsDto)
+- capabilities (RobotCapabilitiesDto?)
+- featureFlags (RobotFeatureFlagsDto?)
+- ip (string?)                  // metadata only
+- name (string?)                // display name
+
+DTO: RobotStateEvent
+- robotId (string)
+- timestamp (DateTimeOffset)
+- changedFields (string[])
+- state (RobotStateDto)         // full preferred for replay/debug simplicity
+
+DTO: CommandAck
+- robotId (string)
+- correlationId (string)
+- status (string)               // ACK | NAK
+- reason (string?)
+- timestamp (DateTimeOffset)
+
+
+========================================================
+4) NATS ENVELOPE (ROBOT <-> BACKEND)
+========================================================
+
+Contract: NatsEnvelope<TPayload>
+- robotId (string)
+- correlationId (string)
+- timestamp (DateTimeOffset)
+- source (string)               // robot | backend
+- payload (TPayload)
+
+Robot must:
+- treat robotId as stable identity
+- preserve correlationId on ACK/NAK and logs
+
+
+========================================================
+5) BACKEND -> ROBOT PAYLOADS (ROBOT SUBSCRIBES)
+========================================================
+
+Commands:
+
+Payload: GripCommand
+- correlationId (string)
+- action (string)               // OPEN | CLOSE
+
+Payload: HoistCommand
+- correlationId (string)
+- mode (string)                 // DELTA | TARGET
+- value (double)
+
+Payload: TelescopeCommand
+- correlationId (string)
+- mode (string)                 // DELTA | TARGET
+- value (double)
+
+Payload: CamToggleCommand
+- correlationId (string)
+- camSide (string)              // LEFT | RIGHT | CENTER
+
+Payload: RotateCommand
+- correlationId (string)
+- mode (string)                 // DELTA | TARGET
+- value (double)
+
+Payload: ModeCommand
+- correlationId (string)
+- mode (string)                 // IDLE | MANUAL | PAUSED
+- teachEnabled (bool?)
+- teachSessionId (string?)
+
+Tasks / Routes:
+
+Payload: TaskAssignment
+- correlationId (string)
+- taskId (string)
+- taskType (string)
+- parameters (object)
+- missionId (string?)
+- mapVersionId (string)
+
+Payload: TaskControl
+- correlationId (string)
+- taskId (string)
+- action (string)               // PAUSE | RESUME | CANCEL
+
+Payload: RouteAssign
+- correlationId (string)
+- routeId (string)
+- mapVersionId (string)
+- segments (RouteSegment[])
+
+Payload: RouteUpdate
+- correlationId (string)
+- routeId (string)
+- segments (RouteSegment[])
+
+Config:
+
+Payload: MotionLimitsConfig
+- correlationId (string)
+- maxDriveSpeed (double)
+- maxAcceleration (double)
+- maxDeceleration (double)
+
+Payload: RuntimeModeConfig
+- correlationId (string)
+- runtimeMode (string)          // LIVE | SIM
+
+Payload: FeaturesConfig
+- correlationId (string)
+- telescopeEnabled (bool)
+
+Traffic schedule (droppable):
+
+Payload: TrafficSchedule
+- scheduleId (string)
+- generatedAt (DateTimeOffset)
+- horizonMs (int)
+- points (SchedulePoint[])
+
+Payload: SchedulePoint
+- tMs (int)
+- targetVel (double)
+
+
+========================================================
+6) ROBOT -> BACKEND PAYLOADS (ROBOT PUBLISHES)
+========================================================
+
+Presence:
+
+Payload: PresenceHello
+- robotId (string)
+- name (string?)
+- ip (string?)
+- softwareVersion (string)
+- runtimeMode (string)
+- capabilities (RobotCapabilitiesDto)
+- featureFlags (RobotFeatureFlagsDto)
+
+Payload: PresenceHeartbeat
+- robotId (string)
+- uptimeMs (long)
+- lastError (string?)
+
+State:
+- RobotStateDto (snapshot)
+- RobotStateEvent (event)
+
+Task/Route:
+
+Payload: RobotTaskEvent
+- robotId (string)
+- taskId (string)
+- status (string)
+- detail (string?)
+- timestamp (DateTimeOffset)
+
+Payload: RouteProgress
+- robotId (string)
+- routeId (string)
+- segmentIndex (int)
+- distanceAlong (double)
+- eta (DateTimeOffset?)
+- timestamp (DateTimeOffset)
+
+Telemetry:
+
+Payload: BatteryTelemetry
+- robotId (string)
+- batteryPct (double)
+- voltage (double?)
+- timestamp (DateTimeOffset)
+
+Payload: HealthTelemetry
+- robotId (string)
+- temperature (double?)
+- motorFaults (string[]?)
+- lastError (string?)
+- timestamp (DateTimeOffset)
+
+Payload: PoseTelemetry
+- robotId (string)
+- x (double)
+- y (double)
+- heading (double?)
+- timestamp (DateTimeOffset)
+
+Payload: MotionTelemetry
+- robotId (string)
+- currentLinearVel (double)
+- targetLinearVel (double)
+- motionState (string)
+- timestamp (DateTimeOffset)
+
+Payload: RadarTelemetry
+- robotId (string)
+- obstacleDetected (bool)
+- distance (double?)
+- timestamp (DateTimeOffset)
+
+Payload: QrTelemetry
+- robotId (string)
+- qrCode (string)
+- scannedAt (DateTimeOffset)
+
+Logs:
+
+Payload: RobotLogEvent
+- robotId (string)
+- level (string)                // INFO | WARN | ERROR
+- message (string)
+- detail (string?)
+- timestamp (DateTimeOffset)
+- correlationId (string?)
+
+
+========================================================
+7) NOTES (ALIGNMENT WITH BACKEND)
+========================================================
+
+- Keep RobotStateDto shape consistent with backenddata.txt to simplify:
+  - realtime streaming to frontend (SignalR robot.state.snapshot/event)
+  - replay storage (TimescaleDB)
+
+- Commands/config/task/route messages should carry correlationId and must be ACKed via cmd_ack.
+
+- IP is optional metadata and must never be used as identity; robotId is the stable key.
+
+
+========================================================
+END OF ROBOT DATA MODEL FILE
+========================================================

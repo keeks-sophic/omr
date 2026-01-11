@@ -1,0 +1,608 @@
+========================================================
+POSTGRES DB MODEL (POSTGIS FOR MAP, TIMESCALEDB FOR REPLAY)
+========================================================
+
+This file proposes a PostgreSQL schema aligned with:
+- backendconcept.txt (domains: map, tasks, traffic, replay/sim, ops)
+- backenddata.txt (entities + DTO needs)
+
+
+========================================================
+0) EXTENSIONS + SCHEMAS
+========================================================
+
+SQL:
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE SCHEMA IF NOT EXISTS core;
+CREATE SCHEMA IF NOT EXISTS map;
+CREATE SCHEMA IF NOT EXISTS task;
+CREATE SCHEMA IF NOT EXISTS traffic;
+CREATE SCHEMA IF NOT EXISTS ops;
+CREATE SCHEMA IF NOT EXISTS replay;
+CREATE SCHEMA IF NOT EXISTS sim;
+
+
+========================================================
+1) COMMON TYPES
+========================================================
+
+SQL:
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'robot_runtime_mode') THEN
+    CREATE TYPE core.robot_runtime_mode AS ENUM ('LIVE','SIM');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'robot_mode') THEN
+    CREATE TYPE core.robot_mode AS ENUM ('IDLE','EXECUTING_TASK','PAUSED','E_STOP','FAULT','MANUAL');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_status') THEN
+    CREATE TYPE task.task_status AS ENUM ('ASSIGNED','RUNNING','COMPLETED','FAILED','CANCELED');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_assignment_mode') THEN
+    CREATE TYPE task.task_assignment_mode AS ENUM ('AUTO','MANUAL');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'task_type') THEN
+    CREATE TYPE task.task_type AS ENUM ('GO_TO_POINT','PICK_DROP','CHARGE','RUN_MISSION');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'map_point_type') THEN
+    CREATE TYPE map.map_point_type AS ENUM ('PICK_DROP','CHARGE','OTHER');
+  END IF;
+END$$;
+
+
+========================================================
+2) AUTH (JWT USERS + ROLES)
+========================================================
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS auth.users (
+  user_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  username text NOT NULL UNIQUE,
+  display_name text NOT NULL,
+  password_hash text NOT NULL,
+  is_disabled boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS auth.roles (
+  role_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS auth.user_roles (
+  user_id uuid NOT NULL REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  role_id uuid NOT NULL REFERENCES auth.roles(role_id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, role_id)
+);
+
+CREATE TABLE IF NOT EXISTS auth.user_access_policies (
+  policy_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL UNIQUE REFERENCES auth.users(user_id) ON DELETE CASCADE,
+  allowed_robot_ids text[] NULL,
+  allowed_site_ids text[] NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO auth.roles(name)
+VALUES ('Admin'),('Planner'),('Operator'),('Viewer')
+ON CONFLICT (name) DO NOTHING;
+
+
+========================================================
+3) ROBOT REGISTRY + SESSION
+========================================================
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS core.robots (
+  robot_id text PRIMARY KEY,
+  name text NULL,
+  ip inet NULL,
+  map_version_id uuid NULL,
+  location geometry(Point, 0) NULL,
+  x double precision NULL,
+  y double precision NULL,
+  state text NULL,
+  battery double precision NULL,
+  connected boolean NOT NULL DEFAULT false,
+  last_active timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS core.robot_sessions (
+  robot_id text PRIMARY KEY REFERENCES core.robots(robot_id) ON DELETE CASCADE,
+  connected boolean NOT NULL DEFAULT false,
+  last_seen timestamptz NOT NULL DEFAULT now(),
+  runtime_mode core.robot_runtime_mode NOT NULL DEFAULT 'LIVE',
+  software_version text NULL,
+  capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
+  feature_flags jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_robot_sessions_last_seen ON core.robot_sessions(last_seen DESC);
+
+
+========================================================
+4) MAP MANAGEMENT (POSTGIS)
+========================================================
+
+4.1 Map versioning
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS map.map_versions (
+  map_version_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  version int NOT NULL,
+  is_active boolean NOT NULL DEFAULT false,
+  change_summary text NULL,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  published_at timestamptz NULL,
+  UNIQUE(name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_map_versions_active ON map.map_versions(is_active) WHERE is_active = true;
+
+
+4.2 Nodes
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS map.nodes (
+  node_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE CASCADE,
+  name text NOT NULL,
+  geom geometry(Point, 0) NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  is_maintenance boolean NOT NULL DEFAULT false,
+  metadata jsonb NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_map ON map.nodes(map_version_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_geom_gist ON map.nodes USING gist(geom);
+
+
+4.3 Paths (LineStrings)
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS map.paths (
+  path_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE CASCADE,
+  from_node_id uuid NOT NULL REFERENCES map.nodes(node_id) ON DELETE RESTRICT,
+  to_node_id uuid NOT NULL REFERENCES map.nodes(node_id) ON DELETE RESTRICT,
+  geom geometry(LineString, 0) NOT NULL,
+  two_way boolean NOT NULL DEFAULT true,
+  is_active boolean NOT NULL DEFAULT true,
+  is_maintenance boolean NOT NULL DEFAULT false,
+  speed_limit double precision NULL,
+  is_rest_path boolean NOT NULL DEFAULT false,
+  rest_capacity int NULL,
+  rest_dwell_policy jsonb NULL,
+  min_following_distance_m double precision NULL,
+  metadata jsonb NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_paths_map ON map.paths(map_version_id);
+CREATE INDEX IF NOT EXISTS idx_paths_nodes ON map.paths(map_version_id, from_node_id, to_node_id);
+CREATE INDEX IF NOT EXISTS idx_paths_geom_gist ON map.paths USING gist(geom);
+
+
+4.4 Operational points (PICK_DROP / CHARGE / OTHER)
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS map.points (
+  point_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE CASCADE,
+  type map.map_point_type NOT NULL,
+  name text NOT NULL,
+  geom geometry(Point, 0) NOT NULL,
+  attached_node_id uuid NULL REFERENCES map.nodes(node_id) ON DELETE SET NULL,
+  metadata jsonb NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_points_map ON map.points(map_version_id);
+CREATE INDEX IF NOT EXISTS idx_points_type ON map.points(map_version_id, type);
+CREATE INDEX IF NOT EXISTS idx_points_geom_gist ON map.points USING gist(geom);
+
+
+4.5 QR anchors along paths
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS map.qr_anchors (
+  qr_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE CASCADE,
+  qr_code text NOT NULL,
+  geom geometry(Point, 0) NOT NULL,
+  path_id uuid NOT NULL REFERENCES map.paths(path_id) ON DELETE RESTRICT,
+  distance_along_path double precision NOT NULL,
+  metadata jsonb NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(map_version_id, qr_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qr_map ON map.qr_anchors(map_version_id);
+CREATE INDEX IF NOT EXISTS idx_qr_geom_gist ON map.qr_anchors USING gist(geom);
+CREATE INDEX IF NOT EXISTS idx_qr_code ON map.qr_anchors(qr_code);
+
+
+========================================================
+5) TASKS + ROUTES + MISSIONS + TEACHING
+========================================================
+
+5.1 Missions
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS task.missions (
+  mission_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  version int NOT NULL DEFAULT 1,
+  metadata jsonb NULL,
+  steps jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(name, version)
+);
+
+
+5.2 Teach sessions
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS task.teach_sessions (
+  teach_session_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  robot_id text NOT NULL REFERENCES core.robots(robot_id) ON DELETE RESTRICT,
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE RESTRICT,
+  status text NOT NULL,
+  captured_steps jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz NULL,
+  stopped_at timestamptz NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_teach_sessions_robot ON task.teach_sessions(robot_id, created_at DESC);
+
+
+5.3 Routes (planned)
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS task.routes (
+  route_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  start_geom geometry(Point, 0) NOT NULL,
+  goal_geom geometry(Point, 0) NOT NULL,
+  segments jsonb NOT NULL DEFAULT '[]'::jsonb,
+  estimated_start_time timestamptz NULL,
+  estimated_arrival_time timestamptz NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_routes_map ON task.routes(map_version_id, created_at DESC);
+
+
+5.4 Tasks
+
+Task Parameter rules:
+- GO_TO_POINT: parameters.pointId references map.points(type=PICK_DROP)
+- PICK_DROP: parameters.fromPointId and parameters.toPointId reference map.points(type=PICK_DROP)
+- CHARGE: parameters.pointId references map.points(type=CHARGE)
+- RUN_MISSION: parameters.missionId references task.missions
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS task.tasks (
+  task_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  priority int NOT NULL DEFAULT 0,
+  status task.task_status NOT NULL DEFAULT 'ASSIGNED',
+  assignment_mode task.task_assignment_mode NOT NULL DEFAULT 'AUTO',
+  robot_id text NULL REFERENCES core.robots(robot_id) ON DELETE SET NULL,
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE RESTRICT,
+  task_type task.task_type NOT NULL,
+  parameters jsonb NOT NULL DEFAULT '{}'::jsonb,
+  mission_id uuid NULL REFERENCES task.missions(mission_id) ON DELETE SET NULL,
+  current_route_id uuid NULL REFERENCES task.routes(route_id) ON DELETE SET NULL,
+  eta timestamptz NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON task.tasks(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_robot ON task.tasks(robot_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_map ON task.tasks(map_version_id, created_at DESC);
+
+
+5.5 Task events (optional durable audit of lifecycle)
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS task.task_events (
+  task_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id uuid NOT NULL REFERENCES task.tasks(task_id) ON DELETE CASCADE,
+  robot_id text NULL,
+  status text NOT NULL,
+  detail text NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  payload jsonb NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_events_task_time ON task.task_events(task_id, created_at DESC);
+
+
+========================================================
+6) TRAFFIC HOLDS
+========================================================
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS traffic.holds (
+  hold_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE CASCADE,
+  node_id uuid NULL REFERENCES map.nodes(node_id) ON DELETE CASCADE,
+  path_id uuid NULL REFERENCES map.paths(path_id) ON DELETE CASCADE,
+  reason text NOT NULL,
+  start_time timestamptz NOT NULL,
+  end_time timestamptz NOT NULL,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((node_id IS NOT NULL) <> (path_id IS NOT NULL)),
+  CHECK (end_time > start_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_holds_map_time ON traffic.holds(map_version_id, start_time, end_time);
+
+
+========================================================
+7) OPS / AUDIT
+========================================================
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS ops.audit_events (
+  audit_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  timestamp timestamptz NOT NULL DEFAULT now(),
+  actor_user_id uuid NULL REFERENCES auth.users(user_id) ON DELETE SET NULL,
+  actor_roles text NULL,
+  action text NOT NULL,
+  target_type text NULL,
+  target_id text NULL,
+  outcome text NOT NULL,
+  details jsonb NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_time ON ops.audit_events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON ops.audit_events(actor_user_id, timestamp DESC);
+
+
+========================================================
+7A) SIMULATION SESSIONS (METADATA)
+========================================================
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS sim.sim_sessions (
+  sim_session_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  map_version_id uuid NOT NULL REFERENCES map.map_versions(map_version_id) ON DELETE RESTRICT,
+  status text NOT NULL,
+  speed_multiplier double precision NOT NULL DEFAULT 1.0,
+  config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sim_sessions_time ON sim.sim_sessions(created_at DESC);
+
+
+========================================================
+8) REPLAY STORAGE (TIMESCALEDB)
+========================================================
+
+Design goal:
+- Store high-volume time-series events for replay:
+  - robot state snapshots/events
+  - telemetry streams
+  - task/route events
+  - traffic schedule summaries (optional)
+  - robot logs
+- Use TimescaleDB hypertables partitioned by time and optionally robot_id.
+
+8.0 Replay session metadata
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS replay.replay_sessions (
+  replay_session_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  robot_id text NOT NULL REFERENCES core.robots(robot_id) ON DELETE RESTRICT,
+  from_time timestamptz NOT NULL,
+  to_time timestamptz NOT NULL,
+  playback_speed double precision NOT NULL DEFAULT 1.0,
+  status text NOT NULL,
+  created_by uuid NULL REFERENCES auth.users(user_id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (to_time > from_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_sessions_robot_time ON replay.replay_sessions(robot_id, created_at DESC);
+
+8.1 Unified replay event table
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS replay.robot_events (
+  ts timestamptz NOT NULL,
+  robot_id text NOT NULL,
+  subject text NOT NULL,
+  correlation_id text NULL,
+  direction text NOT NULL,
+  payload jsonb NOT NULL,
+  PRIMARY KEY (ts, robot_id, subject)
+);
+
+SELECT create_hypertable('replay.robot_events', by_range('ts'), by_hash('robot_id', 8), if_not_exists => true);
+
+CREATE INDEX IF NOT EXISTS idx_replay_events_robot_time ON replay.robot_events(robot_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_replay_events_subject_time ON replay.robot_events(subject, ts DESC);
+
+SELECT add_retention_policy('replay.robot_events', INTERVAL '30 days', if_not_exists => true);
+
+ALTER TABLE replay.robot_events SET (timescaledb.compress = true);
+SELECT add_compression_policy('replay.robot_events', INTERVAL '2 days', if_not_exists => true);
+
+
+8.2 Optional specialized hypertables (for fast charting)
+
+SQL:
+
+CREATE TABLE IF NOT EXISTS replay.telemetry_pose (
+  ts timestamptz NOT NULL,
+  robot_id text NOT NULL,
+  x double precision NOT NULL,
+  y double precision NOT NULL,
+  heading double precision NULL,
+  PRIMARY KEY (ts, robot_id)
+);
+
+SELECT create_hypertable('replay.telemetry_pose', by_range('ts'), by_hash('robot_id', 8), if_not_exists => true);
+CREATE INDEX IF NOT EXISTS idx_pose_robot_time ON replay.telemetry_pose(robot_id, ts DESC);
+
+ALTER TABLE replay.telemetry_pose SET (timescaledb.compress = true);
+SELECT add_compression_policy('replay.telemetry_pose', INTERVAL '2 days', if_not_exists => true);
+
+SELECT add_retention_policy('replay.telemetry_pose', INTERVAL '90 days', if_not_exists => true);
+
+
+8.3 Continuous aggregates (example)
+
+SQL:
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS replay.pose_1s
+WITH (timescaledb.continuous) AS
+SELECT
+  time_bucket(INTERVAL '1 second', ts) AS bucket,
+  robot_id,
+  avg(x) AS x_avg,
+  avg(y) AS y_avg
+FROM replay.telemetry_pose
+GROUP BY bucket, robot_id;
+
+SELECT add_continuous_aggregate_policy('replay.pose_1s',
+  start_offset => INTERVAL '1 day',
+  end_offset => INTERVAL '10 seconds',
+  schedule_interval => INTERVAL '10 seconds'
+);
+
+
+========================================================
+9) POSTGIS FUNCTIONS (MAP QUERIES)
+========================================================
+
+These are database functions useful for backend route/map services.
+
+9.1 Nearest node to a point (within a map version)
+
+SQL:
+
+CREATE OR REPLACE FUNCTION map.nearest_node(p_map_version_id uuid, p_x double precision, p_y double precision, p_max_dist double precision)
+RETURNS TABLE(node_id uuid, dist double precision)
+LANGUAGE sql
+AS $$
+  SELECT n.node_id, ST_Distance(n.geom, ST_SetSRID(ST_MakePoint(p_x, p_y), 0)) AS dist
+  FROM map.nodes n
+  WHERE n.map_version_id = p_map_version_id
+    AND n.is_active = true
+    AND n.is_maintenance = false
+    AND ST_DWithin(n.geom, ST_SetSRID(ST_MakePoint(p_x, p_y), 0), p_max_dist)
+  ORDER BY n.geom <-> ST_SetSRID(ST_MakePoint(p_x, p_y), 0)
+  LIMIT 1;
+$$;
+
+
+9.2 Nearest path and projection location (for debugging / QR alignment)
+
+SQL:
+
+CREATE OR REPLACE FUNCTION map.nearest_path_projection(p_map_version_id uuid, p_x double precision, p_y double precision, p_max_dist double precision)
+RETURNS TABLE(path_id uuid, dist double precision, fraction double precision, projected geometry(Point, 0))
+LANGUAGE sql
+AS $$
+  WITH p AS (
+    SELECT ST_SetSRID(ST_MakePoint(p_x, p_y), 0)::geometry(Point,0) AS pt
+  )
+  SELECT
+    pa.path_id,
+    ST_Distance(pa.geom, p.pt) AS dist,
+    ST_LineLocatePoint(pa.geom, p.pt) AS fraction,
+    ST_LineInterpolatePoint(pa.geom, ST_LineLocatePoint(pa.geom, p.pt))::geometry(Point,0) AS projected
+  FROM map.paths pa, p
+  WHERE pa.map_version_id = p_map_version_id
+    AND pa.is_active = true
+    AND pa.is_maintenance = false
+    AND ST_DWithin(pa.geom, p.pt, p_max_dist)
+  ORDER BY pa.geom <-> p.pt
+  LIMIT 1;
+$$;
+
+
+9.3 QR anchor consistency check (qr point should be near its path)
+
+SQL:
+
+CREATE OR REPLACE FUNCTION map.validate_qr_anchor(p_qr_id uuid, p_max_dist double precision)
+RETURNS TABLE(ok boolean, dist double precision)
+LANGUAGE sql
+AS $$
+  SELECT
+    (ST_Distance(q.geom, p.geom) <= p_max_dist) AS ok,
+    ST_Distance(q.geom, p.geom) AS dist
+  FROM map.qr_anchors q
+  JOIN map.paths p ON p.path_id = q.path_id;
+$$;
+
+
+========================================================
+10) NOTES ON STREAMING + REPLAY
+========================================================
+
+Recommended replay write path:
+- When backend ingests NATS messages (state/telemetry/task/log):
+  - write raw event to replay.robot_events (TimescaleDB hypertable)
+  - optionally also write downsample-friendly tables (telemetry_pose, etc.)
+
+Recommended replay read path:
+- Replay service queries:
+  - replay.robot_events filtered by robot_id + time window + subject filters
+  - telemetry_* tables for charts (faster)
+  - continuous aggregates (pose_1s) for large time windows
+
+Map read path:
+- Map service uses PostGIS functions for nearest node/path lookup and validation.
+
+
+========================================================
+END OF DB MODEL FILE
+========================================================

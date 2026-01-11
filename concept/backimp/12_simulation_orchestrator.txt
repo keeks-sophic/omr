@@ -1,0 +1,58 @@
+1. What should be implement
+- Orchestrate simulation sessions mirroring production pipeline
+- Register simulated robots, run tasks/routes/traffic, inject simulated state
+- Provide session status/events/metrics via SignalR
+
+2. What have been implement
+- SimulationController endpoints
+- SimulationOrchestrator and SimulationService scaffolding
+- DTO: SimSessionCreateRequest
+- Replay/sim backend topics defined in NatsTopics
+
+3. How does it implement
+- Creates sim session entries and prepares simulated robots (concept)
+- Orchestrator coordinates task manager and traffic control (concept)
+- No actual injection of simulated state/telemetry implemented
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend creates/starts/stops sim sessions via REST and subscribes to sim topics
+- Backend should inject simulated state into ingestion pipeline
+- Robot processes replaced by simulated drivers (missing)
+- DB stores sim session metadata
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: sim.sim_sessions
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Internal backend.sim.* subjects for tooling; robot subjects not used directly
+- Simulation drivers would mimic robot.* subjects (not implemented)
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/sim/sessions/*
+- SignalR: sim.session.status, sim.event, sim.metrics.updated
+
+8. What have not be implemented
+- Simulated robot driver emitting state/telemetry
+- Injection into StateIngestionService and full closed-loop simulation
+- Isolation and safeguards to prevent cross-publish to live robots
+ 
+9. Requirements not implemented (per backendconcept)
+- Treat SIM robots equivalently to LIVE for planning and feedback
+- Backend.sim.* control and status subjects with proper handlers
+- Metrics and status SignalR streaming coverage
+- Prevention of replay-to-live publishing guaranteed
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- POST /api/v1/sim/sessions — Implemented: Yes
+- POST /api/v1/sim/sessions/{simSessionId}/start — Implemented: Yes
+- POST /api/v1/sim/sessions/{simSessionId}/stop — Implemented: Yes
+- POST /api/v1/sim/sessions/{simSessionId}/pause — Implemented: Yes
+- POST /api/v1/sim/sessions/{simSessionId}/resume — Implemented: Yes
+- GET  /api/v1/sim/sessions/{simSessionId} — Implemented: No
+- GET  /api/v1/sim/sessions/{simSessionId}/metrics — Implemented: No
+- SignalR: sim.session.status, sim.event, sim.metrics.updated — Implemented: Partial
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend internal: backend.sim.start|stop|{simSessionId}.status — Implemented: No (handlers missing)
+Matches rbnats: No

@@ -1,0 +1,413 @@
+========================================================
+BACKEND FILE STRUCTURE (MAINTAINABLE IMPLEMENTATION PLAN)
+========================================================
+
+Goal:
+- Provide a folder structure for the backend project that can implement every function in backendconcept.txt
+- Keep modules independent and testable (clear boundaries)
+- Match existing repository conventions (backend/Api, backend/Dto, backend/Hub, backend/Worker, etc.)
+- Keep contracts aligned with:
+  - backenddata.txt (DTOs/entities/contracts)
+  - dbmodel.txt (Postgres/PostGIS + TimescaleDB schema)
+  - fbstream.txt (REST + SignalR topics)
+  - rbnats.txt (NATS/JetStream subjects)
+
+Project root:
+backend/
+
+
+========================================================
+1) HIGH-LEVEL LAYOUT
+========================================================
+
+backend/
+  Program.cs
+  appsettings.json
+  appsettings.Development.json
+  backend.csproj
+  backend.http
+
+  Endpoints/
+    ApiRoutes.cs
+
+  Topics/
+    NatsTopics.cs
+    SignalRTopics.cs
+
+  Api/                         // REST controllers (fbstream.txt)
+    AuthController.cs
+    AdminUsersController.cs
+    FleetController.cs
+    RobotsController.cs
+    TasksController.cs
+    RoutesController.cs
+    TrafficController.cs
+    MissionsController.cs
+    TeachController.cs
+    MapsController.cs
+    SimulationController.cs
+    ReplayController.cs
+    OpsController.cs
+
+  Hub/                         // SignalR hubs
+    RealtimeHub.cs             // /hubs/realtime
+
+  Dto/                         // Frontend-facing DTOs
+    Auth/
+      LoginRequest.cs
+      LoginResponse.cs
+      UserDto.cs
+      UpdateUserRolesRequest.cs
+    Robots/
+      RobotDto.cs
+      RobotSessionDto.cs
+      RobotStateDto.cs
+      RobotTelemetryDto.cs
+      RobotConfigDto.cs
+      MotionLimitsDto.cs
+      RobotCapabilitiesDto.cs
+      RobotFeatureFlagsDto.cs
+      CommandAckDto.cs
+    Tasks/
+      TaskCreateRequest.cs
+      TaskDto.cs
+      TaskControlRequest.cs
+      RoutePlanRequest.cs
+      RouteDto.cs
+    Maps/
+      MapVersionDto.cs
+      NodeDto.cs
+      PathDto.cs
+      MapPointDto.cs
+      QrAnchorDto.cs
+    Traffic/
+      TrafficOverviewDto.cs
+      TrafficHoldDto.cs
+      RobotScheduleSummaryDto.cs
+    Missions/
+      MissionDto.cs
+      MissionStepDto.cs
+      TeachSessionDto.cs
+      TeachSessionCreateRequest.cs
+      TeachCaptureStepRequest.cs
+      TeachSaveMissionRequest.cs
+    Simulation/
+      SimSessionDto.cs
+    Replay/
+      ReplaySessionDto.cs
+      ReplayEventDto.cs
+    Ops/
+      HealthDto.cs
+      JetStreamHealthDto.cs
+      AuditEventDto.cs
+
+  SignalR/                      // SignalR message envelopes and helpers
+    RealtimeMessage.cs
+    RealtimeGroups.cs           // robots, robot:{robotId}, etc.
+    RealtimeAuthorizer.cs       // role + allowedRobotIds filtering
+
+  Contracts/                    // Robot-facing NATS contracts (rbnats.txt)
+    NatsEnvelope.cs
+    Presence/
+      PresenceHello.cs
+      PresenceHeartbeat.cs
+    Commands/
+      GripCommand.cs
+      HoistCommand.cs
+      TelescopeCommand.cs
+      CamToggleCommand.cs
+      RotateCommand.cs
+      ModeCommand.cs
+      CommandAck.cs
+    Tasks/
+      TaskAssignment.cs
+      TaskControl.cs
+      RobotTaskEvent.cs
+    Routes/
+      RouteAssign.cs
+      RouteUpdate.cs
+      RouteProgress.cs
+    Telemetry/
+      BatteryTelemetry.cs
+      HealthTelemetry.cs
+      PoseTelemetry.cs
+      MotionTelemetry.cs
+      RadarTelemetry.cs
+      QrTelemetry.cs
+    Logs/
+      RobotLogEvent.cs
+    Traffic/
+      TrafficSchedule.cs
+
+  Model/                        // EF Core entities (Postgres)
+    Auth/
+      User.cs
+      Role.cs
+      UserRole.cs
+      UserAccessPolicy.cs
+    Core/
+      Robot.cs
+      RobotSession.cs
+    Map/
+      MapVersion.cs
+      MapNode.cs
+      MapPath.cs
+      MapPoint.cs
+      QrAnchor.cs
+    Task/
+      Task.cs
+      TaskEvent.cs
+      Route.cs
+      Mission.cs
+      TeachSession.cs
+    Traffic/
+      TrafficHold.cs
+    Ops/
+      AuditEvent.cs
+    Sim/
+      SimSession.cs
+    Replay/
+      ReplaySession.cs
+
+  Infrastructure/
+    Persistence/
+      AppDbContext.cs
+      Configurations/           // EF model configs + PostGIS mapping
+        Auth/
+          UserConfiguration.cs
+          RoleConfiguration.cs
+          UserRoleConfiguration.cs
+          UserAccessPolicyConfiguration.cs
+        Core/
+          RobotConfiguration.cs
+          RobotSessionConfiguration.cs
+        Map/
+          MapVersionConfiguration.cs
+          NodeConfiguration.cs
+          PathConfiguration.cs
+          PointConfiguration.cs
+          QrAnchorConfiguration.cs
+        Task/
+          TaskConfiguration.cs
+          TaskEventConfiguration.cs
+          RouteConfiguration.cs
+          MissionConfiguration.cs
+          TeachSessionConfiguration.cs
+        Traffic/
+          TrafficHoldConfiguration.cs
+        Ops/
+          AuditEventConfiguration.cs
+        Sim/
+          SimSessionConfiguration.cs
+        Replay/
+          ReplaySessionConfiguration.cs
+      Timescale/
+        ReplayWriteRepository.cs
+        ReplayQueryRepository.cs
+    Security/
+      JwtOptions.cs
+      JwtTokenService.cs
+      PasswordHasher.cs
+      AuthorizationPolicies.cs   // Admin/Planner/Operator/Viewer policies
+
+  Data/                         // repositories for Postgres entities
+    Auth/
+      UserRepository.cs
+      RoleRepository.cs
+      AccessPolicyRepository.cs
+    Core/
+      RobotRepository.cs
+      RobotSessionRepository.cs
+    Map/
+      MapRepository.cs
+      NodeRepository.cs
+      PathRepository.cs
+      PointRepository.cs
+      QrRepository.cs
+    Task/
+      TaskRepository.cs
+      RouteRepository.cs
+      MissionRepository.cs
+      TeachSessionRepository.cs
+    Traffic/
+      TrafficHoldRepository.cs
+    Ops/
+      AuditRepository.cs
+    Sim/
+      SimSessionRepository.cs
+    Replay/
+      ReplaySessionRepository.cs
+
+  Mapping/                      // entity <-> DTO mapping
+    Auth/
+      UserMapper.cs
+    Core/
+      RobotMapper.cs
+      RobotSessionMapper.cs
+    Map/
+      MapMapper.cs
+      NodeMapper.cs
+      PathMapper.cs
+      PointMapper.cs
+      QrMapper.cs
+    Task/
+      TaskMapper.cs
+      RouteMapper.cs
+      MissionMapper.cs
+      TeachMapper.cs
+    Traffic/
+      TrafficMapper.cs
+
+  Service/                      // domain services (backendconcept modules)
+    Auth/
+      AuthService.cs
+      AdminUserService.cs
+    Fleet/
+      FleetService.cs
+      IncidentService.cs
+    Robots/
+      RobotRegistryService.cs          // presence + sessions
+      RobotQueryService.cs
+      RobotCommandService.cs           // validates + publishes commands
+    Ingestion/
+      StateIngestionService.cs         // NATS -> cache + SignalR + Timescale
+      StateStore.cs                    // in-memory latest snapshots
+    Tasks/
+      TaskManagerService.cs
+      AssignmentService.cs
+    Routes/
+      RoutePlannerService.cs
+    Traffic/
+      TrafficControlService.cs         // time-based schedule planner
+      ScheduleSummaryService.cs
+    Scheduling/
+      SchedulePublisherService.cs      // publishes robot.{robotId}.traffic.schedule
+    Config/
+      ConfigurationService.cs
+    Map/
+      MapManagementService.cs
+      MapValidationService.cs
+      PostgisQueryService.cs           // nearest_node, nearest_path_projection wrappers
+    Missions/
+      MissionService.cs
+      TeachService.cs
+      MissionValidator.cs
+    Simulation/
+      SimulationOrchestrator.cs
+      SimRobotDriver.cs
+    Replay/
+      ReplayService.cs
+    Ops/
+      OpsService.cs
+      JetStreamHealthService.cs
+      AuditService.cs
+
+  Nats/                         // NATS connections + JetStream wiring
+    NatsOptions.cs
+    NatsConnectionFactory.cs
+    JetStreamStreams.cs         // stream/consumer bootstrap (durable vs droppable)
+    Publishers/
+      RobotCommandPublisher.cs
+      TaskPublisher.cs
+      RoutePublisher.cs
+      ConfigPublisher.cs
+      TrafficSchedulePublisher.cs
+    Subscribers/
+      PresenceSubscriber.cs
+      StateSubscriber.cs
+      TelemetrySubscriber.cs
+      TaskEventSubscriber.cs
+      RouteProgressSubscriber.cs
+      CmdAckSubscriber.cs
+      LogSubscriber.cs
+
+  Worker/                       // hosted background workers (existing pattern)
+    RobotTelemetrySubscriber.cs
+    RoutePlannerWorker.cs
+    TrafficControlWorker.cs
+    OfflineDetectionWorker.cs
+    ReplayStreamerWorker.cs
+    SimulationWorker.cs
+
+  Migrations/
+    ...
+
+
+========================================================
+2) HOW THIS MAPS TO backendconcept.txt DOMAINS
+========================================================
+
+1. Messaging & Contracts
+- Contracts/ + Nats/ + Topics/
+
+2. Robot Registry & Sessions
+- Service/Robots/RobotRegistryService.cs
+- Nats/Subscribers/PresenceSubscriber.cs
+- Model/Core/RobotSession.cs + core.robot_sessions (dbmodel.txt)
+
+3. State Ingestion & State Store
+- Service/Ingestion/StateIngestionService.cs + Service/Ingestion/StateStore.cs
+- Nats/Subscribers/StateSubscriber.cs + TelemetrySubscriber.cs + LogSubscriber.cs
+- Timescale writes: Infrastructure/Persistence/Timescale/ReplayWriteRepository.cs
+
+4. Task Manager
+- Service/Tasks/TaskManagerService.cs + AssignmentService.cs
+- Model/Task/Task.cs + task.tasks (dbmodel.txt)
+- Robot message outputs: Nats/Publishers/TaskPublisher.cs
+
+5. Route Planner
+- Service/Routes/RoutePlannerService.cs
+- Model/Task/Route.cs + task.routes (dbmodel.txt)
+- route.updated SignalR emission via RealtimeHub
+
+6. Traffic Control Service
+- Service/Traffic/TrafficControlService.cs (headway + time windows)
+- Service/Scheduling/SchedulePublisherService.cs publishes droppable schedules
+
+7. Schedule Publisher
+- Service/Scheduling/SchedulePublisherService.cs
+- Nats/Publishers/TrafficSchedulePublisher.cs
+
+8. Configuration Service
+- Service/Config/ConfigurationService.cs
+- publishes cfg.* subjects and emits robot.config.updated
+
+9. Observability & Ops
+- Service/Ops/OpsService.cs + JetStreamHealthService.cs + AuditService.cs
+- Model/Ops/AuditEvent.cs + ops.audit_events (dbmodel.txt)
+
+10. Simulation Orchestrator
+- Service/Simulation/SimulationOrchestrator.cs + SimRobotDriver.cs
+- Model/Sim/SimSession.cs + sim.sim_sessions (dbmodel.txt)
+
+11. Map Management Service
+- Service/Map/MapManagementService.cs + MapValidationService.cs
+- Model/Map/* + map.* tables (dbmodel.txt)
+
+12. Teaching & Mission Service
+- Service/Missions/TeachService.cs + MissionService.cs
+- Model/Task/Mission.cs + TeachSession.cs + task.missions/task.teach_sessions
+
+
+========================================================
+3) FLOW LINKS (FRONTEND <-> BACKEND <-> ROBOT)
+========================================================
+
+Frontend -> Backend (REST):
+- backend/Api/*Controller.cs implements fbstream.txt routes
+
+Frontend <-> Backend (SignalR):
+- backend/Hub/RealtimeHub.cs emits fbstream.txt topics
+- backend/SignalR/RealtimeAuthorizer.cs enforces JWT roles and allowedRobotIds
+
+Backend <-> Robot (NATS/JetStream):
+- backend/Nats/Publishers and backend/Nats/Subscribers implement rbnats.txt subjects
+
+Persistence:
+- Postgres/PostGIS: backend/Infrastructure/Persistence/AppDbContext.cs + Model/*
+- TimescaleDB replay: Infrastructure/Persistence/Timescale/*
+
+
+========================================================
+END OF BACKEND FILE STRUCTURE
+========================================================

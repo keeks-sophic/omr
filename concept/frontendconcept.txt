@@ -1,0 +1,303 @@
+========================================================
+AMR FRONTEND – SUGGESTED UI TO SUPPORT BACKEND FUNCTIONS
+========================================================
+
+Goal
+----
+Provide a frontend application that allows users/operators/admins to use every backend function defined in backendconcept.txt:
+- Robot monitoring and control (manual + teach mode)
+- Task execution (user-driven + auto assignment) and mission execution
+- Map creation and maintenance management (PostGIS-backed graph + QR anchors)
+- Traffic visualization (schedules, holds, congestion) and fleet overview
+- Simulation and replay tools for production-like behavior
+- Configuration and feature flags per robot
+- Observability and incident review
+
+
+========================================================
+1. USER ROLES
+========================================================
+
+Suggested roles:
+- Admin: manage users, maps, global settings
+- Planner: create maps, points, missions; plan traffic; run simulation
+- Operator: run tasks/missions; monitor robots; intervene in faults; teach missions
+- Viewer: read-only dashboards and playback tools
+
+Role Enforcement:
+- Backend enforces roles using JWT tokens for both REST APIs and realtime streams.
+
+
+========================================================
+2. APPLICATION SHELL
+========================================================
+
+Global navigation:
+- Fleet Dashboard
+- Robots
+- Tasks
+- Missions (Teaching)
+- Map
+- Traffic
+- Simulation
+- Replay
+- Config
+- Observability
+
+Global UI patterns:
+- Realtime status header (backend connection, time sync, environment)
+- Global event feed (warnings, safety stops, faults)
+- Search by robotId, taskId, missionId, pointId, qrCode
+
+
+========================================================
+3. REALTIME DATA STRATEGY
+========================================================
+
+Frontend should not subscribe to NATS directly.
+Use backend as a gateway that:
+- consumes robot JetStream subjects
+- serves a realtime API (WebSocket/SSE) to the frontend
+
+Authentication/Authorization:
+- Frontend uses JWT for REST and SignalR.
+- Realtime subscriptions are filtered by role and access policy (e.g., allowedRobotIds).
+
+Frontend subscriptions (realtime):
+- robot sessions: connected/lastSeen/runtimeMode/capabilities/featureFlags
+- robot state snapshots/events and key telemetry summaries
+- task lifecycle events and route progress
+- traffic holds/schedule summaries (not full 10–30Hz stream unless needed)
+- log events and fault explanations
+
+Frontend queries (request/response):
+- list robots, tasks, missions, maps, points, QR anchors
+- create tasks, start missions, run simulation sessions, start replays
+- map editing operations and publishing new map versions
+
+
+========================================================
+4. FLEET DASHBOARD
+========================================================
+
+Purpose:
+- Single screen for fleet health and operational readiness
+
+Widgets:
+- Robot tiles: mode, safetyStopReason, battery, connectivity, runtimeMode
+- Active tasks: status, ETA, assigned robotId
+- Incidents: radar stops, E_STOP, FAULT transitions, communication loss
+- Congestion snapshot: top conflict zones and queued holds
+
+Actions:
+- Acknowledge incidents
+- Navigate to robot details / task details
+
+
+========================================================
+5. ROBOTS (DETAIL + MANUAL CONTROL)
+========================================================
+
+Robot List:
+- Filters: IDLE/EXECUTING/PAUSED/FAULT/E_STOP/MANUAL, runtimeMode, capabilities
+- Columns: lastSeen, battery, current route progress, lastQrCode
+
+Robot Detail:
+- State timeline (events)
+- Telemetry charts (battery, motion)
+- Localization view (position on current map)
+- Logs view (filter by severity)
+
+Manual Controls:
+- Set mode: IDLE/MANUAL/PAUSED
+- Send discrete commands:
+  - grip, hoist, telescope, cam toggle, rotate (if supported)
+- Safety controls:
+  - stop/pause task
+  - clear fault (if policy allows)
+
+Constraints:
+- Manual controls require Operator role
+- UI must hide controls not supported by capability flags or disabled by feature flags
+
+
+========================================================
+6. TASKS (USER-DRIVEN + AUTO ASSIGNMENT)
+========================================================
+
+Task Create Wizard:
+- Choose map version/environment
+- Choose task type:
+  - Go to pick/drop point
+  - Pick/Drop transfer (pick/drop -> pick/drop)
+  - Charge (to charge point)
+  - Run Mission (missionId)
+- Assignment mode:
+  - Auto assign
+  - Choose robotId
+- Constraints:
+  - priority
+  - earliest start
+  - allow preemption (optional)
+
+Task Views:
+- Task list with filters by status and robotId
+- Task detail:
+  - route preview
+  - traffic holds timeline
+  - progress events
+  - operator controls: pause/resume/cancel
+
+
+========================================================
+7. MISSIONS (TEACHING + COMPOSITION)
+========================================================
+
+Mission Library:
+- list missions with versioning, tags, and compatibility constraints
+- view mission steps (NAVIGATE, ACTUATE, WAIT, CALL_MISSION, ASSERT)
+- validate mission against robot capabilities and feature flags
+
+Teach Mode Console:
+- Select robotId + map version + create teachSession
+- Put robot into MANUAL + teachEnabled
+- Fine control panel:
+  - micro-move (uses short traffic schedules)
+  - actuator step controls:
+    - hoist, telescope (if enabled), grip, cam toggle, rotate (if supported)
+- State capture panel:
+  - shows live state and actuator positions
+  - “capture step” stores command + correlationId + settled state snapshot
+- Step editor:
+  - rename, reorder, add waits/asserts, add CALL_MISSION
+- Save mission:
+  - missionId, name, version, metadata
+
+Mission Execution:
+- “Run mission” creates a task referencing missionId
+- show execution trace: step-by-step status and verification outcomes
+
+
+========================================================
+8. MAP (POSTGIS MAP MANAGEMENT)
+========================================================
+
+Map Versioning:
+- list map versions and active version
+- clone a map version to edit
+- publish a version with a change summary
+
+Map Editor (graph + geometry):
+- Nodes:
+  - create/edit junction node geometry and metadata
+  - toggle maintenance on/off
+- Paths:
+  - draw/edit path geometry between nodes
+  - set direction: one-way/two-way
+  - set speed limit and maintenance on/off
+  - mark as rest path + capacity/dwell policy
+- Points:
+  - place pick/drop/charge points and label them
+- QRs:
+  - add QR anchors along paths
+  - set qrCode and distanceAlongPath metadata
+
+Validation Tools:
+- connectivity checks (dangling nodes, unreachable points)
+- one-way violations
+- maintenance impact preview (which points become unreachable)
+
+
+========================================================
+9. TRAFFIC (VISUALIZATION + DEBUG)
+========================================================
+
+Traffic Overview:
+- live map overlay:
+  - robot positions, planned routes, conflict zones
+  - holds/stop windows and reservations (visual)
+- congestion heatmap (derived from schedules/reservations)
+
+Per-Robot Schedule View:
+- timeline of target velocity (downsampled)
+- markers for holds and releases
+- compare target vs actual speed (closed-loop error)
+
+Operator Actions:
+- request reroute
+- apply temporary hold at node/path (admin/planner policy)
+
+
+========================================================
+10. SIMULATION (PRODUCTION-LIKE)
+========================================================
+
+Simulation Sessions:
+- create sim session:
+  - choose map version
+  - create N simulated robots with capabilities/feature flags
+  - load missions/tasks to run
+- run controls:
+  - start/stop/pause
+  - speed multiplier
+- visualization:
+  - same traffic and robot views as production
+  - event timeline
+
+Outputs:
+- comparison reports:
+  - throughput, average wait_time, congestion_penalty contributions
+  - safety-stop counts (if simulated)
+
+
+========================================================
+11. REPLAY (INCIDENT REVIEW)
+========================================================
+
+Replay Session UI:
+- pick robotId, time window, playback speed
+- play/pause/seek
+- view:
+  - robot state timeline
+  - telemetry overlays (pose/motion)
+  - task events + route progress
+  - traffic schedule/holds summaries
+  - logs and fault explanations
+
+Replay Safety Rule:
+- Replay data must never publish to live robot subjects.
+
+
+========================================================
+12. CONFIGURATION (LIMITS + FEATURE FLAGS)
+========================================================
+
+Per-Robot Config:
+- motion limits: maxDriveSpeed, maxAcceleration, maxDeceleration
+- runtime mode: LIVE/SIM (session-level control)
+- feature flags:
+  - telescopeEnabled (on/off)
+
+Policy:
+- Validate config changes against current robot mode (e.g., disallow toggling features mid-step)
+- Show config history and rollback
+
+
+========================================================
+13. OBSERVABILITY & OPS
+========================================================
+
+Dashboards:
+- JetStream health (lag, dropped messages, consumer health)
+- Robot heartbeat monitoring (offline detection)
+- Fault distribution and MTTR
+- Command/task ACK performance
+
+Tools:
+- log search across robots
+- export incident bundle (events + map version + mission version)
+
+
+========================================================
+END OF FRONTEND CONCEPT FILE
+========================================================

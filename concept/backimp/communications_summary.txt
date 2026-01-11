@@ -1,0 +1,55 @@
+Module 00: Security (JWT + RBAC)
+- Frontend ↔ Backend: REST /api/v1/auth/login, /api/v1/auth/me; SignalR connection auth; Implemented (partial across modules)
+- Backend ↔ Robot: none; Not applicable
+
+Module 01: API + Realtime Gateway
+- Frontend ↔ Backend: REST controllers across domains; SignalR /hubs/realtime with snapshots; Implemented (partial, several endpoints missing)
+- Backend ↔ Robot: indirect via services; NATS publish/consume not wired; Not implemented
+
+Module 02: Messaging & Contracts (NATS JetStream)
+- Frontend ↔ Backend: none; Not applicable
+- Backend ↔ Robot: subjects defined (cmd, task, route, cfg, schedule, presence, state, telemetry, logs); JetStream client/consumers missing; Not implemented
+
+Module 03: Robot Registry & Sessions
+- Frontend ↔ Backend: REST robots list/detail/session; SignalR robot.session.updated; Implemented (partial for capabilities/feature-flags and emissions)
+- Backend ↔ Robot: presence.hello, presence.heartbeat; consumers missing; Not implemented
+
+Module 04: State Ingestion & Store
+- Frontend ↔ Backend: SignalR robot.state/telemetry/log topics; Implemented (partial, emission/initial snapshots limited)
+- Backend ↔ Robot: state.snapshot/event, telemetry.*, task.event, route.progress, log.event; consumers missing; Not implemented
+
+Module 05: Task Manager
+- Frontend ↔ Backend: REST create/pause/resume/cancel; SignalR task.* topics; Implemented (partial, list/detail and emissions missing)
+- Backend ↔ Robot: task.assign/control, route.assign/update; publish via stub, feedback consumers missing; Not implemented
+
+Module 06: Route Planner
+- Frontend ↔ Backend: REST routes/plan; SignalR route.updated; Implemented (partial, GETs and ETA missing)
+- Backend ↔ Robot: route.assign/update; publish via stub; Not implemented
+
+Module 07: Traffic Control Service
+- Frontend ↔ Backend: REST traffic/conflicts, holds; SignalR traffic.overview/schedule.summary; Implemented (partial)
+- Backend ↔ Robot: traffic.schedule (droppable); publish via stub; Not implemented
+
+Module 08: Schedule Publisher
+- Frontend ↔ Backend: none; Not applicable
+- Backend ↔ Robot: traffic.schedule; publish via stub; Not implemented
+
+Module 09: Configuration Service
+- Frontend ↔ Backend: REST PUT config endpoints; SignalR robot.config.updated; Implemented (partial, GET config missing)
+- Backend ↔ Robot: cfg.motion_limits/runtime_mode/features; publish via stub; Not implemented
+
+Module 10: Map Management Service
+- Frontend ↔ Backend: REST versions/entities CRUD; SignalR map.version/entity updated; Implemented (partial, many GETs and validate missing)
+- Backend ↔ Robot: none (indirect via planning); Not applicable
+
+Module 11: Teaching & Mission Service
+- Frontend ↔ Backend: REST teach session operations and missions create/update/validate; SignalR teach.session/step, mission.*; Implemented (partial)
+- Backend ↔ Robot: cmd.mode, cmd.* during teach; ack/state/telemetry feedback; publish/consume missing; Not implemented
+
+Module 12: Simulation Orchestrator
+- Frontend ↔ Backend: REST sim session lifecycle; SignalR sim.status/event/metrics; Implemented (partial, GETs missing)
+- Backend ↔ Robot: backend.sim.* internal subjects; simulated drivers; handlers missing; Not implemented
+
+Module 13: Observability & Ops (including Replay)
+- Frontend ↔ Backend: REST ops health/jetstream/alerts/audit; replay session lifecycle; SignalR ops.*, replay.*; Implemented (partial, some GETs missing)
+- Backend ↔ Robot: none (sources from ingestion); Not applicable

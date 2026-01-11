@@ -1,0 +1,90 @@
+MODULE 00: STARTUP & IDENTITY
+- presence.hello: one-shot on connect (best-effort)
+- presence.heartbeat: periodic low-rate (best-effort)
+- state.snapshot: included later via Store (see Module 02)
+
+MODULE 01: MESSAGING & CONTRACTS
+- cmd_ack: per inbound durable message (durable suggested)
+- state.snapshot: periodic (durable suggested)
+- state.event: on change (durable suggested)
+- task.event: discrete lifecycle (durable suggested)
+- route.progress: periodic/threshold-based (durable suggested)
+- telemetry.motion/pose: high-rate droppable
+- telemetry.battery/health: low-rate durable
+- telemetry.radar/qr: event-driven droppable
+- log.event: durable suggested
+- traffic.schedule: inbound droppable latest-wins (not a publish)
+
+MODULE 02: STATE STORE
+- state.snapshot: periodic
+- state.event: on change
+
+MODULE 03: TASK & ROUTE EXECUTION
+- route.progress: periodic or threshold-based
+- task.event: on completion/failure (discrete)
+- state.event: on task/route state changes
+
+MODULE 04: COMMAND HANDLING
+- cmd_ack: per command (ACK/NAK) immediate
+- state.event: on actuator/mode updates (discrete on change)
+- log.event: on execution failure (durable suggested)
+
+MODULE 05: TRAFFIC ADAPTER
+- state.event (targetLinearVel, motionState): periodic tick (e.g., 20–50ms), droppable
+
+MODULE 06: MOTION CONTROL
+- state.event (currentLinearVel, motionState): periodic tick (same cadence), droppable
+- drive setpoints: internal to hardware (no NATS)
+
+MODULE 07: HARDWARE INTERFACE
+- telemetry.radar: event-driven on obstacle
+- telemetry.qr: event-driven on scan
+- state.event (estop, faults, actuator feedback): event-driven on change
+
+MODULE 08: TELEMETRY & REPORTING
+- state.snapshot: periodic
+- state.event: on change
+- telemetry.motion/pose: high-rate droppable
+- telemetry.battery/health: low-rate durable
+- log.event: durable suggested
+- presence.hello: one-shot on connect
+- presence.heartbeat: periodic low-rate
+
+PERIODIC TICK CADENCE
+MODULE 00: STARTUP & IDENTITY
+- presence.heartbeat: periodic low-rate
+MODULE 01: MESSAGING & CONTRACTS
+- none (event-driven; snapshot tick covered in Module 02/08)
+MODULE 02: STATE STORE
+- state.snapshot: periodic low-rate
+MODULE 03: TASK & ROUTE EXECUTION
+- route.progress: periodic or threshold-based
+MODULE 04: COMMAND HANDLING
+- none (discrete/event-driven)
+MODULE 05: TRAFFIC ADAPTER
+- interpolation tick: 20–50ms
+MODULE 06: MOTION CONTROL
+- control tick: 20–50ms
+MODULE 07: HARDWARE INTERFACE
+- none (event-driven)
+MODULE 08: TELEMETRY & REPORTING
+- state.snapshot: periodic low-rate
+- presence.heartbeat: periodic low-rate
+- telemetry.motion/pose: high-rate periodic (droppable)
+- telemetry.battery/health: low-rate periodic (durable)
+
+RECOMMENDED NUMERIC RATES
+- presence.hello: one-shot on connect
+- presence.heartbeat: every 5s (0.2 Hz)
+- state.snapshot: every 2s (0.5 Hz)
+- state.event: on change (no fixed rate; debounce optional ~100ms)
+- telemetry.motion: 20 Hz (every 50ms, droppable)
+- telemetry.pose: 10–20 Hz (every 50–100ms, droppable)
+- telemetry.battery: every 30s (0.033 Hz, durable)
+- telemetry.health: every 10s (0.1 Hz, durable)
+- telemetry.radar: event-driven on obstacle (no fixed rate)
+- telemetry.qr: event-driven on scan (no fixed rate)
+- cmd_ack: immediate per inbound durable message
+- route.progress: 1 Hz (every 1s) or on threshold (≥1m delta or segment change)
+- traffic.adapter tick: 20–50ms (20–50 Hz)
+- motion.control tick: 20–50ms (20–50 Hz)

@@ -1,0 +1,47 @@
+========================================================
+MODULE 03: TASK & ROUTE EXECUTION (LOW-FREQ RELIABLE)
+========================================================
+
+Goal:
+- Execute assigned tasks and routes reliably
+- Report progress and lifecycle events back to backend
+
+Primary Inputs (durable):
+- robot.{robotId}.task.assign
+- robot.{robotId}.task.control (pause/resume/cancel)
+- robot.{robotId}.route.assign
+- robot.{robotId}.route.update
+
+Primary Outputs:
+- robot.{robotId}.task.event
+- robot.{robotId}.route.progress
+- State updates via StateStore (task status, routeId)
+
+Execution Flow:
+1) Receive task.assign:
+   - validate taskId, taskType, parameters
+   - store active task
+   - cmd_ack ACK/NAK correlationId
+2) Receive route.assign:
+   - validate routeId + segments/checkpoints
+   - store active route plan
+   - cmd_ack ACK/NAK correlationId
+3) Run loop:
+   - drive behavior is controlled by Traffic Adapter + Motion Control
+   - Task/Route module monitors:
+     - QR/pose to determine segment index and distance along
+     - task completion conditions
+4) Publish route.progress periodically or on thresholds
+5) On completion/failure:
+   - publish task.event (COMPLETED/FAILED) with reason
+
+Pause/Resume:
+- task.control PAUSE:
+  - set mode/flags in StateStore (PAUSED)
+  - Motion Control target velocity becomes 0
+- task.control RESUME:
+  - return to EXECUTING_TASK if safe
+
+Cross-check with backendmodules:
+- backendmodules/05_task_manager.txt consumes task.event and route.progress.
+

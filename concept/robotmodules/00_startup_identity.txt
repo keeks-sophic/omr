@@ -1,0 +1,40 @@
+========================================================
+MODULE 00: STARTUP & IDENTITY (CLI + DEFAULTS)
+========================================================
+
+Goal:
+- Resolve robot identity and runtime configuration before connecting to NATS
+
+Inputs:
+- CLI flags:
+  - --id: robotId (string; recommended: serial number)
+  - --name / -n: display name
+  - --ip / -i: IP address (metadata)
+- appsettings.json defaults for id/name/ip and NATS connection
+
+Outputs:
+- In-memory Identity object:
+  - robotId (stable)
+  - name (display)
+  - ip (metadata)
+- Robot publishes identity in:
+  - robot.{robotId}.presence.hello payload
+  - state snapshots (Identity section)
+
+Flow:
+1) Parse CLI args and load config defaults
+2) Resolve config precedence:
+   - CLI overrides config
+3) Validate:
+   - robotId must be non-empty and stable
+4) Initialize:
+   - NATS client
+   - StateStore with Identity fields prefilled
+5) Publish presence.hello once NATS connected
+
+Failure Handling:
+- Missing robotId:
+  - fail fast (do not connect)
+- NATS connect fails:
+  - retry with backoff; keep robot in disconnected state
+

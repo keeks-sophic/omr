@@ -1,0 +1,34 @@
+========================================================
+MODULE 10: MAP MANAGEMENT SERVICE (POSTGIS MAP)
+========================================================
+
+Goal:
+- Provide versioned map CRUD and validation
+- Support maintenance closures, rest paths, QR anchors
+
+Primary Inputs:
+- REST:
+  - /api/v1/maps, /api/v1/maps/{mapVersionId}/*
+- SignalR:
+  - map.version.created / map.version.published / map.entity.updated
+
+Primary Outputs:
+- Postgres/PostGIS:
+  - map.map_versions, map.nodes, map.paths, map.points, map.qr_anchors
+- SignalR map events for UI editor collaboration
+
+Core Operations:
+- Create map version, clone version, publish version (is_active)
+- CRUD nodes/paths/points/qrs
+- Toggle maintenance on node/path
+- Mark rest paths and capacity
+
+Validation (concept):
+- Graph connectivity: unreachable points, dangling nodes
+- Direction constraints: invalid one-way links
+- QR validity: qr anchor close to its path, distanceAlongPath reasonable
+- Maintenance impact preview: which points become unreachable
+
+PostGIS Support:
+- Use gist indexes and nearest_node/nearest_path_projection functions (dbmodel.txt)
+

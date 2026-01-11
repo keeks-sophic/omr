@@ -1,0 +1,28 @@
+========================================================
+MODULE 08: SCHEDULE PUBLISHER (NATS TRAFFIC.SCHEDULE)
+========================================================
+
+Goal:
+- Publish computed schedules to each robot using droppable latest-wins semantics
+
+Primary Inputs:
+- TrafficControlService output TrafficSchedule per robot
+- Robot session liveness (connected, lastSeen)
+
+Primary Outputs:
+- NATS:
+  - robot.{robotId}.traffic.schedule (droppable)
+- Optional: cache schedule summaries for UI and analytics
+
+Publish Rules:
+- Publish frequently with short horizon (e.g., 1–3 seconds)
+- Include generatedAt and horizonMs
+- Drop older schedule updates automatically (JetStream config)
+
+Failure Handling:
+- If publish fails:
+  - retry quickly for that robot
+  - raise ops alert if sustained
+- If robot offline:
+  - stop publishing schedules until connected
+

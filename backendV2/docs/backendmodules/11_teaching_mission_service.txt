@@ -1,0 +1,46 @@
+========================================================
+MODULE 11: TEACHING & MISSION SERVICE
+========================================================
+
+Goal:
+- Record operator actions as repeatable missions
+- Validate missions against robot capabilities and feature flags
+- Execute missions by expanding them into tasks/steps
+
+Primary Inputs:
+- REST:
+  - /api/v1/teach/sessions (create/start/stop/capture-step/save-mission)
+  - /api/v1/missions (CRUD/validate)
+- NATS feedback:
+  - robot state snapshots/events (actuator states)
+  - cmd_ack (correlationId)
+
+Primary Outputs:
+- Postgres:
+  - task.teach_sessions.captured_steps
+  - task.missions.steps
+- SignalR:
+  - teach.session.started/stopped
+  - teach.step.captured/updated
+  - mission.created/updated
+
+Teach Capture Flow:
+1) Create teach session (TeachSessionCreateRequest)
+2) Start session:
+  - send cmd.mode to MANUAL with teachEnabled + teachSessionId
+3) Operator performs micro actions:
+  - commands + traffic schedules (handled by other modules)
+4) Capture step:
+  - backend stores correlationId + settled RobotStateDto (including actuators)
+5) Save mission:
+  - convert captured steps into MissionStepDto array
+
+Mission Validation:
+- For each step, ensure robot has needed capabilities and enabled features:
+  - rotate requires supportsRotate
+  - telescope actions require supportsTelescope and telescopeEnabled
+
+Mission Execution (concept):
+- Create a RUN_MISSION task referencing missionId
+- Task Manager expands mission into executable plan and monitors step status
+

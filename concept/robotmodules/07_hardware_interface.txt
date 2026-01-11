@@ -1,0 +1,26 @@
+========================================================
+MODULE 07: HARDWARE INTERFACE (DRIVERS + SAFETY)
+========================================================
+
+Goal:
+- Provide a clean driver boundary for motors, radar, QR, actuators
+- Convert hardware events into state events
+
+Inputs:
+- Drive setpoints from Motion Control
+- Actuator commands from Command Handling
+
+Outputs:
+- Sensor events:
+  - radar obstacle detection
+  - QR scans
+  - motor fault signals
+  - estop status
+- Actuator feedback:
+  - hoist/telescope/rotate positions, grip state
+
+Logic:
+- Hardware drivers never talk to NATS.
+- Drivers emit events to StateStore and Telemetry module.
+- Safety interlocks can override Motion Control requests (hard stop).
+

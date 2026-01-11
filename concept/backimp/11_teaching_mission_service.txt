@@ -1,0 +1,66 @@
+1. What should be implement
+- Teach sessions to capture operator actions into mission steps
+- Validate missions against capabilities and feature flags
+- Execute missions via Task Manager
+
+2. What have been implement
+- TeachController and MissionsController endpoints
+- TeachingService and MissionService for session/mission logic
+- DTOs: TeachSessionCreateRequest, TeachCaptureRequest, MissionCreateRequest, MissionUpdateRequest, MissionStepDto
+- Persistence models for TeachSession and Mission
+
+3. How does it implement
+- Create/start/stop teach sessions; capture steps with correlation and settled state (conceptual)
+- Store mission steps and validate capabilities/flags
+- Mission execution integrates with TaskManager via RUN_MISSION task (conceptual)
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend drives teach/missions via REST and subscribes to teach/mission topics
+- Backend stores sessions/missions and would send mode/commands to robot (stub)
+- Robot provides state/ack; ingestion should capture actuator states (not wired)
+- DB persists teach sessions and mission definitions
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: task.teach_sessions, task.missions and related step storage
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Intended: robot.{robotId}.cmd.mode and command subjects during teaching
+- Ack via robot.{robotId}.cmd_ack
+- Actual: publisher stub; consumers missing
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/teach/sessions/*, /api/v1/missions/*
+- SignalR: teach.session.*, teach.step.*, mission.*
+
+8. What have not be implemented
+- Capture pipeline from robot ingestion to persist actuator states
+- Mission execution expansion and step status monitoring
+- Ack correlation handling and error policies
+ 
+9. Requirements not implemented (per backendconcept)
+- Closed-loop teach control capturing settled robot state and actuator positions
+- Mission composition (CALL_MISSION) and guard/assert semantics
+- Execution monitoring with retries, pause for operator intervention
+- Capability/feature flag enforcement at execution time
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- Teach:
+  - POST /api/v1/teach/sessions — Implemented: Yes
+  - POST /api/v1/teach/sessions/{teachSessionId}/start — Implemented: Yes
+  - POST /api/v1/teach/sessions/{teachSessionId}/stop — Implemented: Yes
+  - POST /api/v1/teach/sessions/{teachSessionId}/capture-step — Implemented: Yes
+  - GET  /api/v1/teach/sessions/{teachSessionId} — Implemented: No
+  - POST /api/v1/teach/sessions/{teachSessionId}/save-mission — Implemented: Yes
+- Missions:
+  - GET  /api/v1/missions — Implemented: No
+  - POST /api/v1/missions — Implemented: Yes
+  - GET  /api/v1/missions/{missionId} — Implemented: No
+  - POST /api/v1/missions/{missionId}/clone — Implemented: No
+  - POST /api/v1/missions/{missionId}/validate — Implemented: Yes
+- SignalR: teach.session.started|stopped, teach.step.captured|updated, mission.created|updated — Implemented: Partial
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend -> Robot: cmd.mode, cmd.* during teach — Implemented: No (stub only)
+- Robot -> Backend: cmd_ack, state.snapshot|event, telemetry.* — Implemented: No (consumers missing)
+Matches rbnats: No

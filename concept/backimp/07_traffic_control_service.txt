@@ -1,0 +1,54 @@
+1. What should be implement
+- Global scheduling to avoid conflicts; per-robot velocity/time schedules
+- React to feedback and holds; enforce motion limits and headway
+- Emit UI summaries and publish schedules to robots
+
+2. What have been implement
+- TrafficController endpoints for holds/conflicts
+- TrafficControlService scaffolding and DTOs (TrafficOverviewDto, RobotScheduleSummaryDto)
+- SchedulePublisherService and SchedulePublisherWorker invoking publisher stub
+
+3. How does it implement
+- Consumes route/task context and state cache to build schedules (conceptual)
+- Produces schedule summaries for UI topics
+- Publishes schedules via NatsPublisherStub
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend manages holds via REST and subscribes to traffic topics via SignalR
+- Backend computes schedules and sends summaries; publisher sends robot schedules (stub)
+- Robot follows schedules; backend would replan on feedback
+- DB stores holds and task/route context
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: TrafficHold, Task/Route tables, map constraints via Map tables
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- robot.{robotId}.traffic.schedule (droppable latest-wins)
+- Published via stub, not a real JetStream client
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/traffic/holds, /api/v1/traffic/conflicts
+- SignalR: traffic.overview.snapshot/updated, traffic.schedule.summary.updated
+
+8. What have not be implemented
+- Concrete scheduling algorithm and reservation model
+- Real JetStream publishing and backoff/retry on failures
+- Closed-loop reaction to radar stops and E_STOP events from ingestion
+ 
+9. Requirements not implemented (per backendconcept)
+- Independent module interface (PlanSchedules, UpdateInputs) formalized and testable
+- Same-direction path sharing with minFollowingDistance headway enforcement
+- Closed-loop behavior for slower actual speed, RADAR stop, FAULT/E_STOP removals
+- Motion limits clamping applied to schedules
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- GET  /api/v1/traffic/conflicts — Implemented: Yes
+- POST /api/v1/traffic/holds — Implemented: Yes
+- DELETE /api/v1/traffic/holds/{holdId} — Implemented: Yes
+- GET  /api/v1/traffic/robots/{robotId}/schedule — Implemented: No
+- SignalR: traffic.overview.snapshot|updated, traffic.hold.created|released, traffic.schedule.summary.updated — Implemented: Partial (emission partial)
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend -> Robot: robot.{robotId}.traffic.schedule (Droppable) — Implemented: No (stub only)
+Matches rbnats: No

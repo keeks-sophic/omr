@@ -1,0 +1,58 @@
+1. What should be implement
+- Manage motion limits, runtime mode, and feature flags per robot
+- Validate constraints and publish configs reliably to robots
+- Emit UI updates and maintain config history (optional)
+
+2. What have been implement
+- RobotsController config endpoints
+- ConfigurationService handling validations and persistence
+- DTOs: MotionLimitsDto; feature flags/capabilities under Robots DTOs
+- Publishes cfg.* via NatsPublisherStub
+
+3. How does it implement
+- Validates role permissions and value ranges
+- Persists latest config to robot session jsonb fields
+- Publishes to robot subjects with intended correlation semantics (stub)
+- Emits robot.config.updated via SignalR topics (conceptual)
+
+4. How the flow works between frontend, backend, robot, db
+- Frontend PUTs config → backend validates, persists, publishes to robot
+- Robot applies changes and would ack via cmd_ack (not consumed)
+- DB stores latest config in core.robot_sessions
+- Frontend receives updates via SignalR
+
+5. Does it communicate with db, if yes what is the data model used
+- Yes: core.robot_sessions.feature_flags, capabilities; motion limits storage
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- robot.{robotId}.cfg.motion_limits
+- robot.{robotId}.cfg.runtime_mode
+- robot.{robotId}.cfg.features
+- Published via stub
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- REST: /api/v1/robots/{robotId}/config/*
+- SignalR: robot.config.updated
+
+8. What have not be implemented
+- Durable JetStream publish with ack handling and retries
+- Initial config publish triggered on presence.hello
+- Config history audit trail
+ 
+9. Requirements not implemented (per backendconcept)
+- Enforce motion limits in downstream planning (traffic + route) consistently
+- RuntimeMode LIVE/SIM propagation and validation across services
+- Feature flag constraints preventing actuator commands when disabled
+- ACK-required durable publish semantics and retries/dead-letter
+
+10. Endpoints and compliance
+API/WebSocket (from fbstream):
+- GET  /api/v1/robots/{robotId}/config — Implemented: No
+- PUT  /api/v1/robots/{robotId}/config/motion-limits — Implemented: Yes
+- PUT  /api/v1/robots/{robotId}/config/runtime-mode — Implemented: Yes
+- PUT  /api/v1/robots/{robotId}/config/feature-flags — Implemented: Yes
+- SignalR: robot.config.updated — Implemented: Partial (conceptual)
+Matches fbstream: Partial
+NATS/JetStream (from rbnats):
+- Backend -> Robot: cfg.motion_limits, cfg.runtime_mode, cfg.features — Implemented: No (stub only)
+Matches rbnats: No

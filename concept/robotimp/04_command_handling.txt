@@ -1,0 +1,45 @@
+1. What should be implement
+- Command acceptance with safety and capability checks
+- Validation for mode changes and configuration updates
+- Execution against actuators and publishing acknowledgements and state changes
+
+2. What have been implement
+- CommandListenerService.Accept* for Grip/Hoist/Telescope/CamToggle/Rotate/Mode with:
+- SafetyBlockReason checks (E-stop, fault); capability/feature checks
+- CommandValidation.ValidateMode for allowed modes (IDLE/MANUAL/PAUSED)
+- CommandExecutor applies actuators (grip/hoist/telescope/rotate)
+- StateSnapshotWorker.PublishEvent emits changed fields; TelemetryService.SendAck and PublishLogEvent used
+- Config handlers: AcceptCfgMotionLimits, AcceptCfgRuntimeMode, AcceptCfgFeatures applying to store and publishing events
+
+3. How does it implement
+- Subscriptions registered via NatsSubjects.Cmd.* and Cfg.*; Accept handlers enqueue to inboxes and apply events
+- Acknowledgements sent on both success (ACK) and blocked/invalid (NAK) with reasons
+- Actuator changes reflected into RobotState and snapshot events
+
+4. How the flow works between frontend, backend, robot, db
+- Backend publishes cmd.*; robot validates, executes and replies via cmd_ack
+- No database involvement; frontend observes via backend
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Subscribe: cmd.grip/hoist/telescope/cam_toggle/rotate/mode, cfg.motion_limits/runtime_mode/features
+- Publish: cmd_ack, state.event, log.event
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Detailed ack payloads (correlation, status, reason content) beyond subject publish
+- Hardware side-effects for camera toggle and others (drivers stubbed)
+- Extended safety interlocks (zones, speed caps, role-based blocks)
+
+9. Requirements not implemented (per robotconcept)
+- Audit standardization for privileged actions and outcomes
+- Fine-grained permission scopes for command categories
+- Durable and ordered command processing with retries
+
+10. Endpoints and compliance
+- NATS: cmd.*, cfg.*, cmd_ack, state.event, log.event
+- Matches rbnats: Yes (subjects); payloads/processing semantics to be hardened

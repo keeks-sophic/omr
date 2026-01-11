@@ -1,0 +1,63 @@
+========================================================
+MODULE 01: MESSAGING & CONTRACTS (NATS/JetStream)
+========================================================
+
+Goal:
+- Subscribe to backend commands/tasks/routes/config/schedules
+- Publish robot presence/state/telemetry/logs and ACKs
+
+Primary Inputs (subscriptions; Backend -> Robot):
+- Durable:
+  - robot.{robotId}.cmd.grip
+  - robot.{robotId}.cmd.hoist
+  - robot.{robotId}.cmd.telescope
+  - robot.{robotId}.cmd.cam_toggle
+  - robot.{robotId}.cmd.rotate
+  - robot.{robotId}.cmd.mode
+  - robot.{robotId}.task.assign
+  - robot.{robotId}.task.control
+  - robot.{robotId}.route.assign
+  - robot.{robotId}.route.update
+  - robot.{robotId}.cfg.motion_limits
+  - robot.{robotId}.cfg.runtime_mode
+  - robot.{robotId}.cfg.features
+- Droppable (latest-wins):
+  - robot.{robotId}.traffic.schedule
+
+Primary Outputs (publishes; Robot -> Backend):
+- Best-effort suggested:
+  - robot.{robotId}.presence.hello
+  - robot.{robotId}.presence.heartbeat
+- Durable suggested:
+  - robot.{robotId}.cmd_ack
+  - robot.{robotId}.state.snapshot
+  - robot.{robotId}.state.event
+  - robot.{robotId}.task.event
+  - robot.{robotId}.route.progress
+  - robot.{robotId}.log.event
+- Mixed telemetry:
+  - robot.{robotId}.telemetry.battery
+  - robot.{robotId}.telemetry.health
+  - robot.{robotId}.telemetry.pose
+  - robot.{robotId}.telemetry.motion
+  - robot.{robotId}.telemetry.radar
+  - robot.{robotId}.telemetry.qr
+
+Correlation & ACK:
+- Every durable inbound message from backend includes correlationId (in payload).
+- Robot must publish cmd_ack:
+  - correlationId
+  - status ACK/NAK
+  - reason (for NAK)
+
+Delivery Rules:
+- Commands/tasks/routes/config are processed in order per subject.
+- cmd_ack is sent after:
+  - schema validation
+  - capability/feature validation
+  - acceptance into the correct internal queue
+- traffic.schedule is applied immediately and can be replaced by a newer message.
+
+Cross-check with backendmodules:
+- backendmodules/02_messaging_contracts_nats.txt lists the same subjects.
+

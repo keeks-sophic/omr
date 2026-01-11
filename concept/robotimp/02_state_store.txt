@@ -1,0 +1,46 @@
+1. What should be implement
+- Centralized robot state store with event-driven updates
+- Consistent mapping to DTO for snapshots and incremental events
+- Apply functions for identity, motion, safety, health, tasks and routes
+
+2. What have been implement
+- RobotStateStore maintains RobotState and Apply(RobotEvent) for many event types:
+- IdentityResolved, MotionLimitsUpdated, RuntimeModeUpdated, FeatureFlagsUpdated
+- ModeUpdated (mode/teach), ActuatorStateChanged, TaskAssigned, RouteAssigned
+- RouteProgressUpdated, RadarObstacleChanged, EStopChanged, FaultRaised, FaultCleared
+- MotionTargetUpdated and MotionCurrentUpdated with motion state transitions, QrScanned
+- StateSnapshotWorker publishes state.snapshot and state.event using RobotStateMapper
+
+3. How does it implement
+- CommandListenerService and workers compute changes and call store.Apply(event)
+- Apply returns changed field names; StateSnapshotWorker.PublishEvent publishes incremental updates
+- Full snapshot publishing via PublishSnapshot at startup and on schedule
+
+4. How the flow works between frontend, backend, robot, db
+- Backend receives state events/snapshots; may reflect in UI
+- Robot updates internal state in response to commands, traffic, hardware and motion ticks
+- No database persistence implemented
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Publish: state.snapshot and state.event (with changed fields and full DTO)
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend socket/API from robot
+
+8. What have not be implemented
+- Persistent storage or recovery of RobotState on restart
+- Versioning and migration for state schema
+- Concurrency control for simultaneous event application
+- Full mapping coverage for all actuator/hardware fields
+
+9. Requirements not implemented (per robotconcept)
+- Standardized audit/log fields for state changes
+- Durable delivery and replay semantics for state events
+- Health metrics on state application and event throughput
+
+10. Endpoints and compliance
+- NATS: state.snapshot, state.event
+- Matches rbnats: Yes (subject naming)

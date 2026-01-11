@@ -1,0 +1,55 @@
+========================================================
+MODULE 07: TRAFFIC CONTROL SERVICE (GLOBAL SCHEDULING)
+========================================================
+
+Goal:
+- Produce per-robot time-indexed velocity schedules to avoid conflicts
+- React to closed-loop feedback (actual speed, stops, progress)
+
+Primary Inputs:
+- Robot state + motion telemetry (from State Store)
+- Active routes (task.routes + current route progress)
+- Motion limits (per robot config)
+- Traffic holds (traffic.holds)
+- Map constraints (map.paths/map.nodes maintenance, one-way)
+
+Primary Outputs:
+- Per-robot TrafficSchedule objects
+- Per-robot schedule summaries for UI (RobotScheduleSummaryDto)
+- SignalR topics:
+  - traffic.overview.snapshot/updated
+  - traffic.schedule.summary.updated
+
+Related REST endpoints (fbstream.txt):
+- GET /api/v1/traffic/conflicts
+- POST/DELETE /api/v1/traffic/holds
+
+Related NATS endpoints (rbnats.txt):
+- robot.{robotId}.traffic.schedule is published by Module 08 (Schedule Publisher)
+
+Core Logic (concept):
+1) Build reservation model on map graph:
+  - time windows per node/path segment from active routes
+2) Resolve conflicts:
+  - insert holds (0 velocity) for lower-priority robots
+  - shift schedules forward in time to satisfy safe gaps
+3) Clamp schedule by MotionLimitsDto
+4) If robot reports RADAR stop:
+  - freeze schedule at 0 for that robot and replan others
+5) If robot goes FAULT/E_STOP:
+  - remove from scheduling inputs
+
+Data Flow:
+- Inputs consumed from cache + DB, not directly from UI
+- Output schedules passed to Schedule Publisher (Module 08)
+
+Same-Direction Path Sharing (safe following):
+- Instead of treating a path as single-occupancy, allow multiple robots on the same path in the same direction.
+- Enforce a minimum headway between consecutive robots on the same path:
+  - minFollowingDistanceMeters is read from map.paths.min_following_distance_m (or a default)
+  - Convert to time headway using the lead robot’s planned speed:
+    - headwayTime = minFollowingDistanceMeters / max(leadTargetVel, epsilon)
+  - In the reservation model, represent same-direction usage as ordered reservations:
+    - follower reservation start time must be >= leader reservation start time + headwayTime
+    - follower stop windows are inserted if it would violate headway
+- Opposite direction remains mutually exclusive for the same physical path unless modeled as separate lanes.

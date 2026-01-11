@@ -1,0 +1,64 @@
+Module 00: Security & RBAC
+- Add logout endpoint and token revocation/refresh support
+- Implement admin user CRUD and role assignment endpoints
+- Expand audit coverage across controllers and hub group joins
+- Enforce per-action policies for commands, teach, tasks, publish, sim, replay
+- Apply allowedRobotIds filtering for all hub topics
+
+Module 01: API & Realtime Gateway
+- Add FleetController endpoints: incidents list and ack
+- Expose robot state/telemetry/log history GET endpoints
+- Expand snapshot-on-subscribe and delta updates coverage
+- Apply allowedRobotIds filtering on all messages
+- Add backpressure/reconnect handling for SignalR
+
+Module 02: Messaging Contracts (NATS)
+- Integrate real NATS/JetStream client with durable publish + ACK
+- Add consumers for presence/state/telemetry/task/route/logs
+- Implement retries/dead-letter and correlation ID tracking
+- Wire event logging and replay streams; add TimescaleDB ingestion
+
+Module 03: Robot Registry & Sessions
+- Consume presence.hello/heartbeat to auto-update registry
+- Persist capabilities and feature flags from onboarding payloads
+- Enforce runtimeMode LIVE/SIM end-to-end in services
+- Trigger initial config publish on first hello
+- Add GET capabilities and feature-flags endpoints
+
+Module 04: State Ingestion & Store
+- Wire NATS consumer pipeline for state/telemetry/task/route/logs
+- Normalize in-memory state and update core.robot summaries
+- Persist replay events to TimescaleDB with query endpoints
+- Drive ETA/schedule updates from actual speed and QR localization
+- Implement droppable telemetry policy and full channel coverage
+
+Module 05: Task Manager
+- Refine auto-assignment cost (congestion, wait_time, mission flags)
+- Add incident integration for failures/safety stops/E_STOP
+
+Module 06: Route Planner
+- Add PostGIS nearest-node/path projection functions
+- Include per-segment checkpoints sampled along LineString
+
+Module 07: Traffic Control Service
+- Implement ordered reservations for same-direction path sharing
+- Compute follower stop windows with precise headway enforcement
+
+Module 08: Schedule Publisher
+- Switch ROBOT_SCHEDULE stream to memory storage for faster drops
+- Add per-robot PublishOptions and message IDs for idempotence
+
+Module 09: Configuration Service
+- Gate specific commands by runtime mode (e.g., restrict in SIM)
+
+Module 10: Map Management Service
+- Add nearest-node/path lookup endpoint using PostGIS and gist indexes
+- Support editor snapping and advanced validation projections
+
+Module 11: Teaching & Mission Service
+- Add teach session list and step update endpoints
+- Expand mission validation with guards/assertions (battery thresholds)
+
+Module 12: Simulation Orchestrator
+- Configure battery drain rate and speed multiplier per session
+- Implement route-following logic to follow planned routes realistically

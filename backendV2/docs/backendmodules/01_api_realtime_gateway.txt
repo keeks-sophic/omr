@@ -1,0 +1,48 @@
+========================================================
+MODULE 01: API + REALTIME GATEWAY (REST + SIGNALR)
+========================================================
+
+Goal:
+- Expose backend functions to the frontend without exposing NATS
+- Use REST for CRUD/actions/history, SignalR for realtime snapshots/events
+
+Primary Inputs:
+- REST requests from frontend (see fbstream.txt)
+- SignalR connections/subscriptions from frontend
+
+Primary Outputs:
+- REST responses (DTOs from backenddata.txt)
+- SignalR realtime messages (RealtimeMessage<TPayload>)
+
+Key DTOs:
+- RealtimeMessage<TPayload> envelope
+- RobotDto / RobotSessionDto / RobotStateDto / TaskDto / TrafficOverviewDto
+
+Snapshot Rule:
+- For live views, SignalR must provide initial snapshot on subscribe:
+  - fleet.summary.snapshot
+  - robot.state.snapshot
+  - robot.telemetry.snapshot
+  - traffic.overview.snapshot
+
+Flow: REST (query/action)
+1) Authenticate (JWT) and authorize by role
+2) Validate request DTO
+3) Call domain service (task/map/traffic/teach/config)
+4) Persist changes in Postgres when needed
+5) Return DTO response
+6) Emit SignalR events to notify UIs (if state changed)
+
+Flow: SignalR (realtime)
+1) Authenticate (JWT) on connect
+2) Join groups:
+  - robots (fleet-wide)
+  - robot:{robotId} (scoped)
+3) On join, send snapshot message for the relevant topics
+4) Stream updates as they arrive from State Ingestion / domain events
+
+Failure Handling:
+- Validation errors: 400 with problem details DTO
+- Authorization errors: 401/403
+- Concurrency conflicts: 409 for map edits or mission versioning
+

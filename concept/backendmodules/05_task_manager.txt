@@ -1,0 +1,64 @@
+========================================================
+MODULE 05: TASK MANAGER (USER INTENT + AUTO ASSIGNMENT)
+========================================================
+
+Goal:
+- Accept user intent and produce robot-executable work:
+  - TaskAssignment + RouteAssign + Traffic schedule progression
+- Manage task lifecycle and reconcile with robot feedback
+
+Primary Inputs:
+- REST:
+  - POST /api/v1/tasks (TaskCreateRequest)
+  - POST /api/v1/tasks/{taskId}/pause|resume|cancel
+- NATS (feedback):
+  - robot.{robotId}.task.event
+  - robot.{robotId}.route.progress
+  - robot.{robotId}.state.snapshot/event (safetyStopReason)
+
+Primary Outputs:
+- Postgres:
+  - task.tasks rows + task.task_events rows
+  - task.routes (planned route)
+- NATS:
+  - robot.{robotId}.task.assign
+  - robot.{robotId}.task.control
+  - robot.{robotId}.route.assign / route.update
+- SignalR:
+  - task.created / task.assigned / task.status.changed / task.completed / task.failed
+
+Task Validation Rules (backenddata.txt):
+- GO_TO_POINT:
+  - parameters.pointId references map.points where type=PICK_DROP
+- PICK_DROP:
+  - parameters.fromPointId and parameters.toPointId reference map.points where type=PICK_DROP
+- CHARGE:
+  - parameters.pointId references map.points where type=CHARGE
+- RUN_MISSION:
+  - missionId exists and is compatible with robot capability/feature flags
+
+Auto Assignment (concept):
+1) Filter robots:
+  - connected=true, not FAULT/E_STOP, sufficient battery
+  - capabilities satisfy task requirements
+2) Cost function:
+  - ETA to start + ETA to finish + congestion penalty
+3) Pick minimal cost robotId
+
+Execution Flow:
+1) Create task row (ASSIGNED) and emit task.created
+2) Determine robotId (manual or auto)
+3) Plan route via Route Planner (routeId)
+4) Publish:
+  - task.assign (TaskAssignment)
+  - route.assign (RouteAssign)
+5) Update task with robotId + currentRouteId, emit task.assigned
+6) Monitor progress/events:
+  - on completion/failure, update DB and emit task.status.changed
+  - on safety stop, pause task/control + notify Traffic Control
+
+Failure Handling:
+- If robot NAKs task/route:
+  - mark FAILED with reason or reassign (policy)
+- If robot disconnects mid-task:
+  - pause or cancel after timeout (policy)

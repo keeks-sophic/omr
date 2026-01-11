@@ -1,0 +1,43 @@
+1. What should be implement
+- Route assignment/update ingestion and active route tracking
+- Route progress computation and periodic reporting
+- Task lifecycle events (completed/failed) and acknowledgements
+
+2. What have been implement
+- RouteInbox queues route messages; TaskInbox queues task control/assignment
+- RouteProgressTracker.ComputeProgress returns minimal progress data (segment index, distance)
+- TaskRouteExecutor.Tick computes progress and publishes route.progress; TaskCompleted/TaskFailed publish task.event
+- CommandListenerService AcceptRouteAssign/Update maps contract segments to domain and applies RouteAssigned
+
+3. How does it implement
+- AcceptRouteAssign maps segments, stores ActiveRoute, publishes state.event for changes
+- PeriodicScheduler triggers TaskRouteExecutor.Tick at TickOptions.RouteSeconds cadence
+- TelemetryService.PublishRouteProgress publishes progress subjects; Task events emitted via PublishTaskEvent
+
+4. How the flow works between frontend, backend, robot, db
+- Backend sends route.assign/update; robot computes and publishes route.progress and task.event
+- No direct frontend or database integration
+
+5. Does it communicate with db, if yes what is the data model used
+- No
+
+6. Does it communicate with robot, if yes what is the natsjetstream endpoint used
+- Subscribe: route.assign, route.update, task.control
+- Publish: route.progress, task.event
+
+7. Does it communicate with frontend, if yes what is the websocket or api endpoint used
+- No direct frontend communication
+
+8. What have not be implemented
+- Real progress computation (odometry/path following, checkpoint handling)
+- Route update application effects beyond queuing
+- Task executor integration with motion/path planner
+
+9. Requirements not implemented (per robotconcept)
+- Progress event standardization with actor/target/outcome fields
+- Failure reason taxonomy and retry policies
+- Durable event emission and backpressure handling
+
+10. Endpoints and compliance
+- NATS: route.assign/update/progress, task.event
+- Matches rbnats: Yes (subject names), payloads are currently stubbed
