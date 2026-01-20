@@ -1,0 +1,161 @@
+========================================================
+BACKENDV3 DATABASE - IMPLEMENTATION NOTES (EF CORE MIGRATIONS)
+========================================================
+
+Scope:
+- This document describes how backendV3 initializes and evolves the database.
+- Focus:
+  - connection string configuration
+  - schema creation via EF Core migrations
+  - PostGIS/Timescale extension enablement
+  - post-migration upgrades and data backfills
+
+Root folder:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3
+
+
+========================================================
+1) CONNECTION STRING CONFIGURATION
+========================================================
+
+Default config (dev):
+- appsettings.json:
+  - ConnectionStrings:Database
+
+Example:
+- Host=localhost;Port=5432;Database=backsky;Username=postgres;Password=1234
+
+Environment overrides:
+- ConnectionStrings__Database
+
+Files:
+- appsettings.json
+- Program.cs (AddDbContext uses GetConnectionString("Database"))
+
+
+========================================================
+2) STARTUP DATABASE INITIALIZATION FLOW
+========================================================
+
+DatabaseInitService runs on startup and performs:
+0) Ensure database exists (dev convenience)
+   - creates the database if it does not exist
+1) Ensure extensions exist (idempotent SQL)
+   - required: PostGIS
+   - optional: TimescaleDB (skipped if not installed)
+2) Apply EF Core migrations
+   - db.Database.MigrateAsync()
+3) Post-migration upgrades (idempotent, safe to rerun)
+   - multi-map backfills/upgrades for maps module
+4) Development-only seeding
+   - auth roles and default users
+
+Files:
+- Infrastructure/Persistence/Init/DatabaseInitService.cs
+- Infrastructure/Persistence/Init/DatabaseInitSql.cs
+- Infrastructure/Persistence/Init/MapsMultiMapMigration.cs
+- Modules/Auth/Persistence/AuthSeed.cs
+
+
+========================================================
+3) SCHEMA CREATION VIA EF CORE MIGRATIONS
+========================================================
+
+How schemas get created:
+- Each module entity config uses ToTable(tableName, schemaName).
+- The initial migration includes:
+  - migrationBuilder.EnsureSchema("auth")
+  - migrationBuilder.EnsureSchema("maps")
+
+Migrations location:
+- Infrastructure/Persistence/Migrations/
+
+Files:
+- Infrastructure/Persistence/Migrations/* (generated)
+- Infrastructure/Persistence/AppDbContext.cs (ApplyConfigurationsFromAssembly)
+
+
+========================================================
+4) EXTENSIONS (POSTGIS + TIMESCALEDB)
+========================================================
+
+Why extensions are created outside migrations:
+- PostGIS types are used by migrations (geometry columns), so PostGIS must exist first.
+- TimescaleDB is optional in some environments; creation is attempted but failures are skipped.
+
+Required:
+- CREATE EXTENSION IF NOT EXISTS postgis;
+
+Optional:
+- CREATE EXTENSION IF NOT EXISTS timescaledb;
+  - skipped if the extension is not installed on the server
+
+Files:
+- Infrastructure/Persistence/Init/DatabaseInitSql.cs
+- Infrastructure/Persistence/Init/DatabaseInitService.cs
+
+
+========================================================
+5) POST-MIGRATION UPGRADES / DATA MIGRATIONS
+========================================================
+
+Use case:
+- Some changes are hard to represent purely as schema migrations when adopting a new model
+  on top of an already provisioned dev database.
+
+Implemented upgrade:
+- Multi-map upgrade for maps module:
+  - creates maps.maps if missing
+  - adds MapId/Status columns to maps.map_versions if missing
+  - backfills MapId/Status for legacy rows
+  - renumbers Version per mapId to avoid duplicates
+  - ensures required indexes
+
+Files:
+- Infrastructure/Persistence/Init/MapsMultiMapMigration.cs
+
+
+========================================================
+6) BASELINING MIGRATIONS FOR EXISTING DATABASES
+========================================================
+
+Problem:
+- If a database was previously created without migrations (e.g., via EnsureCreated),
+  it has tables but does not have __EFMigrationsHistory.
+- Running MigrateAsync directly would try to create tables again and fail.
+
+Solution implemented:
+- If __EFMigrationsHistory is missing AND core tables exist:
+  - create __EFMigrationsHistory
+  - insert all known migration IDs as already applied
+- After that, MigrateAsync can safely run and will only apply future migrations.
+
+Files:
+- Infrastructure/Persistence/Init/EfMigrationsBootstrapper.cs
+
+
+========================================================
+7) HOW TO ADD / APPLY MIGRATIONS (DEVELOPER WORKFLOW)
+========================================================
+
+From backendV3 folder:
+- Add migration:
+  - dotnet ef migrations add <Name> --output-dir Infrastructure/Persistence/Migrations --context AppDbContext
+- Apply to database:
+  - dotnet ef database update
+
+Runtime:
+- DatabaseInitService calls db.Database.MigrateAsync() automatically on startup.
+
+
+========================================================
+8) CURRENT LIMITATIONS / NEXT STEPS
+========================================================
+
+- Production-grade migrations:
+  - replace any remaining EnsureCreated assumptions
+  - keep all schema/table evolution in migrations
+- Timescale hypertables:
+  - add post-migration hypertable conversions where needed
+  - keep conversions idempotent and safe to rerun
+

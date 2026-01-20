@@ -1,0 +1,274 @@
+========================================================
+MODULE 02: AUTH (USERS + ROLES + JWT AUTHORIZATION)
+========================================================
+
+Goal:
+- Provide login/logout using JWT
+- Protect every endpoint/function by default (authenticated required)
+- Support role-based access control (RBAC) with easy maintenance as modules grow
+- Allow admin to manage users and edit roles
+- Keep Auth data isolated in its own DB schema: auth
+- Follow Model -> DTO -> Mapper for all exposed data
+
+Roles (current):
+- admin
+- operator
+- viewer
+- pending
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (Auth module)
+--------------------------------------------------------
+
+backend/
+  Endpoints/
+    ApiRoutes.cs
+
+  Infrastructure/
+    Security/
+      JwtOptions.cs
+      JwtTokenService.cs
+      PasswordHasher.cs
+      AuthorizationPolicies.cs
+
+  Modules/
+    Auth/
+      Model/
+        User.cs
+        Role.cs
+        UserRole.cs
+        RevokedToken.cs
+      Dto/
+        LoginRequest.cs
+        LoginResponse.cs
+        UserDto.cs
+        RoleDto.cs
+      Mapping/
+        UserMapper.cs
+        RoleMapper.cs
+      Data/
+        UserRepository.cs
+        RoleRepository.cs
+        TokenRepository.cs
+      Api/
+        AuthController.cs
+        AdminUsersController.cs
+      Persistence/
+        AuthDbSchema.cs
+        UserEntityConfig.cs
+        RoleEntityConfig.cs
+        UserRoleEntityConfig.cs
+        RevokedTokenEntityConfig.cs
+        AuthSeed.cs
+
+Rule:
+- All DB functions for Auth live under Modules/Auth/Data (repositories)
+- All schema/table mappings + seeding live under Modules/Auth/Persistence
+- Controllers only return DTOs (never entities)
+
+
+--------------------------------------------------------
+Data Model (Auth schema)
+--------------------------------------------------------
+
+Schema:
+- auth
+
+Entities (Model):
+
+User
+- userId (uuid, PK)
+- username (text, unique, case-insensitive compare in queries)
+- displayName (text)
+- passwordHash (text)
+- isDisabled (bool)
+- createdAt, updatedAt (timestamptz)
+
+Role
+- roleId (uuid, PK)
+- name (text, unique)  // store canonical form: Admin / Operator / Viewer / Pending
+
+UserRole (many-to-many)
+- userId (uuid, FK -> auth.users)
+- roleId (uuid, FK -> auth.roles)
+- PK (userId, roleId)
+
+RevokedToken (logout support)
+- revocationId (uuid, PK)
+- userId (uuid nullable)
+- jti (text, unique)
+- revokedAt (timestamptz)
+- expiresAt (timestamptz)
+
+Rule:
+- Password is never stored (only passwordHash)
+- Role list is data-driven (roles table) so roles can be added/removed later
+
+
+--------------------------------------------------------
+JWT Contract (login/auth)
+--------------------------------------------------------
+
+Access token claims (minimum):
+- sub: userId
+- unique_name: username
+- jti: token id (for revocation on logout)
+- roles: one claim per role name (e.g., "Admin", "Operator", "Viewer")
+
+Token audience/issuer:
+- issuer: newsky-backend
+- audience: newsky-frontend
+
+Credential handling:
+- Login verifies password with PasswordHasher against passwordHash
+- Disabled users cannot login
+
+Logout behavior:
+- Store the current token’s jti into auth.revoked_tokens
+- On token validation, reject any token whose jti is present in revoked_tokens
+
+
+--------------------------------------------------------
+Access Control: easy to manage as new modules are added
+--------------------------------------------------------
+
+Default protection:
+- Set a global fallback policy to require a non-pending role:
+  - Viewer OR Operator OR Admin
+- Explicitly mark login + register endpoints as anonymous
+- Explicitly mark “account-only” endpoints (me/logout) to allow any authenticated user (including Pending)
+
+Policy centralization:
+- Keep all policy names and role inheritance in 1 file:
+  Infrastructure/Security/AuthorizationPolicies.cs
+
+Example policy intent:
+- Admin: requires Admin
+- Operator: requires Operator OR Admin
+- Viewer: requires Viewer OR Operator OR Admin
+- Pending: no backend modules are accessible
+  - Pending users are authenticated, but blocked by the fallback policy
+
+How new modules stay easy:
+- Each new module defines required policy for each endpoint (one line)
+- Policies do not spread role logic across many controllers
+- Adding a new role later is a single update:
+  - seed new role row
+  - update AuthorizationPolicies.AddPolicies mapping
+
+Endpoint access pattern:
+- For module endpoints, choose the smallest policy needed:
+  - viewer for read-only
+  - operator for operational actions
+  - admin for user management and system settings
+
+
+--------------------------------------------------------
+Endpoints (REST API)
+--------------------------------------------------------
+
+Routes convention:
+- /api/v1/auth for auth flows
+- /api/v1/admin/users for user management (admin only)
+
+Auth endpoints:
+- POST /api/v1/auth/login
+  Request: { username, password }
+  Response: { accessToken, expiresAt, user: UserDto }
+
+- POST /api/v1/auth/register
+  Request: { username, displayName, password }
+  Response: { userId }
+  Behavior:
+  - Create new user record
+  - Assign role "Pending" by default
+  - User cannot access any backend modules until admin assigns Viewer/Operator/Admin
+
+- POST /api/v1/auth/logout
+  Requires: authenticated (including Pending)
+  Action: revoke current token jti
+
+- GET /api/v1/auth/me
+  Requires: authenticated (including Pending)
+  Response: minimal identity: userId, username, roles
+
+Admin endpoints (admin only):
+- GET /api/v1/admin/users
+  Returns: list of UserDto (include roles)
+
+- GET /api/v1/admin/users/{userId}
+  Returns: UserDto
+
+- POST /api/v1/admin/users
+  Creates user (username, displayName, password, roles[])
+
+- PUT /api/v1/admin/users/{userId}
+  Updates user (displayName, optional password, optional disable)
+
+- POST /api/v1/admin/users/{userId}/roles
+  Replaces roles for the user (roles[])
+
+Role admin endpoints (optional now, easy later):
+- GET /api/v1/admin/roles
+- POST /api/v1/admin/roles
+- DELETE /api/v1/admin/roles/{roleName}
+
+
+--------------------------------------------------------
+DTO + Mapper Rules (Model -> DTO -> Mapper)
+--------------------------------------------------------
+
+DTOs:
+- UserDto: { userId, username, displayName, roles[], isDisabled }
+- RoleDto: { name }
+- LoginRequest: { username, password }
+- LoginResponse: { accessToken, expiresAt, user: UserDto }
+
+Mappers:
+- UserMapper.ToDto(User, roles[])
+- RoleMapper.ToDto(Role)
+
+Rules:
+- Controllers/Hubs return DTOs only
+- Repositories return Model only (entities)
+- Services compose Model + related data (e.g., roles) then map at boundary
+
+
+--------------------------------------------------------
+DB Schema Mapping (EF Core)
+--------------------------------------------------------
+
+AuthDbSchema:
+- Name = "auth"
+
+Entity configs:
+- UserEntityConfig: ToTable("users", "auth"), unique index on username
+- RoleEntityConfig: ToTable("roles", "auth"), unique index on name
+- UserRoleEntityConfig: ToTable("user_roles", "auth"), PK(userId, roleId)
+- RevokedTokenEntityConfig: ToTable("revoked_tokens", "auth"), unique index on jti
+
+
+--------------------------------------------------------
+Seeding (testing users + roles)
+--------------------------------------------------------
+
+Seed goals:
+- Always ensure base roles exist: Admin, Operator, Viewer, Pending
+- Always ensure at least one admin user exists for first login
+
+Recommended seed users (dev only):
+- admin / admin123  -> roles: Admin
+- operator / operator123 -> roles: Operator
+- viewer / viewer123 -> roles: Viewer
+- pending / pending123 -> roles: Pending
+
+Seeding options:
+- EF Core HasData in AuthSeed (stable IDs) for roles
+- Seed users on startup via a scoped initializer service:
+  - if no users exist, insert test users
+  - hash passwords via PasswordHasher
+
+Rule:
+- Seeding should be gated by environment (Development) to avoid production defaults
+

@@ -8,6 +8,7 @@ using BackendV2.Api.Dto.Realtime;
 using BackendV2.Api.Dto.Fleet;
 using BackendV2.Api.Dto.Traffic;
 using BackendV2.Api.Dto.Core;
+using Microsoft.EntityFrameworkCore;
 
 namespace BackendV2.Api.Hub;
 

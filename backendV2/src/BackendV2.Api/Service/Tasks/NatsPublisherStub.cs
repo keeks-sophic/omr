@@ -131,35 +131,35 @@ public class NatsPublisherStub
         PublishJetStreamAsync(NatsTopics.RobotCmd(robotId, "grip"), env);
         return Task.FromResult(corr);
     }
-    public Task PublishHoistCommandAsync(string robotId, HoistCommand cmd)
+    public Task<string> PublishHoistCommandAsync(string robotId, HoistCommand cmd)
     {
         var corr = Guid.NewGuid().ToString("N");
         var env = new NatsEnvelope<HoistCommand> { RobotId = robotId, CorrelationId = corr, Timestamp = DateTimeOffset.UtcNow, Payload = cmd };
         PublishJetStreamAsync(NatsTopics.RobotCmd(robotId, "hoist"), env);
         return Task.FromResult(corr);
     }
-    public Task PublishTelescopeCommandAsync(string robotId, TelescopeCommand cmd)
+    public Task<string> PublishTelescopeCommandAsync(string robotId, TelescopeCommand cmd)
     {
         var corr = Guid.NewGuid().ToString("N");
         var env = new NatsEnvelope<TelescopeCommand> { RobotId = robotId, CorrelationId = corr, Timestamp = DateTimeOffset.UtcNow, Payload = cmd };
         PublishJetStreamAsync(NatsTopics.RobotCmd(robotId, "telescope"), env);
         return Task.FromResult(corr);
     }
-    public Task PublishCamToggleCommandAsync(string robotId, CamToggleCommand cmd)
+    public Task<string> PublishCamToggleCommandAsync(string robotId, CamToggleCommand cmd)
     {
         var corr = Guid.NewGuid().ToString("N");
         var env = new NatsEnvelope<CamToggleCommand> { RobotId = robotId, CorrelationId = corr, Timestamp = DateTimeOffset.UtcNow, Payload = cmd };
         PublishJetStreamAsync(NatsTopics.RobotCmd(robotId, "cam_toggle"), env);
         return Task.FromResult(corr);
     }
-    public Task PublishRotateCommandAsync(string robotId, RotateCommand cmd)
+    public Task<string> PublishRotateCommandAsync(string robotId, RotateCommand cmd)
     {
         var corr = Guid.NewGuid().ToString("N");
         var env = new NatsEnvelope<RotateCommand> { RobotId = robotId, CorrelationId = corr, Timestamp = DateTimeOffset.UtcNow, Payload = cmd };
         PublishJetStreamAsync(NatsTopics.RobotCmd(robotId, "rotate"), env);
         return Task.FromResult(corr);
     }
-    public Task PublishModeCommandAsync(string robotId, ModeCommand cmd)
+    public Task<string> PublishModeCommandAsync(string robotId, ModeCommand cmd)
     {
         var corr = Guid.NewGuid().ToString("N");
         var env = new NatsEnvelope<ModeCommand> { RobotId = robotId, CorrelationId = corr, Timestamp = DateTimeOffset.UtcNow, Payload = cmd };

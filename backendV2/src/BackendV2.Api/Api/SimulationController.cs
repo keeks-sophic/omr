@@ -4,6 +4,7 @@ using BackendV2.Api.Dto.Sim;
 using BackendV2.Api.Service.Sim;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace BackendV2.Api.Api;
 

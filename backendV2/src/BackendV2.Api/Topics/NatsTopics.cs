@@ -2,6 +2,7 @@ namespace BackendV2.Api.Topics;
 
 public static class NatsTopics
 {
+    public static string RobotCmd(string robotId, string action) => $"robot.{robotId}.cmd.{action}";
     public static string RobotCmdGrip(string robotId) => $"robot.{robotId}.cmd.grip";
     public static string RobotCmdHoist(string robotId) => $"robot.{robotId}.cmd.hoist";
     public static string RobotCmdTelescope(string robotId) => $"robot.{robotId}.cmd.telescope";

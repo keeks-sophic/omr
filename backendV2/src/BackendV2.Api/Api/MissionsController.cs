@@ -4,6 +4,7 @@ using BackendV2.Api.Dto.Missions;
 using BackendV2.Api.Service.Missions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace BackendV2.Api.Api;
 

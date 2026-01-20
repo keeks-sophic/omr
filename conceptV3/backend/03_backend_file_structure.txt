@@ -1,0 +1,316 @@
+========================================================
+BACKEND FILE STRUCTURE (CONCEPT V3) - CONSOLIDATED
+========================================================
+
+Purpose:
+- One consistent file layout that fits:
+  - REST API routes (frontend normal requests)
+  - SignalR hubs (frontend streaming)
+  - NATS JetStream (robot messaging)
+  - EF Core Postgres (PostGIS + TimescaleDB)
+  - Auth (JWT + roles) with easy access management
+- Make adding new modules predictable and low-maintenance
+
+
+--------------------------------------------------------
+Review Notes (00/01/02 alignment)
+--------------------------------------------------------
+
+Connections (00_connections.txt):
+- Keep transport “endpoints/topics” centralized:
+  - REST routes constants: Endpoints/ApiRoutes.cs
+  - SignalR hub paths + event names: Realtime/SignalRRoutes.cs
+  - NATS subjects + stream/consumer names: Messaging/NatsJetStreamRoutes.cs
+
+Database (01_database.txt):
+- Keep EF Core in Infrastructure/Persistence, plus per-module schema configs
+- Put all DB query/save logic in Modules/*/Data (repositories)
+- Use different schema per module (auth, maps, robots, traffic, ...)
+
+Auth (02_auth.txt):
+- Keep auth as a module under Modules/Auth
+- Centralize policy names and role inheritance in Infrastructure/Security/AuthorizationPolicies.cs
+- Prefer a global fallback policy (authenticated required) for easy enforcement
+
+
+--------------------------------------------------------
+Top-Level Backend Layout
+--------------------------------------------------------
+
+backend/
+  Program.cs
+  appsettings.json
+  appsettings.Development.json
+
+  Endpoints/
+    ApiRoutes.cs
+
+  Realtime/
+    SignalRRoutes.cs
+
+  Messaging/
+    NatsJetStreamRoutes.cs
+
+  Infrastructure/
+    Persistence/
+      AppDbContext.cs
+      Init/
+        DatabaseInitService.cs
+        DatabaseInitSql.cs
+
+    Security/
+      JwtOptions.cs
+      JwtTokenService.cs
+      PasswordHasher.cs
+      AuthorizationPolicies.cs
+      TokenValidation.cs
+
+  Modules/
+    Auth/
+    Robots/
+    Maps/
+    Traffic/
+    Tasks/
+    Ops/
+    Replay/
+    Sim/
+    Config/
+
+  Shared/
+    Errors/
+      ApiProblemDetails.cs
+    Time/
+      Clock.cs
+    Pagination/
+      PageRequest.cs
+      PageResult.cs
+
+
+--------------------------------------------------------
+Module Template (copy this for each new module)
+--------------------------------------------------------
+
+backend/Modules/<ModuleName>/
+  Model/
+    *.cs (EF Core entities only)
+
+  Dto/
+    *.cs (API/SignalR payload shapes only)
+
+  Mapping/
+    *Mapper.cs (Model <-> DTO only)
+
+  Data/
+    *Repository.cs (EF Core query/save logic only)
+
+  Service/
+    *Service.cs (domain logic; uses repositories; no controllers here)
+
+  Api/
+    *Controller.cs (REST endpoints; returns DTOs; enforces policies)
+
+  Realtime/
+    *HubPublisher.cs (pushes SignalR events; uses Realtime/SignalRRoutes.cs)
+
+  Worker/
+    *Worker.cs (background tasks; NATS JetStream subscribers/publishers)
+
+  Messaging/
+    *Contracts.cs (module-specific message envelopes if needed)
+
+  Persistence/
+    <ModuleName>DbSchema.cs (schema constants)
+    *EntityConfig.cs (IEntityTypeConfiguration<> per entity)
+    *MigrationsNotes.txt (optional, if you want notes for future)
+
+
+--------------------------------------------------------
+Auth Module Structure (RBAC + JWT)
+--------------------------------------------------------
+
+backend/Modules/Auth/
+  Model/
+    User.cs
+    Role.cs
+    UserRole.cs
+    RevokedToken.cs
+  Dto/
+    LoginRequest.cs
+    LoginResponse.cs
+    UserDto.cs
+    RoleDto.cs
+  Mapping/
+    UserMapper.cs
+    RoleMapper.cs
+  Data/
+    UserRepository.cs
+    RoleRepository.cs
+    TokenRepository.cs
+  Api/
+    AuthController.cs
+    AdminUsersController.cs
+  Persistence/
+    AuthDbSchema.cs          // "auth"
+    UserEntityConfig.cs
+    RoleEntityConfig.cs
+    UserRoleEntityConfig.cs
+    RevokedTokenEntityConfig.cs
+    AuthSeed.cs              // dev-only seed users/roles
+
+Access management rule:
+- Global fallback policy: authenticated required
+- Anonymous endpoints explicitly marked:
+  - POST /api/v1/auth/login (and refresh if added)
+- AuthorizationPolicies.cs is the only file that defines role inheritance
+
+
+--------------------------------------------------------
+Maps Module Structure (PostGIS map + versioning + RBAC)
+--------------------------------------------------------
+
+backend/Modules/Maps/
+  Model/
+    MapVersion.cs
+    MapNode.cs
+    MapPath.cs
+    MapPoint.cs
+    QrAnchor.cs
+  Dto/
+    MapVersionDto.cs
+    NodeDto.cs
+    PathDto.cs
+    MapPointDto.cs
+    QrDto.cs
+    MapSnapshotDto.cs
+  Mapping/
+    MapVersionMapper.cs
+    NodeMapper.cs
+    PathMapper.cs
+    PointMapper.cs
+    QrMapper.cs
+  Data/
+    MapVersionRepository.cs
+    NodeRepository.cs
+    PathRepository.cs
+    PointRepository.cs
+    QrRepository.cs
+  Service/
+    MapManagementService.cs
+    MapValidationService.cs
+    MapSnapshotService.cs
+  Api/
+    MapVersionsController.cs
+    MapNodesController.cs
+    MapPathsController.cs
+    MapPointsController.cs
+    MapQrsController.cs
+    MapSnapshotController.cs
+  Realtime/
+    MapHubPublisher.cs
+  Persistence/
+    MapsDbSchema.cs            // "maps"
+    MapVersionEntityConfig.cs
+    MapNodeEntityConfig.cs
+    MapPathEntityConfig.cs
+    MapPointEntityConfig.cs
+    QrAnchorEntityConfig.cs
+
+RBAC rule:
+- All map endpoints require login (fallback policy)
+- Viewer policy: read-only (GET)
+- Operator policy: create/update/delete (POST/PUT/DELETE)
+
+Save strategy:
+- Autosave: UI calls per-entity endpoints (node/path/point/qr) after each edit
+- Bulk save: provide a snapshot endpoint that upserts in one transaction
+  - GET /api/v1/maps/versions/{mapVersionId}/snapshot
+  - PUT /api/v1/maps/versions/{mapVersionId}/snapshot
+    Body: nodes/paths/points/qrs arrays (full desired state)
+
+
+--------------------------------------------------------
+Transport Integration (where each transport lives)
+--------------------------------------------------------
+
+REST:
+- Module controllers in Modules/*/Api
+- Route constants in Endpoints/ApiRoutes.cs
+
+SignalR:
+- Hub mapping path and event names in Realtime/SignalRRoutes.cs
+- Any per-module publish helpers in Modules/*/Realtime
+
+NATS JetStream:
+- Subject/stream/consumer names in Messaging/NatsJetStreamRoutes.cs
+- Per-module NATS workers in Modules/*/Worker
+- Per-module message contracts in Modules/*/Messaging when needed
+
+
+--------------------------------------------------------
+DB + Schema Strategy (EF Core)
+--------------------------------------------------------
+
+Single DbContext:
+- Infrastructure/Persistence/AppDbContext.cs
+- ApplyConfigurationsFromAssembly to pick up all module entity configs
+
+Schemas:
+- Use one schema per module:
+  - auth, robots, maps, traffic, tasks, ops, replay, sim, config
+- Every entity config uses ToTable("table_name", "<schema>")
+
+Extensions:
+- Enable PostGIS and TimescaleDB in Infrastructure/Persistence/Init
+- Hypertable conversion runs after migrations (idempotent)
+
+
+--------------------------------------------------------
+Cross-Module Access Pattern (modules using other modules)
+--------------------------------------------------------
+
+Rule:
+- Modules can read other module data through a service interface, not by duplicating logic
+
+Example:
+- Traffic/Routes/Tasks consume map data via:
+  - Modules/Maps/Service/MapSnapshotService.cs
+  - Modules/Maps/Service/MapManagementService.cs (if validation is needed)
+
+Output:
+- Map module provides a stable “graph snapshot DTO” for planning modules
+- Planning modules do not write to maps schema (write access stays in Map module)
+
+
+--------------------------------------------------------
+Adding a New Module (checklist)
+--------------------------------------------------------
+
+1) Create module folder:
+- backend/Modules/<NewModuleName>/ (use the template layout)
+
+2) Create schema constant:
+- backend/Modules/<NewModuleName>/Persistence/<NewModuleName>DbSchema.cs
+
+3) Add model + entity configuration:
+- Model/*.cs + Persistence/*EntityConfig.cs with ToTable(..., schema)
+
+4) Add DB functions:
+- Data/*Repository.cs (EF Core queries/saves)
+
+5) Add service:
+- Service/*Service.cs (domain orchestration)
+
+6) Add API endpoints:
+- Api/*Controller.cs (Authorize with AuthorizationPolicies.*)
+- Add route constants to Endpoints/ApiRoutes.cs
+
+7) Add streaming (optional):
+- Realtime publish helper + SignalR event name in Realtime/SignalRRoutes.cs
+
+8) Add robot messaging (optional):
+- Add subjects/streams/consumers in Messaging/NatsJetStreamRoutes.cs
+- Add worker(s) under Modules/<NewModuleName>/Worker
+
+9) DB init impact (optional):
+- If new schema: add CREATE SCHEMA IF NOT EXISTS <schema> to DatabaseInitSql.cs
+- If Timescale table: add create_hypertable(...) call after migrations

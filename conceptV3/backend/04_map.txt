@@ -1,0 +1,391 @@
+========================================================
+MODULE 04: MAP (POSTGIS MULTI-MAP + VERSIONED MAP EDITOR)
+========================================================
+
+Goal:
+- Support multiple maps in the system (each is its own logical map)
+- Support versioned editing and publishing per map
+- Store all map geometry in PostGIS (Point / LineString)
+- Enforce auth on all map access:
+  - viewer: read-only map data
+  - operator + admin: CRUD map data + publish
+- Support autosave and manual save without generating too many versions
+- Support operational constraints:
+  - node (junction) maintenance on/off
+  - path maintenance on/off
+  - per-path speed limit
+  - per-node (junction) speed limit
+- Support robot localization anchors:
+  - QR anchors placed along a path with distanceAlongPath
+- Support user-defined action points:
+  - points created by users for robot actions (pick/drop, charge, etc.)
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read endpoints:
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints (CRUD + publish):
+- Require policy: Operator (operator/admin)
+
+Admin-only (optional future):
+- destructive operations across versions, purge, bulk import/export
+
+Recommended policy constants:
+- Infrastructure/Security/AuthorizationPolicies.cs
+  - Viewer policy: Viewer, Operator, Admin
+  - Operator policy: Operator, Admin
+
+
+--------------------------------------------------------
+Data Model (PostGIS, multi-map)
+--------------------------------------------------------
+
+Schema:
+- maps
+
+Key concept:
+- A "Map" is a logical container (mapId).
+- A "MapVersion" is a specific published/draft state of that map.
+
+Entities (Model) and key fields:
+
+1) Map
+- mapId (uuid, PK)
+- name (text, unique)
+- createdBy (uuid)              // auth.users.userId
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- activeMapVersionId (uuid?)    // pointer to the published version
+
+2) MapVersion
+- mapVersionId (uuid, PK)
+- mapId (uuid, FK -> maps.maps)
+- version (int)                 // increments per mapId
+- status (text)                 // DRAFT | PUBLISHED (recommended)
+- createdBy (uuid)
+- createdAt (timestamptz)
+- publishedAt (timestamptz?)
+- changeSummary (text?)
+
+Notes:
+- Only 1 version per mapId can be PUBLISHED at a time.
+- Multiple DRAFT versions can exist, but should be limited by retention rules (see autosave section).
+
+3) MapNode (junction)
+- nodeId (uuid, PK)
+- mapVersionId (uuid, FK -> maps.map_versions)
+- label (text)
+- location (Point)              // geometry(Point, 0)
+- isActive (bool)
+- isMaintenance (bool)
+- junctionSpeedLimit (double?)
+- metadataJson (jsonb?)
+
+4) MapPath (joining two nodes)
+- pathId (uuid, PK)
+- mapVersionId (uuid, FK)
+- fromNodeId (uuid, FK -> maps.map_nodes)
+- toNodeId (uuid, FK -> maps.map_nodes)
+- direction (text)              // ONE_WAY | TWO_WAY
+- location (LineString)         // geometry(LineString, 0)
+- lengthMeters (double)         // derived, stored or computed
+- isActive (bool)
+- isMaintenance (bool)
+- speedLimit (double?)
+- isRestPath (bool)
+- restCapacity (int?)
+- restDwellPolicy (text?)
+- metadataJson (jsonb?)
+
+5) MapPoint (user-defined action point)
+- pointId (uuid, PK)
+- mapVersionId (uuid, FK)
+- type (text)                   // PICK_DROP | CHARGE | ...
+- label (text)
+- location (Point)              // geometry(Point, 0)
+- attachedNodeId (uuid?)
+- metadataJson (jsonb?)
+
+6) QrAnchor (QR along path)
+- qrId (uuid, PK)
+- mapVersionId (uuid, FK)
+- pathId (uuid, FK -> maps.map_paths)
+- qrCode (text)
+- distanceAlongPath (double)
+- location (Point)              // geometry(Point, 0)
+- metadataJson (jsonb?)
+
+Geometry:
+- Node (junction): geometry(Point, 0)
+- Path: geometry(LineString, 0)
+- Point (user action): geometry(Point, 0)
+- QR anchor: geometry(Point, 0)
+
+Notes:
+- Use NetTopologySuite with Npgsql EF Core
+- Add spatial indexes on geometry columns
+
+
+--------------------------------------------------------
+Version Lifecycle + Save Modes (autosave and manual save)
+--------------------------------------------------------
+
+Problem:
+- Autosave should persist edits to DB frequently for reliability.
+- But autosave must not create a new version for every click/drag.
+
+Rule 1: never mutate PUBLISHED in place
+- Editing happens only against a DRAFT mapVersionId.
+
+Rule 2: version creation happens only at major events
+Create a new MapVersion only when one of these happens:
+- Create Map (initial version, typically DRAFT)
+- Create Draft (clone from a source version)
+- Publish (marks a DRAFT as PUBLISHED)
+
+Autosave mode (recommended):
+- Each user edit triggers create/update endpoints on entities in the current DRAFT mapVersionId.
+- Version number does not change per action; entity rows are updated in-place in that draft.
+- Throttle autosave writes to avoid DB overload:
+  - node dragging: debounce to 250–500ms
+  - batch small edits into 1–2s windows
+
+Manual save mode:
+- User edits locally.
+- "Save now" applies changes to the current DRAFT mapVersionId.
+  - With per-entity endpoints, this is a batch of requests (one UX action).
+  - Optional future: snapshot bulk upsert endpoint (see endpoints).
+
+Draft retention (do not save too many versions):
+- Recommended:
+  - Keep at most 1 active draft per mapId per editor (optional).
+  - Or keep at most N drafts per mapId (e.g., N=5), delete/archive older drafts.
+  - Implement as a server-side retention policy, not a frontend-only rule.
+
+
+--------------------------------------------------------
+DTOs (API/SignalR)
+--------------------------------------------------------
+
+MapDto
+- mapId
+- name
+- activeMapVersionId?
+- updatedAt
+
+MapVersionDto
+- mapVersionId
+- mapId
+- version
+- status
+- createdAt
+- publishedAt
+- changeSummary
+
+NodeDto
+- nodeId
+- mapVersionId
+- label
+- geom: { x, y }
+- isMaintenance
+- junctionSpeedLimit
+
+PathDto
+- pathId
+- mapVersionId
+- fromNodeId
+- toNodeId
+- direction
+- speedLimit
+- isMaintenance
+- isRestPath
+- restCapacity?
+- restDwellPolicy?
+- points: { x, y }[]
+
+MapPointDto
+- pointId
+- mapVersionId
+- type
+- label
+- geom: { x, y }
+- attachedNodeId?
+
+QrDto
+- qrId
+- mapVersionId
+- pathId
+- distanceAlongPath
+- qrCode
+
+Mapper rule:
+- Model uses NetTopologySuite geometry
+- DTO uses simple {x,y} for frontend
+- All conversions are in Modules/Maps/Mapping
+
+
+--------------------------------------------------------
+REST Endpoints (multi-map, aligned for frontend)
+--------------------------------------------------------
+
+Base:
+- /api/v1/maps
+
+Maps (logical container)
+- POST   /api/v1/maps
+  Body: { name }
+  Policy: Operator
+  Response: MapDto
+
+- GET    /api/v1/maps
+  Policy: Viewer
+  Response: MapDto[]
+
+- GET    /api/v1/maps/{mapId}
+  Policy: Viewer
+  Response: MapDto
+
+Versions (scoped to mapId)
+- GET    /api/v1/maps/{mapId}/versions
+  Policy: Viewer
+  Response: MapVersionDto[]
+
+- GET    /api/v1/maps/{mapId}/versions/{mapVersionId}
+  Policy: Viewer
+  Response: MapVersionDto
+
+- POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/clone
+  Body: { name? } or {}
+  Policy: Operator
+  Response: MapVersionDto (new DRAFT)
+  Emits SignalR: map.version.created
+
+- POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/publish
+  Body: { changeSummary }
+  Policy: Operator
+  Response: { ok:true }
+  Behavior:
+  - sets this version to PUBLISHED
+  - updates maps.maps.activeMapVersionId to this mapVersionId
+  Emits SignalR: map.version.published
+
+Draft convenience (recommended for editor UX)
+- GET    /api/v1/maps/{mapId}/draft
+  Policy: Operator
+  Response: MapVersionDto
+  Behavior:
+  - returns the latest DRAFT for this mapId if exists
+  - otherwise clones the active version (or latest published) and returns the new DRAFT
+
+Snapshot
+- GET    /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
+  Policy: Viewer
+  Response: { version: MapVersionDto, nodes: NodeDto[], paths: PathDto[], points: MapPointDto[], qrs: QrDto[] }
+
+Optional future for manual save (bulk upsert)
+- PUT    /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
+  Policy: Operator
+  Body: full snapshot payload (nodes/paths/points/qrs)
+  Behavior:
+  - upserts entities into this mapVersionId, rejects if version is PUBLISHED
+  - allows "save in 1 lumpsum" as a single request
+
+Entity CRUD (scoped to a version)
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes/{nodeId}
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes/{nodeId}/maintenance
+
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/paths
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}/maintenance
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}/rest
+
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/points
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/points/{pointId}
+
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/qrs
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/qrs/{qrId}
+
+Write endpoints should validate:
+- version belongs to mapId
+- edits are rejected when version.status == PUBLISHED
+
+
+--------------------------------------------------------
+SignalR Events (frontend streaming updates)
+--------------------------------------------------------
+
+Event names:
+- map.version.created
+- map.version.published
+- map.entity.updated
+
+Payload intent (recommended):
+- map.version.created: { mapId, mapVersionId }
+- map.version.published: { mapId, mapVersionId }
+- map.entity.updated: { mapId, mapVersionId, entityType: "node"|"path"|"point"|"qr", id }
+
+
+--------------------------------------------------------
+Repository / Service Responsibilities
+--------------------------------------------------------
+
+Repositories (Modules/Maps/Data):
+- MapRepository: create/list/get maps and activeMapVersionId updates
+- MapVersionRepository: create/clone/publish, list versions by mapId, get version
+- NodeRepository: create/update/list, maintenance toggle
+- PathRepository: create/update/list, maintenance toggle, rest options, speed limit
+- PointRepository: create/update/list
+- QrRepository: create/update/list
+
+Services (Modules/Maps/Service):
+- MapManagementService:
+  - resolves draft version for editing
+  - publish rules: one published per mapId
+  - validates "no edits to published versions"
+  - emits SignalR notifications on changes
+- MapSnapshotService:
+  - snapshot assembly for rendering
+
+
+--------------------------------------------------------
+EF Core Mapping Notes (maps schema)
+--------------------------------------------------------
+
+Schema constant:
+- Modules/Maps/Persistence/MapsDbSchema.cs -> "maps"
+
+Tables:
+- maps.maps
+- maps.map_versions
+- maps.map_nodes
+- maps.map_paths
+- maps.map_points
+- maps.qr_anchors
+
+Important indexes:
+- maps.maps(name) unique
+- map_versions(mapId, version) unique
+- map_versions(mapId, status) (fast draft lookup)
+- map_nodes(mapVersionId)
+- map_paths(mapVersionId)
+- map_points(mapVersionId)
+- qr_anchors(mapVersionId)
+- GIST indexes on geometry columns:
+  - map_nodes(location)
+  - map_paths(location)
+  - map_points(location)
+  - qr_anchors(location)
+
+Constraints:
+- map_versions.mapId FK -> maps.maps
+- map_paths.fromNodeId and toNodeId must exist in same mapVersionId
+- qr_anchors.pathId must exist in same mapVersionId
+

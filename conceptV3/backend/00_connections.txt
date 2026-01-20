@@ -1,0 +1,199 @@
+========================================================
+MODULE 00: CONNECTIONS (API + SIGNALR + NATS JETSTREAM)
+========================================================
+
+Goal:
+- Standardize how frontend and robot connect to the backend
+- Keep all “connection endpoints” in exactly 1 file per transport:
+  - REST API routes (frontend normal requests)
+  - SignalR hub path + event names (frontend streaming)
+  - NATS JetStream subjects + stream/consumer names (robot streaming)
+- Make those constants importable from anywhere in the backend app
+
+Transport Rules:
+- Frontend <-> Backend:
+  - Normal request/response: REST API (controllers/minimal endpoints)
+  - Streaming/live updates: SignalR (hub)
+- Robot <-> Backend:
+  - Telemetry ingest + command distribution: NATS JetStream
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (easy management)
+--------------------------------------------------------
+
+backend/
+  Endpoints/
+    ApiRoutes.cs
+  Realtime/
+    SignalRRoutes.cs
+  Messaging/
+    NatsJetStreamRoutes.cs
+
+  Api/
+    *.cs controllers (import Endpoints/ApiRoutes.cs)
+  Hub/
+    *.cs hubs (import Realtime/SignalRRoutes.cs)
+  Service/
+    *.cs services (import Messaging/NatsJetStreamRoutes.cs)
+  Worker/
+    *.cs background workers (import Messaging/NatsJetStreamRoutes.cs)
+
+
+--------------------------------------------------------
+One-File-Per-Transport: What goes into each file
+--------------------------------------------------------
+
+1) REST API (frontend normal request)
+File: Endpoints/ApiRoutes.cs
+Purpose:
+- Central list of HTTP paths used by controllers and also by any internal callers
+Content:
+- Base paths and “by id” patterns, grouped by feature
+
+Example (C#):
+
+namespace Backend.Endpoints;
+
+public static class ApiRoutes
+{
+    public const string ApiBase = "/api";
+
+    public static class Robots
+    {
+        public const string Base = $"{ApiBase}/robots";
+        public const string ById = $"{Base}/{{robotId}}";
+        public const string Commands = $"{ById}/commands";
+    }
+
+    public static class Maps
+    {
+        public const string Base = $"{ApiBase}/maps";
+        public const string ById = $"{Base}/{{id}}";
+        public const string Graph = $"{ById}/graph";
+    }
+}
+
+Usage:
+- In controller attributes / endpoint mapping, reference ApiRoutes.* constants
+
+
+2) SignalR (frontend streaming data)
+File: Realtime/SignalRRoutes.cs
+Purpose:
+- Keep the hub path and event/topic names in one place
+Content:
+- Hub path(s)
+- Group name patterns
+- Event names used by hub methods
+
+Example (C#):
+
+namespace Backend.Realtime;
+
+public static class SignalRRoutes
+{
+    public const string RobotsHubPath = "/hub/robots";
+
+    public static class Groups
+    {
+        public const string Fleet = "fleet";
+        public static string Robot(string robotId) => $"robot:{robotId}";
+    }
+
+    public static class Events
+    {
+        public const string Telemetry = "telemetry";
+        public const string Identity = "identity";
+        public const string Route = "route";
+        public const string CommandAck = "commandAck";
+    }
+}
+
+Usage:
+- In Program.cs, map hub with SignalRRoutes.RobotsHubPath
+- In hub/server push, use SignalRRoutes.Events.* to keep naming consistent
+- In group management, use SignalRRoutes.Groups.*
+
+
+3) NATS JetStream (robot streaming data)
+File: Messaging/NatsJetStreamRoutes.cs
+Purpose:
+- Keep subjects and JetStream resource names in one place
+Content:
+- Subject naming rules
+- Subjects (including per-robot subject builders)
+- Stream names and consumer names used by workers/services
+
+Example (C#):
+
+namespace Backend.Messaging;
+
+public static class NatsJetStreamRoutes
+{
+    public static class Subjects
+    {
+        public const string TelemetryAll = "robots.telemetry.*";
+        public static string Telemetry(string robotId) => $"robots.telemetry.{robotId}";
+
+        public const string CommandsAll = "robots.cmd.*";
+        public static string Command(string robotId) => $"robots.cmd.{robotId}";
+
+        public const string CommandAckAll = "robots.cmd.ack.*";
+        public static string CommandAck(string robotId) => $"robots.cmd.ack.{robotId}";
+    }
+
+    public static class Streams
+    {
+        public const string Telemetry = "ROBOTS_TELEMETRY";
+        public const string Commands = "ROBOTS_COMMANDS";
+        public const string CommandAcks = "ROBOTS_COMMAND_ACKS";
+    }
+
+    public static class Consumers
+    {
+        public const string TelemetryIngest = "telemetry_ingest";
+        public const string CommandAckIngest = "command_ack_ingest";
+    }
+}
+
+Usage:
+- In NATS bootstrap/ensure-streams code, reference Streams.*
+- In publish/subscribe, reference Subjects.* builders
+- In worker creation, reference Consumers.*
+
+
+--------------------------------------------------------
+Backend App Integration Pattern (how it’s called elsewhere)
+--------------------------------------------------------
+
+Controllers:
+- Import Backend.Endpoints.ApiRoutes and use constants for route attributes
+
+SignalR Hub:
+- Import Backend.Realtime.SignalRRoutes for hub path + event names + groups
+
+NATS Services/Workers:
+- Import Backend.Messaging.NatsJetStreamRoutes for subjects/streams/consumers
+
+
+--------------------------------------------------------
+Naming Rules (keep this consistent)
+--------------------------------------------------------
+
+REST:
+- Always start with /api
+- Use plural nouns: /api/robots, /api/maps
+
+SignalR:
+- Hub paths start with /hub
+- Events are lowerCamelCase strings
+- Groups: fleet-wide and robot-scoped group names
+
+NATS JetStream:
+- Subjects are dot-separated and scoped:
+  - robots.telemetry.{robotId}
+  - robots.cmd.{robotId}
+  - robots.cmd.ack.{robotId}
+- Streams are ALL_CAPS and stable (do not rename lightly)
+

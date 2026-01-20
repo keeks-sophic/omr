@@ -1,0 +1,23 @@
+Page: Fleet Dashboard
+
+Concept:
+- Single screen for fleet health and operational readiness
+- Summarizes robot modes, incidents, tasks, and congestion
+
+Accessible Functions:
+- View robot tiles: mode, safetyStopReason, battery, connectivity, runtimeMode
+- View active tasks: status, ETA, assigned robotId
+- View incidents: radar stops, E_STOP, FAULT transitions, communication loss
+- Acknowledge incidents (if available to role)
+- Navigate to robot details and task details
+
+Endpoints Used:
+- REST (implemented): GET /api/v1/robots, GET /api/v1/ops/health, GET /api/v1/ops/jetstream, GET /api/v1/ops/alerts
+- REST (planned): GET /api/v1/fleet/incidents, POST /api/v1/fleet/incidents/{incidentId}/ack
+- Realtime Hub: /hubs/realtime
+- SignalR topics: fleet.summary.snapshot, robot.session.updated, task.status.changed, traffic.overview.snapshot/updated, ops.alert.raised/cleared, ops.jetstream.updated
+
+Backend Communication:
+- Auth via JWT for REST and SignalR
+- Subscribes to robots group and traffic overview topics; receives initial snapshot on subscribe
+- Role-based filtering for visibility and actions; Operator/Admin can acknowledge incidents if policy allows

@@ -31,7 +31,8 @@ public class StateIngestionService
             r.LastActive = snap.Timestamp;
             r.UpdatedAt = DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync();
-            await _db.RobotEvents.AddAsync(new RobotEvent { EventId = Guid.NewGuid(), RobotId = snap.RobotId, Timestamp = snap.Timestamp, Type = "state.snapshot", Payload = snap.DetailsJson ?? "{}" });
+            var payload = System.Text.Json.JsonSerializer.Serialize(snap);
+            await _db.RobotEvents.AddAsync(new RobotEvent { EventId = Guid.NewGuid(), RobotId = snap.RobotId, Timestamp = snap.Timestamp, Type = "state.snapshot", Payload = payload });
             await _db.SaveChangesAsync();
             await _hub.Clients.Group(BackendV2.Api.SignalR.RealtimeGroups.Robot(snap.RobotId)).SendAsync(SignalRTopics.RobotStateSnapshot, new { robotId = snap.RobotId, mode = snap.Mode, batteryPct = snap.BatteryPct, timestamp = snap.Timestamp });
             await _hub.Clients.Group(BackendV2.Api.SignalR.RealtimeGroups.Robots).SendAsync(SignalRTopics.RobotStateSnapshot, new { robotId = snap.RobotId, mode = snap.Mode, batteryPct = snap.BatteryPct, timestamp = snap.Timestamp });

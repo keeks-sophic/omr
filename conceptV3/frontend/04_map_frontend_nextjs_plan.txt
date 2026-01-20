@@ -1,0 +1,265 @@
+========================================================
+FRONTEND (NEXT.JS) - MAP MODULE CONSUMPTION PLAN (MULTI-MAP)
+========================================================
+
+Source specs:
+- Backend map spec:
+  - c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\backend\04_map.txt
+- Backend auth spec:
+  - c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\backend\02_auth.txt
+- Frontend auth plan (must reuse):
+  - c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\frontend\02_auth_frontend_nextjs_plan.txt
+
+Backend base:
+- BackendV3 API: /api/v1
+
+Map module base:
+- /api/v1/maps
+
+Goal (frontend):
+- Support multiple maps (mapId) with independent version histories
+- Provide viewer map viewing (read-only) for Viewer/Operator/Admin
+- Provide map editing (CRUD) for Operator/Admin
+- Support autosave and manual save while controlling version creation
+- Consume realtime map updates via SignalR
+- Stay scalable so future modules reuse the same auth/session patterns
+
+
+========================================================
+1) ACCESS CONTROL (FRONTEND) ALIGNED WITH BACKEND RBAC
+========================================================
+
+Backend rules (summary):
+- Read endpoints: Viewer policy (viewer/operator/admin)
+- Write endpoints: Operator policy (operator/admin)
+- Pending: authenticated but blocked from module access by fallback policy
+
+Frontend route protection (reuse auth plan middleware.ts):
+- /maps and all subroutes are protected:
+  - require any of: Viewer/Operator/Admin
+- Editor routes require write role:
+  - Operator/Admin
+- If unauthenticated:
+  - redirect to /login?returnTo=<path>
+- If authenticated but lacks role:
+  - redirect to /access-denied
+- If Pending-only:
+  - redirect to /pending
+
+
+========================================================
+2) REQUIRED NEXT.JS PAGES (MULTI-MAP)
+========================================================
+
+2.1 Maps list (read)
+- /maps
+  Purpose:
+  - list maps (MapDto[])
+  - show active published version per map (activeMapVersionId)
+  - navigation entry point to view or edit a map
+  Roles:
+  - Viewer/Operator/Admin
+  Backend calls:
+  - GET /api/v1/maps
+  UI actions:
+  - Open (view): /maps/[mapId]
+  - Versions: /maps/[mapId]/versions
+  - Edit (draft): /maps/[mapId]/edit (Operator/Admin)
+  - Create map: /maps/new (Operator/Admin)
+
+2.2 Create map (write)
+- /maps/new
+  Purpose:
+  - create a new logical map
+  Roles:
+  - Operator/Admin
+  Backend calls:
+  - POST /api/v1/maps  Body: { name }
+  Next step:
+  - redirect to /maps/[mapId]/edit
+
+2.3 Map view (read)
+- /maps/[mapId]
+  Purpose:
+  - show the published version of this map (activeMapVersionId)
+  - allow switching to a specific version to view
+  Roles:
+  - Viewer/Operator/Admin
+  Backend calls (recommended):
+  - GET /api/v1/maps/{mapId} (to get activeMapVersionId)
+  - GET /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot (render)
+  Optional:
+  - GET /api/v1/maps/{mapId}/versions (version dropdown)
+
+2.4 Versions list (read)
+- /maps/[mapId]/versions
+  Purpose:
+  - show version history for this map
+  - pick a version to view
+  - pick a source version to clone a new draft (Operator/Admin)
+  Roles:
+  - Viewer/Operator/Admin (read list)
+  Backend calls:
+  - GET /api/v1/maps/{mapId}/versions
+  Actions:
+  - View version: /maps/[mapId]/versions/[mapVersionId]
+  - Edit draft: /maps/[mapId]/edit (Operator/Admin)
+
+2.5 Version view (read)
+- /maps/[mapId]/versions/[mapVersionId]
+  Purpose:
+  - render a specific version snapshot
+  Roles:
+  - Viewer/Operator/Admin
+  Backend calls:
+  - GET /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
+
+2.6 Map editor (write)
+- /maps/[mapId]/edit
+  Purpose:
+  - edit map entities (nodes/paths/points/qrs) in a draft version
+  - publish a version
+  Roles:
+  - Operator/Admin
+  Backend calls:
+  - GET /api/v1/maps/{mapId}/draft  (returns an editable DRAFT version, creating one if needed)
+  - GET /api/v1/maps/{mapId}/versions/{draftVersionId}/snapshot (initial load)
+  Writes (autosave/manual save):
+  - nodes:
+    - POST /api/v1/maps/{mapId}/versions/{draftVersionId}/nodes
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/nodes/{nodeId}
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/nodes/{nodeId}/maintenance
+  - paths:
+    - POST /api/v1/maps/{mapId}/versions/{draftVersionId}/paths
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/paths/{pathId}
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/paths/{pathId}/maintenance
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/paths/{pathId}/rest
+  - points:
+    - POST /api/v1/maps/{mapId}/versions/{draftVersionId}/points
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/points/{pointId}
+  - qrs:
+    - POST /api/v1/maps/{mapId}/versions/{draftVersionId}/qrs
+    - PUT  /api/v1/maps/{mapId}/versions/{draftVersionId}/qrs/{qrId}
+  Publish:
+  - POST /api/v1/maps/{mapId}/versions/{draftVersionId}/publish  Body: { changeSummary }
+  Suggested UI controls:
+  - Autosave toggle ON/OFF
+  - Save now button
+  - Publish button
+  - Draft status indicator (dirty, lastSavedAt)
+
+
+========================================================
+3) SAVE MODES + VERSION CONTROL (DO NOT CREATE TOO MANY VERSIONS)
+========================================================
+
+Important principle:
+- Autosave should update entities in the current draft version.
+- Autosave must NOT create a new map version per action.
+
+3.1 Autosave ON
+- For every action, write to backend immediately (or throttled):
+  - node drag -> debounced PUT node every 250–500ms
+  - small edits -> batch into 1–2s windows
+- Version count stays stable because draftVersionId does not change.
+
+3.2 Autosave OFF (manual)
+- Accumulate changes in local state.
+- Save now applies changes as one UX action:
+  - compute diffs
+  - issue a sequence of per-entity requests to apply changes to draftVersionId
+
+3.3 When versions are created
+Frontend should only trigger new version creation when:
+- creating a new map (POST /maps)
+- creating a new draft from source (via backend draft endpoint or clone endpoint)
+- publishing a draft
+
+3.4 Controlling draft/version count
+The frontend should not create multiple drafts automatically.
+Recommended behavior:
+- Always use GET /maps/{mapId}/draft (server decides whether to reuse existing draft or create one).
+Server-side retention should enforce limits (e.g., keep last N drafts per map).
+
+Optional future (backend):
+- Bulk snapshot upsert:
+  - PUT /api/v1/maps/{mapId}/versions/{draftVersionId}/snapshot
+This would allow true "save in 1 lumpsum" with a single request.
+
+
+========================================================
+4) NEXT.JS ROUTE HANDLERS (PROXY BACKEND WITH COOKIE SESSION)
+========================================================
+
+Same approach as auth plan:
+- Browser calls Next.js route handlers
+- Route handlers attach Authorization header from httpOnly cookie
+
+Suggested route handlers:
+- app/api/maps/route.ts
+  - GET -> GET /api/v1/maps
+  - POST -> POST /api/v1/maps
+
+- app/api/maps/[mapId]/route.ts
+  - GET -> GET /api/v1/maps/{mapId}
+
+- app/api/maps/[mapId]/versions/route.ts
+  - GET -> GET /api/v1/maps/{mapId}/versions
+
+- app/api/maps/[mapId]/versions/[mapVersionId]/snapshot/route.ts
+  - GET -> GET /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
+
+- app/api/maps/[mapId]/draft/route.ts
+  - GET -> GET /api/v1/maps/{mapId}/draft
+
+- app/api/maps/[mapId]/versions/[mapVersionId]/publish/route.ts
+  - POST -> POST /api/v1/maps/{mapId}/versions/{mapVersionId}/publish
+
+- app/api/maps/[mapId]/versions/[mapVersionId]/clone/route.ts
+  - POST -> POST /api/v1/maps/{mapId}/versions/{mapVersionId}/clone
+
+Entity proxy route handlers (draftVersionId or any versionId):
+- app/api/maps/[mapId]/versions/[mapVersionId]/nodes/route.ts
+- app/api/maps/[mapId]/versions/[mapVersionId]/paths/route.ts
+- app/api/maps/[mapId]/versions/[mapVersionId]/points/route.ts
+- app/api/maps/[mapId]/versions/[mapVersionId]/qrs/route.ts
+
+Error handling (shared):
+- 401 -> clear cookie + redirect /login
+- 403 -> redirect /pending or /access-denied based on roles
+
+
+========================================================
+5) REALTIME (SIGNALR) CONSUMPTION
+========================================================
+
+Events:
+- map.version.created
+- map.version.published
+- map.entity.updated
+
+Hub:
+- /hubs/realtime
+
+Recommended behavior:
+- On /maps:
+  - when map.version.published arrives, update the map row (active version pointer) by refetching /api/v1/maps
+- On /maps/[mapId] and version views:
+  - when map.entity.updated arrives for the same mapId/mapVersionId, refetch snapshot or patch local state
+- On /maps/[mapId]/edit:
+  - treat SignalR as "another editor changed the draft" and refetch snapshot if conflicts matter
+
+
+========================================================
+6) ACCEPTANCE CHECKLIST
+========================================================
+
+- Multiple maps appear in /maps using GET /api/v1/maps.
+- Operator can create a new map via /maps/new and then edit it.
+- Viewer can view the published version via /maps/[mapId].
+- Operator edits a draft version and autosave persists without creating new versions per action.
+- Manual save persists as one UX action (batch of requests).
+- Publish updates activeMapVersionId and makes the new version visible to viewers.
+- Pending users cannot access /maps routes and are redirected to /pending.
+- Unauthenticated users are redirected to /login.
+

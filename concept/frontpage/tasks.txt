@@ -1,0 +1,25 @@
+Page: Tasks
+
+Concept:
+- Create and manage user-driven tasks with manual or auto assignment
+- Monitor task lifecycle, route preview, holds timeline, and progress events
+
+Accessible Functions:
+- Create task (Go to point, Pick/Drop transfer, Charge, Run Mission)
+- Choose assignment mode: auto assign or choose robotId
+- Set constraints: priority, earliest start, allow preemption (optional)
+- View task list filtered by status and robotId
+- View task detail: route preview, traffic holds timeline, progress events
+- Operator controls: pause, resume, cancel
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/tasks, POST /api/v1/tasks/{taskId}/pause, POST /api/v1/tasks/{taskId}/resume, POST /api/v1/tasks/{taskId}/cancel
+- REST (planned): GET /api/v1/tasks, GET /api/v1/tasks/{taskId}, GET /api/v1/routes/{routeId}, GET /api/v1/routes/{routeId}/eta
+- REST (implemented, planning): POST /api/v1/routes/plan
+- Realtime Hub: /hubs/realtime
+- SignalR topics: task.created, task.assigned, task.status.changed, task.completed, task.failed, route.updated, traffic.schedule.summary.updated
+
+Backend Communication:
+- Auth via JWT; authorization applies to task creation and controls
+- REST for task creation and controls; optional route planning for previews
+- Subscribes to task.* topics for live lifecycle and progress updates; receives snapshots on subscribe

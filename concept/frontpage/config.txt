@@ -1,0 +1,22 @@
+Page: Config
+
+Concept:
+- Per-robot configuration of motion limits, runtime mode, and feature flags
+- Shows config history and supports rollback (policy-dependent)
+
+Accessible Functions:
+- Update motion limits: maxDriveSpeed, maxAcceleration, maxDeceleration
+- Set runtime mode: LIVE/SIM (session-level control)
+- Toggle feature flags: telescopeEnabled (and others as defined)
+- View config history and rollback (if supported)
+
+Endpoints Used:
+- REST (implemented): PUT /api/v1/robots/{robotId}/config/motion-limits, PUT /api/v1/robots/{robotId}/config/runtime-mode, PUT /api/v1/robots/{robotId}/config/feature-flags
+- REST (planned): GET /api/v1/robots/{robotId}/config
+- Realtime Hub: /hubs/realtime
+- SignalR topics: robot.config.updated
+
+Backend Communication:
+- Auth via JWT; Admin/Planner roles typically required for config updates
+- REST for config changes; ACK-required durable updates to robot via backend services
+- Subscribes to robot.config.updated and robot.session.updated for visibility

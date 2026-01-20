@@ -59,7 +59,7 @@ public class SimDriverWorker : BackgroundService
                         var motionEnv = JsonSerializer.SerializeToUtf8Bytes(new BackendV2.Api.Contracts.NatsEnvelope<MotionTelemetry> { RobotId = r.RobotId, Timestamp = DateTimeOffset.UtcNow, CorrelationId = Guid.NewGuid().ToString("N"), Payload = motion });
                         js.Publish(NatsTopics.RobotTelemetryPose(r.RobotId), poseEnv);
                         js.Publish(NatsTopics.RobotTelemetryMotion(r.RobotId), motionEnv);
-                        var snap = new RobotStateSnapshot { RobotId = r.RobotId, Timestamp = DateTimeOffset.UtcNow, Mode = "EXECUTING", BatteryPct = r.Battery ?? 0, DetailsJson = "{}" };
+                        var snap = new RobotStateSnapshot { RobotId = r.RobotId, Timestamp = DateTimeOffset.UtcNow, Mode = "EXECUTING", BatteryPct = r.Battery ?? 0 };
                         var snapData = JsonSerializer.SerializeToUtf8Bytes(snap);
                         js.Publish(NatsTopics.RobotStateSnapshot(r.RobotId), snapData);
                     }

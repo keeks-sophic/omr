@@ -1,109 +1,300 @@
-import { ListTodo, CheckCircle2, Clock, MapPin, MoreHorizontal, Plus } from "lucide-react";
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { getApiBaseUrl } from "../../lib/config";
+import { getRobots } from "../../lib/configApi";
+import {
+  createMission,
+  updateMission,
+  validateMission,
+  createTeachSession,
+  startTeachSession,
+  stopTeachSession,
+  captureTeachStep,
+  saveMissionFromTeach,
+} from "../../lib/missionApi";
+import { createTask } from "../../lib/tasksApi";
+import { useSignalR } from "../../hooks/useSignalR";
 
 export default function MissionPage() {
-  const tasks = [
-    { id: "M-001", title: "Sector 4 Surveillance", status: "In Progress", progress: 65, priority: "High" },
-    { id: "M-002", title: "Base Perimeter Check", status: "Pending", progress: 0, priority: "Medium" },
-    { id: "M-003", title: "Sensor Calibration", status: "Completed", progress: 100, priority: "Low" },
-  ];
+  const baseUrl = useMemo(() => getApiBaseUrl(), []);
+  const [robots, setRobots] = useState<{ id: string; label: string }[]>([]);
+  const [robotId, setRobotId] = useState("");
+  const [mapVersionId, setMapVersionId] = useState("");
+  const [teachSessionId, setTeachSessionId] = useState("");
+  const [missionId, setMissionId] = useState("");
+  const [missionName, setMissionName] = useState("");
+  const [missionVersion, setMissionVersion] = useState("v1");
+  const [status, setStatus] = useState<string | null>(null);
+  const [captureCommandJson, setCaptureCommandJson] = useState('{"action":"ACTUATE","type":"grip","params":{"open":true}}');
+  const { connection, isConnected } = useSignalR();
+
+  useEffect(() => {
+    getRobots(baseUrl)
+      .then((data) => {
+        const options: { id: string; label: string }[] = Array.isArray(data)
+          ? data.map((r: any) => {
+              const id = r.robotId || r.id || r.name || "";
+              const label = r.name || r.robotId || r.id || "robot";
+              return { id: String(id), label: String(label) };
+            })
+          : [];
+        setRobots(options);
+        if (options.length > 0) setRobotId(options[0].id);
+      })
+      .catch(() => {});
+  }, [baseUrl]);
+
+  useEffect(() => {
+    if (!connection) return;
+    connection.on("teach.session.started", (payload: any) => {
+      setStatus(`Teach session started: ${payload?.teachSessionId || teachSessionId}`);
+    });
+    connection.on("teach.session.stopped", (payload: any) => {
+      setStatus(`Teach session stopped: ${payload?.teachSessionId || teachSessionId}`);
+    });
+    connection.on("teach.step.captured", (payload: any) => {
+      setStatus(`Step captured: ${payload?.correlationId || ""}`);
+    });
+    connection.on("teach.step.updated", () => {
+      setStatus("Teach step updated");
+    });
+    connection.on("mission.created", (payload: any) => {
+      setStatus(`Mission created: ${payload?.missionId || missionId}`);
+    });
+    connection.on("mission.updated", (payload: any) => {
+      setStatus(`Mission updated: ${payload?.missionId || missionId}`);
+    });
+    return () => {
+      connection.off("teach.session.started");
+      connection.off("teach.session.stopped");
+      connection.off("teach.step.captured");
+      connection.off("teach.step.updated");
+      connection.off("mission.created");
+      connection.off("mission.updated");
+    };
+  }, [connection, teachSessionId, missionId]);
+
+  async function handleCreateTeachSession() {
+    if (!robotId || !mapVersionId) return;
+    setStatus("Creating teach session...");
+    try {
+      const res = await createTeachSession(baseUrl, { robotId, mapVersionId });
+      const id = res?.teachSessionId || res?.id || "";
+      setTeachSessionId(String(id));
+      setStatus(`Teach session created: ${id}`);
+    } catch {
+      setStatus("Failed to create teach session");
+    }
+  }
+
+  async function handleStartTeach() {
+    if (!teachSessionId) return;
+    setStatus("Starting teach session...");
+    try {
+      await startTeachSession(baseUrl, teachSessionId);
+      setStatus("Teach session started");
+    } catch {
+      setStatus("Failed to start teach session");
+    }
+  }
+
+  async function handleStopTeach() {
+    if (!teachSessionId) return;
+    setStatus("Stopping teach session...");
+    try {
+      await stopTeachSession(baseUrl, teachSessionId);
+      setStatus("Teach session stopped");
+    } catch {
+      setStatus("Failed to stop teach session");
+    }
+  }
+
+  async function handleCaptureStep() {
+    if (!teachSessionId) return;
+    setStatus("Capturing step...");
+    try {
+      const command = JSON.parse(captureCommandJson);
+      await captureTeachStep(baseUrl, teachSessionId, { command });
+      setStatus("Step captured");
+    } catch {
+      setStatus("Failed to capture step (check JSON)");
+    }
+  }
+
+  async function handleSaveMission() {
+    if (!teachSessionId || !missionId || !missionName || !missionVersion) return;
+    setStatus("Saving mission...");
+    try {
+      await saveMissionFromTeach(baseUrl, teachSessionId, { missionId, name: missionName, version: missionVersion });
+      setStatus(`Mission saved: ${missionId}`);
+    } catch {
+      setStatus("Failed to save mission");
+    }
+  }
+
+  async function handleCreateMission() {
+    if (!missionId || !missionName || !missionVersion) return;
+    setStatus("Creating mission (manual)...");
+    try {
+      const res = await createMission(baseUrl, { missionId, name: missionName, version: missionVersion, steps: [] });
+      const id = res?.missionId || missionId;
+      setMissionId(String(id));
+      setStatus(`Mission created: ${id}`);
+    } catch {
+      setStatus("Failed to create mission");
+    }
+  }
+
+  async function handleUpdateMission() {
+    if (!missionId) return;
+    setStatus("Updating mission (manual)...");
+    try {
+      await updateMission(baseUrl, missionId, { name: missionName, version: missionVersion });
+      setStatus("Mission updated");
+    } catch {
+      setStatus("Failed to update mission");
+    }
+  }
+
+  async function handleValidateMission() {
+    if (!missionId) return;
+    setStatus("Validating mission...");
+    try {
+      const result = await validateMission(baseUrl, missionId, {});
+      setStatus(`Validation: ${result?.status || "OK"}`);
+    } catch {
+      setStatus("Failed to validate mission");
+    }
+  }
+
+  async function handleRunMissionTask() {
+    if (!missionId || !robotId) return;
+    setStatus("Creating RUN_MISSION task...");
+    try {
+      await createTask(baseUrl, { type: "RUN_MISSION", missionId, robotId });
+      setStatus("Mission task created");
+    } catch {
+      setStatus("Failed to create mission task");
+    }
+  }
 
   return (
-    <div className="space-y-6">
-       <div className="flex items-center justify-between">
-         <div>
-            <h1 className="text-3xl font-semibold tracking-tight text-white">Mission Control</h1>
-            <p className="text-zinc-400 mt-1">Manage and track autonomous objectives.</p>
-         </div>
-         <button className="px-4 py-2 bg-primary hover:bg-primary-hover text-white rounded-full text-sm font-medium shadow-lg shadow-primary/20 transition-all flex items-center gap-2">
-            <Plus size={18} />
-            New Mission
-         </button>
+    <div style={{ display: "grid", gap: 24 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <h1 style={{ color: "white", fontSize: 24 }}>Missions & Teaching</h1>
+          <p style={{ color: "#a1a1aa" }}>Teach sessions, mission library, validate and run</p>
+        </div>
+        <div style={{ padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(34,197,94,0.2)", color: isConnected ? "#22c55e" : "#ef4444" }}>
+          {isConnected ? "Realtime connected" : "Realtime offline"}
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-         {/* Mission List */}
-         <div className="lg:col-span-2 space-y-4">
-            {tasks.map((task) => (
-               <div key={task.id} className="glass-card p-5 rounded-2xl flex items-center justify-between group hover:border-zinc-700 transition-all">
-                  <div className="flex items-center gap-4">
-                     <div className={`w-10 h-10 rounded-full flex items-center justify-center border
-                        ${task.status === 'Completed' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' :
-                          task.status === 'In Progress' ? 'bg-sky-500/10 border-sky-500/20 text-sky-500' :
-                          'bg-zinc-800 border-zinc-700 text-zinc-500'}`}
-                     >
-                        {task.status === 'Completed' ? <CheckCircle2 size={20} /> : <Clock size={20} />}
-                     </div>
-                     <div>
-                        <div className="flex items-center gap-2">
-                           <h3 className="text-white font-medium">{task.title}</h3>
-                           <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">{task.id}</span>
-                        </div>
-                        <div className="flex items-center gap-4 mt-1">
-                           <span className={`text-xs ${
-                              task.status === 'In Progress' ? 'text-sky-400' : 
-                              task.status === 'Completed' ? 'text-emerald-400' : 'text-zinc-500'
-                           }`}>{task.status}</span>
-                           <span className="text-xs text-zinc-600">•</span>
-                           <span className="text-xs text-zinc-500">{task.priority} Priority</span>
-                        </div>
-                     </div>
-                  </div>
-
-                  <div className="flex items-center gap-6">
-                     {task.status === 'In Progress' && (
-                        <div className="w-24">
-                           <div className="flex justify-between text-[10px] text-zinc-500 mb-1">
-                              <span>Progress</span>
-                              <span>{task.progress}%</span>
-                           </div>
-                           <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
-                              <div className="h-full bg-sky-500" style={{ width: `${task.progress}%` }} />
-                           </div>
-                        </div>
-                     )}
-                     <button className="p-2 hover:bg-white/10 rounded-lg text-zinc-500 hover:text-white transition-colors">
-                        <MoreHorizontal size={20} />
-                     </button>
-                  </div>
-               </div>
-            ))}
-         </div>
-
-         {/* Sidebar / Details */}
-         <div className="glass-card p-6 rounded-2xl h-fit">
-            <h3 className="text-zinc-200 font-medium mb-6">Mission Summary</h3>
-            <div className="space-y-6 relative pl-4 border-l border-zinc-800">
-               {[
-                  { step: "Initialize", status: "done" },
-                  { step: "Pathfinding", status: "done" },
-                  { step: "Execution", status: "active" },
-                  { step: "Data Sync", status: "pending" },
-                  { step: "Return", status: "pending" },
-               ].map((item, i) => (
-                  <div key={i} className="relative">
-                     <div className={`absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full border-2 
-                        ${item.status === 'done' ? 'bg-emerald-500 border-emerald-500' : 
-                          item.status === 'active' ? 'bg-zinc-950 border-sky-500 animate-pulse' : 'bg-zinc-950 border-zinc-700'}`} 
-                     />
-                     <div className={`text-sm ${item.status === 'active' ? 'text-white font-medium' : 'text-zinc-500'}`}>
-                        {item.step}
-                     </div>
-                  </div>
-               ))}
+      <div style={{ display: "grid", gap: 12, padding: 16, borderRadius: 12, border: "1px solid rgba(255,255,255,0.08)" }}>
+        <h2 style={{ color: "white", fontSize: 18 }}>Teach Mode Console</h2>
+        <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(2, 1fr)" }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ color: "white" }}>Session Setup</label>
+            <select value={robotId} onChange={(e) => setRobotId(e.target.value)} style={inputStyle}>
+              {robots.map((r) => (
+                <option key={r.id} value={r.id}>{r.label} ({r.id})</option>
+              ))}
+            </select>
+            <input
+              placeholder="mapVersionId"
+              value={mapVersionId}
+              onChange={(e) => setMapVersionId(e.target.value)}
+              style={inputStyle}
+            />
+            <button onClick={handleCreateTeachSession} disabled={!robotId || !mapVersionId} style={buttonStyle}>Create Session</button>
+            <input
+              placeholder="teachSessionId"
+              value={teachSessionId}
+              onChange={(e) => setTeachSessionId(e.target.value)}
+              style={inputStyle}
+            />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={handleStartTeach} disabled={!teachSessionId} style={buttonStyle}>Start Teach</button>
+              <button onClick={handleStopTeach} disabled={!teachSessionId} style={buttonStyle}>Stop Teach</button>
             </div>
-            
-            <div className="mt-8 pt-6 border-t border-white/5">
-               <div className="flex items-center gap-3 mb-4">
-                  <MapPin size={18} className="text-zinc-500" />
-                  <span className="text-sm text-zinc-300">Target Coordinates</span>
-               </div>
-               <div className="bg-black/30 p-3 rounded-lg font-mono text-xs text-emerald-400 border border-emerald-500/20">
-                  LAT: 34.4210 N<br/>
-                  LNG: 118.392 W
-               </div>
-            </div>
-         </div>
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ color: "white" }}>Capture Step</label>
+            <textarea
+              rows={6}
+              placeholder='{"action":"ACTUATE","type":"grip","params":{"open":true}}'
+              value={captureCommandJson}
+              onChange={(e) => setCaptureCommandJson(e.target.value)}
+              style={textareaStyle}
+            />
+            <button onClick={handleCaptureStep} disabled={!teachSessionId} style={buttonStyle}>Capture Step</button>
+          </div>
+        </div>
       </div>
+
+      <div style={{ display: "grid", gap: 12, padding: 16, borderRadius: 12, border: "1px solid rgba(255,255,255,0.08)" }}>
+        <h2 style={{ color: "white", fontSize: 18 }}>Mission Library</h2>
+        <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(2, 1fr)" }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ color: "white" }}>Create / Update</label>
+            <input placeholder="missionId" value={missionId} onChange={(e) => setMissionId(e.target.value)} style={inputStyle} />
+            <input placeholder="name" value={missionName} onChange={(e) => setMissionName(e.target.value)} style={inputStyle} />
+            <input placeholder="version" value={missionVersion} onChange={(e) => setMissionVersion(e.target.value)} style={inputStyle} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={handleCreateMission} disabled={!missionId || !missionName || !missionVersion} style={buttonStyle}>Create</button>
+              <button onClick={handleUpdateMission} disabled={!missionId} style={buttonStyle}>Update</button>
+            </div>
+            <button onClick={handleValidateMission} disabled={!missionId} style={buttonStyle}>Validate</button>
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ color: "white" }}>Save From Teach</label>
+            <input placeholder="teachSessionId" value={teachSessionId} onChange={(e) => setTeachSessionId(e.target.value)} style={inputStyle} />
+            <button onClick={handleSaveMission} disabled={!teachSessionId || !missionId || !missionName || !missionVersion} style={buttonStyle}>Save Mission</button>
+            <label style={{ color: "white", marginTop: 12 }}>Run Mission</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <select value={robotId} onChange={(e) => setRobotId(e.target.value)} style={inputStyle}>
+                {robots.map((r) => (
+                  <option key={r.id} value={r.id}>{r.label} ({r.id})</option>
+                ))}
+              </select>
+              <button onClick={handleRunMissionTask} disabled={!missionId || !robotId} style={buttonStyle}>Run</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {status && (
+        <div style={{ padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,0.08)", color: "#a1a1aa" }}>
+          {status}
+        </div>
+      )}
     </div>
   );
 }
+
+const inputStyle: React.CSSProperties = {
+  padding: 10,
+  borderRadius: 8,
+  border: "1px solid #27272a",
+  background: "#0a0a0a",
+  color: "white",
+};
+
+const textareaStyle: React.CSSProperties = {
+  padding: 10,
+  borderRadius: 8,
+  border: "1px solid #27272a",
+  background: "#0a0a0a",
+  color: "white",
+  fontFamily: "monospace",
+};
+
+const buttonStyle: React.CSSProperties = {
+  padding: 10,
+  borderRadius: 8,
+  border: "1px solid #22c55e",
+  background: "#22c55e",
+  color: "white",
+  width: 160,
+};

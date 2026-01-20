@@ -30,7 +30,9 @@ public class AuthController : ControllerBase
         [FromServices] JwtTokenService tokens,
         [FromServices] AppDbContext db)
     {
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+        var uname = (request.Username ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(uname) || string.IsNullOrWhiteSpace(request.Password)) return Unauthorized();
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Username.ToLower() == uname.ToLower());
         if (user == null || user.IsDisabled || !hasher.Verify(request.Password, user.PasswordHash))
         {
             await db.AuditEvents.AddAsync(new AuditEvent
@@ -83,6 +85,29 @@ public class AuthController : ControllerBase
             }
         });
     }
+    
+    public class RegisterRequest { public string Username { get; set; } = string.Empty; public string DisplayName { get; set; } = string.Empty; public string Password { get; set; } = string.Empty; }
+    [AllowAnonymous]
+    [HttpPost("register")]
+    public async Task<IActionResult> Register([FromBody] RegisterRequest req, [FromServices] AppDbContext db, [FromServices] PasswordHasher hasher)
+    {
+        var allowEnv = Environment.GetEnvironmentVariable("BACKENDV2_ALLOW_SIGNUP");
+        var allow = string.IsNullOrEmpty(allowEnv) ? true : allowEnv.Equals("true", StringComparison.OrdinalIgnoreCase);
+        if (!allow) return Unauthorized(new { error = "signup_disabled" });
+        var uname = (req.Username ?? "").Trim();
+        var display = (req.DisplayName ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(uname) || string.IsNullOrWhiteSpace(req.Password)) return BadRequest(new { error = "missing_fields" });
+        var exists = await db.Users.AnyAsync(u => u.Username.ToLower() == uname.ToLower());
+        if (exists) return Conflict(new { error = "username_taken" });
+        var u = new BackendV2.Api.Model.Auth.User { UserId = Guid.NewGuid(), Username = uname, DisplayName = display, PasswordHash = hasher.Hash(req.Password), IsDisabled = false };
+        await db.Users.AddAsync(u);
+        var viewerRole = await db.Roles.FirstOrDefaultAsync(r => r.Name == "Viewer");
+        if (viewerRole != null) await db.UserRoles.AddAsync(new BackendV2.Api.Model.Auth.UserRole { UserId = u.UserId, RoleId = viewerRole.RoleId });
+        await db.SaveChangesAsync();
+        await db.AuditEvents.AddAsync(new BackendV2.Api.Model.Ops.AuditEvent { AuditEventId = Guid.NewGuid(), Timestamp = DateTimeOffset.UtcNow, ActorUserId = u.UserId, Action = "auth.register", TargetType = "auth.user", TargetId = u.UserId.ToString(), Outcome = "OK", DetailsJson = "{}" });
+        await db.SaveChangesAsync();
+        return Ok(new { userId = u.UserId });
+    }
 
     [Authorize]
     [HttpGet("me")]
@@ -90,13 +115,14 @@ public class AuthController : ControllerBase
     {
         var userIdClaim = User.FindFirst("sub")?.Value ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
         var username = User.Identity?.Name ?? User.FindFirst("unique_name")?.Value ?? "";
-        var rolesCsv = User.FindFirst("roles")?.Value ?? "";
+        var roleClaims = System.Linq.Enumerable.ToList(User.FindAll("roles"));
+        var rolesArr = roleClaims.Count > 0 ? System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(roleClaims, c => c.Value)) : (User.FindFirst("roles")?.Value ?? "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
         var robotsCsv = User.FindFirst("allowedRobotIds")?.Value ?? "";
         return Ok(new
         {
             userId = userIdClaim,
             username,
-            roles = rolesCsv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries),
+            roles = rolesArr,
             allowedRobotIds = robotsCsv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
         });
     }
@@ -152,8 +178,8 @@ public class AuthController : ControllerBase
                 var revoked = await db.RevokedTokens.AsNoTracking().AnyAsync(x => x.Jti == jti);
                 if (revoked) return Unauthorized();
             }
-            var rolesCsv = principal.FindFirst("roles")?.Value ?? "";
-            var roles = rolesCsv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            var roleClaims = System.Linq.Enumerable.ToList(principal.FindAll("roles"));
+            var roles = roleClaims.Count > 0 ? System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(roleClaims, c => c.Value)) : (principal.FindFirst("roles")?.Value ?? "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
             var robotsCsv = principal.FindFirst("allowedRobotIds")?.Value ?? "";
             var allowed = robotsCsv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
             var (accessToken, accessExpires) = tokens.CreateToken(user, roles, allowed);

@@ -18,4 +18,10 @@ public class RoleRepository
             .Join(_db.Roles, ur => ur.RoleId, r => r.RoleId, (ur, r) => r.Name)
             .ToArrayAsync();
     }
+    
+    public async Task<RoleType> GetUserRolesFlagsAsync(System.Guid userId)
+    {
+        var names = await GetUserRolesAsync(userId);
+        return RoleUtils.Aggregate(names);
+    }
 }

@@ -1,0 +1,246 @@
+========================================================
+FRONTENDV2 (NEXT.JS) - AUTH MODULE IMPLEMENTATION NOTES
+========================================================
+
+Source plan:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\frontend\02_auth_frontend_nextjs_plan.txt
+
+Backend dependency:
+- BackendV3 API base: /api/v1
+- Auth endpoints:
+  - POST /api/v1/auth/login
+  - POST /api/v1/auth/register
+  - GET  /api/v1/auth/me
+  - POST /api/v1/auth/logout
+- Admin users (Admin-only):
+  - GET  /api/v1/admin/users
+  - GET  /api/v1/admin/users/{userId:guid}
+  - POST /api/v1/admin/users
+  - PUT  /api/v1/admin/users/{userId:guid}
+  - POST /api/v1/admin/users/{userId:guid}/disable
+  - POST /api/v1/admin/users/{userId:guid}/roles
+
+
+========================================================
+1) WHAT SHOULD BE IMPLEMENTED (PLAN)
+========================================================
+
+1.1 Session strategy
+- Use httpOnly cookie session (avoid localStorage).
+- Store backend access token (JWT) in a single cookie.
+- Next.js Route Handlers act as the only browser-facing auth API.
+- Next.js attaches Authorization header when calling backend.
+
+1.2 Pages
+Public:
+- /login
+- /register
+- /pending (Pending-only UX)
+- /access-denied (authenticated but unauthorized)
+
+Protected:
+- / (dashboard shell)
+- /account (shows session identity + roles)
+
+Admin:
+- /admin/users
+- /admin/users/[userId]
+
+1.3 Middleware route gating
+- If no token: only allow public routes, redirect protected routes to /login?returnTo=...
+- If token present: decode roles from JWT payload (no backend call required for gating).
+- Admin routes require Admin.
+- Protected routes require Viewer/Operator/Admin.
+- Pending users can access /account and /pending.
+
+1.4 Reusable API client pattern
+- One shared backend client wrapper.
+- Centralize backend routes/constants.
+- Shared TS types matching backend DTOs.
+
+
+========================================================
+2) WHAT HAS BEEN IMPLEMENTED (CURRENT STATE)
+========================================================
+
+2.1 Session + cookie
+- Cookie name:
+  - bk_at
+- Cookie properties:
+  - httpOnly
+  - sameSite=lax
+  - secure in production
+  - expires aligned with backend expiresAt
+
+Files:
+- lib/auth/constants.ts
+- app/api/auth/login/route.ts
+- app/api/auth/logout/route.ts
+
+2.2 Next.js Route Handlers (browser-facing auth API)
+- POST /api/auth/login
+  - forwards to backend /api/v1/auth/login
+  - sets bk_at cookie (accessToken)
+  - returns user + expiresAt (no token in response body)
+- POST /api/auth/register
+  - forwards to backend /api/v1/auth/register
+  - returns { userId }
+- GET /api/auth/me
+  - calls backend /api/v1/auth/me using Authorization from cookie
+  - returns { userId, username, roles }
+- POST /api/auth/logout
+  - calls backend /api/v1/auth/logout
+  - clears cookie regardless of backend response (best-effort)
+
+Files:
+- app/api/auth/login/route.ts
+- app/api/auth/register/route.ts
+- app/api/auth/me/route.ts
+- app/api/auth/logout/route.ts
+
+2.3 Middleware route gating
+- Middleware is implemented with JWT payload decoding (roles + exp):
+  - redirects unauthenticated users to /login?returnTo=...
+  - redirects pending-only users to /pending for protected routes
+  - redirects non-admin users away from /admin/* to /access-denied
+  - clears cookie when token is missing/invalid/expired
+
+Files:
+- middleware.ts
+
+2.4 Pages implemented
+Public:
+- /login
+- /register
+- /pending
+- /access-denied
+
+Protected:
+- /
+- /account
+
+Admin:
+- /admin/users (read-only list)
+- /admin/users/[userId] (read-only detail)
+
+Files:
+- app/(public)/login/page.tsx
+- app/(public)/register/page.tsx
+- app/(public)/pending/page.tsx
+- app/(public)/access-denied/page.tsx
+- app/(protected)/layout.tsx
+- app/(protected)/page.tsx
+- app/(protected)/account/page.tsx
+- app/(protected)/admin/users/page.tsx
+- app/(protected)/admin/users/[userId]/page.tsx
+- components/login-form.tsx
+- components/logout-button.tsx
+
+2.5 Admin API proxy (read-only)
+- GET /api/admin/users
+- GET /api/admin/users/[userId]
+
+Files:
+- app/api/admin/users/route.ts
+- app/api/admin/users/[userId]/route.ts
+
+2.6 Shared API client + routes + types
+- backend base URL env vars:
+  - BACKEND_BASE_URL (preferred on server)
+  - NEXT_PUBLIC_BACKEND_BASE_URL (optional)
+  - defaults to http://localhost:5000 if not set
+- Centralized backend paths:
+  - lib/api/routes.ts
+- Shared types mirroring backend DTOs:
+  - lib/api/types.ts
+
+Files:
+- lib/api/backendClient.ts
+- lib/api/routes.ts
+- lib/api/types.ts
+
+
+========================================================
+3) HOW IT IS IMPLEMENTED
+========================================================
+
+3.1 End-to-end request flow (login)
+Browser -> Next.js:
+- POST /api/auth/login (Route Handler)
+
+Next.js -> Backend:
+- POST {BACKEND_BASE_URL}/api/v1/auth/login
+- Receives:
+  - accessToken (JWT)
+  - expiresAt
+  - user
+
+Next.js response:
+- Sets bk_at httpOnly cookie with accessToken
+- Returns JSON containing only:
+  - user
+  - expiresAt
+
+3.2 Session usage for backend calls
+- Server code reads bk_at via next/headers cookies()
+- backendFetch() attaches Authorization: Bearer <token>
+
+Files:
+- lib/auth/session.ts
+- lib/api/backendClient.ts
+
+3.3 Middleware gating logic
+- Middleware runs for non-static routes:
+  - ignores /api and /_next
+- Token parsing:
+  - decodes JWT payload (no signature verification, UX-only)
+  - reads roles from payload.roles
+  - checks exp for expiry
+
+Decisions:
+- /admin/* requires "Admin"
+- /account allowed for any authenticated user (including Pending)
+- Other protected routes require one of: Viewer, Operator, Admin
+- Public routes always allowed
+
+File:
+- middleware.ts
+
+3.4 Admin read pages and proxy endpoints
+- Admin pages call server-side backendFetch() directly (fast, secure):
+  - /admin/users -> backend GET /api/v1/admin/users
+  - /admin/users/[userId] -> backend GET /api/v1/admin/users/{userId}
+
+Files:
+- app/(protected)/admin/users/page.tsx
+- app/(protected)/admin/users/[userId]/page.tsx
+
+
+========================================================
+4) KNOWN GAPS / NEXT IMPLEMENTATION STEPS
+========================================================
+
+Admin writes (not implemented yet):
+- Disable user
+- Replace roles
+- Create user
+- Update user
+
+Recommended approach:
+- Add Next.js route handlers under:
+  - app/api/admin/users/... (POST/PUT)
+- Add simple forms/buttons on the admin pages to call those routes.
+
+
+========================================================
+5) LOCAL DEV NOTES
+========================================================
+
+Backend base URL:
+- Set BACKEND_BASE_URL=http://localhost:5000 for server-side route handlers.
+
+Dev users (if backend seeds them):
+- admin / admin123
+- operator / operator123
+- viewer / viewer123
+

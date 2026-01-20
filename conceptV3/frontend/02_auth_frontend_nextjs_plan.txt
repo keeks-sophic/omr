@@ -1,0 +1,291 @@
+========================================================
+FRONTEND (NEXT.JS) - AUTH MODULE CONSUMPTION PLAN
+========================================================
+
+Source spec:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\backend\02_auth.txt
+
+Backend base:
+- BackendV3 API: /api/v1
+- Auth endpoints:
+  - POST /api/v1/auth/login
+  - POST /api/v1/auth/register
+  - GET  /api/v1/auth/me
+  - POST /api/v1/auth/logout
+  - Admin users:
+    - GET  /api/v1/admin/users
+    - GET  /api/v1/admin/users/{userId:guid}
+    - POST /api/v1/admin/users
+    - PUT  /api/v1/admin/users/{userId:guid}
+    - POST /api/v1/admin/users/{userId:guid}/disable
+    - POST /api/v1/admin/users/{userId:guid}/roles
+
+Goal (frontend):
+- Provide login/register/logout flows
+- Provide current session identity (me)
+- Provide role-aware routing and UI gating
+- Use a scalable pattern that future modules can reuse (Maps, Traffic, Tasks, etc.)
+
+
+========================================================
+1) RECOMMENDED NEXT.JS STRUCTURE (APP ROUTER)
+========================================================
+
+Recommended:
+- Next.js App Router (app/ directory)
+- Use Next.js Route Handlers for session-cookie based auth
+- Use one shared API client wrapper to call backend modules with auth attached
+
+Example file layout:
+frontend/
+  app/
+    (public)/
+      login/page.tsx
+      register/page.tsx
+    (protected)/
+      layout.tsx
+      page.tsx
+      account/page.tsx
+      admin/
+        users/page.tsx
+        users/[userId]/page.tsx
+    api/
+      auth/
+        login/route.ts
+        logout/route.ts
+        register/route.ts
+        me/route.ts
+  middleware.ts
+  lib/
+    auth/
+      session.ts
+      roles.ts
+      guards.ts
+    api/
+      backendClient.ts
+      routes.ts
+      types.ts
+
+Routing intent:
+- (public) = does not require auth
+- (protected) = requires auth (Viewer/Operator/Admin)
+- admin/* = requires Admin
+
+
+========================================================
+2) PAGES NEEDED (MINIMUM)
+========================================================
+
+2.1 Public pages
+- /login
+  - Form: username, password
+  - On submit: call frontend route handler POST /api/auth/login
+  - Success: redirect to / (or returnTo query)
+
+- /register
+  - Form: username, displayName, password
+  - On submit: call frontend route handler POST /api/auth/register
+  - After register:
+    - show "Pending approval" state
+    - optionally auto-login by calling /api/auth/login after register succeeds
+
+2.2 Protected pages
+- /
+  - Dashboard shell page
+  - Shows modules navigation filtered by roles
+
+- /account
+  - Calls frontend route handler GET /api/auth/me to show:
+    - userId, username, displayName, roles
+  - Useful for debugging role/pending problems
+
+2.3 Admin pages
+- /admin/users
+  - List users (+ roles)
+  - Actions:
+    - open user detail
+    - create user
+    - disable user
+    - assign roles
+
+- /admin/users/[userId]
+  - User detail (roles, disabled status)
+  - Update displayName, password, disable, replace roles
+
+Optional (quality-of-life pages)
+- /access-denied
+  - Used when user is authenticated but lacks required role
+- /pending
+  - Explains the "Pending" role state and next steps
+
+
+========================================================
+3) MIDDLEWARE AND ACCESS CONTROL
+========================================================
+
+3.1 Why middleware is needed
+- Backend enforces RBAC at API level.
+- Frontend should also:
+  - hide UI elements that will fail
+  - prevent navigation to pages the user cannot use
+  - keep auth scalable across modules via one mechanism
+
+3.2 Recommended: Next.js middleware.ts (route gating)
+Middleware responsibilities:
+- Read session cookie (httpOnly) that stores access token (JWT)
+- If no token:
+  - allow only public routes
+  - redirect protected routes to /login?returnTo=<path>
+- If token present:
+  - decode roles from JWT payload (no backend call needed)
+  - apply role checks for route groups
+
+Route policy rules (aligned with backend):
+- Protected routes require non-pending role:
+  - Viewer OR Operator OR Admin
+- Admin routes require Admin
+- Allow account-only routes for any authenticated user including Pending:
+  - /account can be allowed for Pending (to show "Pending" state)
+
+Note:
+- JWT signature validation in middleware is optional for UX, but not required for security.
+- Real security is enforced by backend policies; middleware is for navigation/UI.
+
+3.3 Component-level guards
+Use simple helpers so each module can declare its own needs:
+- requireRole("Admin")
+- requireAnyRole(["Viewer","Operator","Admin"])
+- canWrite: Operator OR Admin
+- canRead: Viewer OR Operator OR Admin
+
+This allows future modules to add:
+- /maps -> requireAnyRole(read)
+- /maps/editor -> requireAnyRole(write)
+without rewriting auth logic.
+
+
+========================================================
+4) SESSION STRATEGY (SCALABLE AND SAFE)
+========================================================
+
+4.1 Recommended: httpOnly cookie session
+Avoid storing JWT in localStorage for XSS reasons.
+
+Flow:
+- app/api/auth/login/route.ts:
+  - forwards credentials to backend POST /api/v1/auth/login
+  - receives accessToken + expiresAt + user
+  - sets an httpOnly cookie (e.g., "bk_at") with accessToken
+  - returns minimal user info for UI
+
+- app/api/auth/logout/route.ts:
+  - reads token cookie
+  - calls backend POST /api/v1/auth/logout with Authorization header
+  - clears cookie
+
+- app/api/auth/me/route.ts:
+  - reads token cookie
+  - calls backend GET /api/v1/auth/me
+  - returns identity for UI
+
+This makes every module call consistent:
+- the browser talks only to Next.js for auth/session state
+- Next.js talks to backend with Authorization header
+
+4.2 Backend base URL configuration
+Use environment variables for the backend URL:
+- NEXT_PUBLIC_BACKEND_BASE_URL (optional for browser-only calls)
+- BACKEND_BASE_URL (server-side route handlers)
+
+Keep all backend endpoint paths centralized:
+- lib/api/routes.ts (frontend-side constants)
+
+
+========================================================
+5) API CLIENT PATTERN (REUSABLE FOR OTHER MODULES)
+========================================================
+
+5.1 backendClient wrapper
+Create a single wrapper that:
+- attaches Authorization header from cookie (server-side) OR stored in memory (client-side)
+- standardizes error handling:
+  - 401 => redirect to /login
+  - 403 => redirect to /access-denied
+  - network error => show toast/banner
+
+Two typical usage styles:
+- Server Components / Route Handlers:
+  - read cookie in server context
+  - call backend directly (fast, secure)
+- Client Components:
+  - call Next.js route handlers instead of backend directly
+  - route handlers call backend and return JSON
+
+5.2 Types and contracts
+Create shared TypeScript types mirroring backend DTOs:
+- UserDto
+- LoginResponse
+- RegisterRequest
+- Map module DTOs later (MapSnapshotDto, etc.)
+
+Keep types per module:
+- lib/api/types.ts (common)
+- lib/modules/maps/types.ts (future)
+
+
+========================================================
+6) ROLE BEHAVIOR AND UI STATES
+========================================================
+
+Roles from backend:
+- Admin: full access
+- Operator: operations + read
+- Viewer: read-only
+- Pending: authenticated but blocked from module access by backend fallback policy
+
+Frontend handling:
+- If role includes Pending only:
+  - allow /account
+  - show /pending page or banner
+  - hide modules nav links
+  - any backend module call will return 403; route handlers should convert to UX message
+
+
+========================================================
+7) SCALING TO OTHER MODULES
+========================================================
+
+7.1 Add a module without touching auth core
+For each new module:
+- Add module route constants to lib/api/routes.ts
+- Add module pages under (protected)/
+- Add module-specific guards in lib/auth/guards.ts if needed
+
+7.2 Consistent RBAC mapping
+Create a single mapping file in frontend:
+- ViewerPolicy = ["Viewer","Operator","Admin"]
+- OperatorPolicy = ["Operator","Admin"]
+- AdminPolicy = ["Admin"]
+
+Each module then references one of these policies (no role logic in page components).
+
+7.3 Admin-only management patterns
+Admin management pages always follow:
+- list page
+- detail page
+- create flow
+and reuse the same backendClient + route handler session.
+
+
+========================================================
+8) ACCEPTANCE CHECKLIST
+========================================================
+
+- Login sets session cookie and redirects to /.
+- Register creates a user and shows Pending state.
+- Me returns identity and roles.
+- Logout revokes token and clears cookie.
+- /admin/users pages are inaccessible unless Admin.
+- Protected pages redirect to /login when unauthenticated.
+- Middleware checks scale by adding new module route prefixes only.
+

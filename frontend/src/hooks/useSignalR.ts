@@ -1,16 +1,19 @@
 import { useEffect, useState, useCallback } from "react";
 import { HubConnectionBuilder, HubConnection, HubConnectionState } from "@microsoft/signalr";
 import { RobotCommand } from "../types";
-
-const HUB_URL = "http://localhost:5146/hub/robots";
+import { getRealtimeHubUrl } from "../lib/config";
+import { getToken } from "../lib/auth";
 
 export function useSignalR() {
   const [connection, setConnection] = useState<HubConnection | null>(null);
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
+    const hubUrl = getRealtimeHubUrl();
     const newConnection = new HubConnectionBuilder()
-      .withUrl(HUB_URL)
+      .withUrl(hubUrl, {
+        accessTokenFactory: () => getToken() ?? "",
+      })
       .withAutomaticReconnect()
       .build();
 

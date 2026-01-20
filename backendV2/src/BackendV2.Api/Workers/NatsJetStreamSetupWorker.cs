@@ -68,7 +68,6 @@ public class NatsJetStreamSetupWorker : IHostedService
             var sc = StreamConfiguration.Builder()
                 .WithName(name)
                 .WithSubjects(subjects)
-                .WithMaxMsgsPerSubject(1)
                 .WithDiscardPolicy(DiscardPolicy.Old)
                 .Build();
             jsm.AddStream(sc);

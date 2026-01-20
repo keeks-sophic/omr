@@ -1,0 +1,23 @@
+Page: Traffic
+
+Concept:
+- Visualize live traffic overlays and per-robot schedule summaries
+- Debug conflicts, holds, and congestion; apply operator holds
+
+Accessible Functions:
+- Live map overlay: robot positions, planned routes, conflict zones
+- Visualize holds/stop windows and reservations; congestion heatmap
+- Per-robot schedule view: target velocity timeline; holds/release markers; compare target vs actual speed
+- Operator actions: request reroute; apply/remove temporary holds at node/path (role-based policy)
+
+Endpoints Used:
+- REST (implemented): GET /api/v1/traffic/conflicts, POST /api/v1/traffic/holds, DELETE /api/v1/traffic/holds/{holdId}
+- REST (planned): GET /api/v1/traffic/robots/{robotId}/schedule
+- REST (implemented, planning): POST /api/v1/routes/plan (for reroute requests via Task/Route flow)
+- Realtime Hub: /hubs/realtime
+- SignalR topics: traffic.overview.snapshot/updated, traffic.schedule.summary.updated, route.updated
+
+Backend Communication:
+- Auth via JWT; Planner/Admin may apply holds; Operators may request reroutes
+- REST for conflict queries and hold management
+- Subscribes to traffic overview and schedule summary topics; receives initial snapshot on subscribe

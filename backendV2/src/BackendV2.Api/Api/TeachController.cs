@@ -4,6 +4,7 @@ using BackendV2.Api.Dto.Teach;
 using BackendV2.Api.Service.Teach;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace BackendV2.Api.Api;
 

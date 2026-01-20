@@ -3,6 +3,7 @@ using BackendV2.Api.Contracts.Commands;
 using BackendV2.Api.Service.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace BackendV2.Api.Api;
 

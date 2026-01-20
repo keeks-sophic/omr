@@ -1,0 +1,28 @@
+Page: Missions (Teaching)
+
+Concept:
+- Record operator workflows as missions and manage mission library
+- Teach mode console for fine control and step capture with validation
+
+Accessible Functions:
+- Mission Library: list missions with versioning, tags, compatibility constraints
+- View mission steps: NAVIGATE, ACTUATE, WAIT, CALL_MISSION, ASSERT
+- Validate mission against robot capabilities and feature flags
+- Teach Mode Console: select robotId + map version; create/start/stop teach session
+- Fine control panel: micro-move; actuator step controls (hoist, telescope, grip, cam toggle, rotate if supported)
+- State capture: capture step with command + correlationId + settled state snapshot
+- Step editor: rename, reorder, add waits/asserts, add CALL_MISSION
+- Save mission: missionId, name, version, metadata
+- Run mission: creates a task referencing missionId; show execution trace
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/missions, PUT /api/v1/missions/{missionId}, POST /api/v1/missions/{missionId}/validate
+- REST (implemented): POST /api/v1/teach/sessions, POST /api/v1/teach/sessions/{teachSessionId}/start, POST /api/v1/teach/sessions/{teachSessionId}/stop, POST /api/v1/teach/sessions/{teachSessionId}/capture-step, POST /api/v1/teach/sessions/{teachSessionId}/save-mission
+- REST (planned): GET /api/v1/missions, GET /api/v1/missions/{missionId}, POST /api/v1/missions/{missionId}/clone, GET /api/v1/teach/sessions/{teachSessionId}
+- Realtime Hub: /hubs/realtime
+- SignalR topics: teach.session.started/stopped, teach.step.captured/updated, mission.created/updated
+
+Backend Communication:
+- Auth via JWT; Operator/Planner roles control availability of teach and mission functions
+- REST for teach session lifecycle and mission CRUD/validate
+- Subscribes to teach.session and mission.* topics for live updates and initial snapshots

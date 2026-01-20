@@ -1,0 +1,28 @@
+Page: Map
+
+Concept:
+- Versioned PostGIS-backed map management and editor
+- Manage nodes, paths, points, QR anchors, maintenance, and rest paths
+
+Accessible Functions:
+- List map versions and active version; clone and publish versions
+- Nodes: create/edit geometry and metadata; toggle maintenance
+- Paths: draw/edit geometry; set direction; speed limit; maintenance; mark as rest path; set capacity/dwell policy
+- Points: place and label pick/drop/charge points
+- QRs: add QR anchors; set qrCode and distanceAlongPath
+- Validation tools: connectivity checks, one-way violations, maintenance impact preview
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/maps, POST /api/v1/maps/{mapVersionId}/clone, POST /api/v1/maps/{mapVersionId}/publish
+- REST (implemented): POST /api/v1/maps/{mapVersionId}/nodes, PUT /api/v1/maps/{mapVersionId}/nodes/{nodeId}, PUT /api/v1/maps/{mapVersionId}/nodes/{nodeId}/maintenance
+- REST (implemented): POST /api/v1/maps/{mapVersionId}/paths, PUT /api/v1/maps/{mapVersionId}/paths/{pathId}, PUT /api/v1/maps/{mapVersionId}/paths/{pathId}/maintenance, PUT /api/v1/maps/{mapVersionId}/paths/{pathId}/rest
+- REST (implemented): POST /api/v1/maps/{mapVersionId}/points, PUT /api/v1/maps/{mapVersionId}/points/{pointId}
+- REST (implemented): POST /api/v1/maps/{mapVersionId}/qrs, PUT /api/v1/maps/{mapVersionId}/qrs/{qrId}
+- REST (planned): GET /api/v1/maps, GET /api/v1/maps/{mapVersionId}, GET /api/v1/maps/{mapVersionId}/nodes|paths|points|qrs, POST /api/v1/maps/{mapVersionId}/validate
+- Realtime Hub: /hubs/realtime
+- SignalR topics: map.version.created/published, map.entity.updated
+
+Backend Communication:
+- Auth via JWT; Planner/Admin roles required for map edits and publish
+- REST for versioning and entity CRUD; SignalR emits collaborative updates and snapshots
+- Map validation runs server-side; results returned via REST or realtime updates

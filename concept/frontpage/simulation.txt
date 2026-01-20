@@ -1,0 +1,22 @@
+Page: Simulation
+
+Concept:
+- Create production-like simulation sessions that mirror live behavior
+- Run controls and visualize status/events/metrics
+
+Accessible Functions:
+- Create simulation session: choose map version; create N simulated robots with capabilities/feature flags; load missions/tasks
+- Run controls: start, stop, pause, resume; adjust speed multiplier
+- Visualization: same traffic and robot views as production; event timeline
+- Outputs: throughput, average wait_time, congestion_penalty contributions; safety-stop counts (if simulated)
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/sim/sessions, POST /api/v1/sim/sessions/{simSessionId}/start, POST /api/v1/sim/sessions/{simSessionId}/stop, POST /api/v1/sim/sessions/{simSessionId}/pause, POST /api/v1/sim/sessions/{simSessionId}/resume
+- REST (planned): GET /api/v1/sim/sessions/{simSessionId}, GET /api/v1/sim/sessions/{simSessionId}/metrics
+- Realtime Hub: /hubs/realtime
+- SignalR topics: sim.session.status, sim.event, sim.metrics.updated
+
+Backend Communication:
+- Auth via JWT; role-based access controls simulation management
+- REST for session lifecycle; SignalR for status/events/metrics with initial snapshot
+- Sim robots are isolated by runtimeMode=SIM; never mixed with live robots

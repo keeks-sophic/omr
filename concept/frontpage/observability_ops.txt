@@ -1,0 +1,22 @@
+Page: Observability & Ops
+
+Concept:
+- Operational dashboards for health, alerts, audit, and log search
+- Monitor JetStream health, heartbeat/offline detection, fault distribution, and ACK performance
+
+Accessible Functions:
+- View backend health and JetStream metrics
+- View and filter ops alerts; acknowledge or clear (as supported)
+- View audit logs of privileged actions
+- Search logs across robots; export incident bundles (events + map version + mission version)
+
+Endpoints Used:
+- REST (implemented): GET /api/v1/ops/health, GET /api/v1/ops/jetstream, GET /api/v1/ops/alerts, GET /api/v1/ops/audit
+- REST (planned): GET /api/v1/robots/{robotId}/logs
+- Realtime Hub: /hubs/realtime
+- SignalR topics: ops.alert.raised/cleared, ops.jetstream.updated
+
+Backend Communication:
+- Auth via JWT; role-based access governs visibility and actions
+- REST for health/alerts/audit queries; realtime for streaming ops updates
+- Incident bundles generated server-side and offered for export via REST/download

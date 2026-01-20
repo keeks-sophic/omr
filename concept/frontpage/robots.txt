@@ -1,0 +1,25 @@
+Page: Robots
+
+Concept:
+- List and detail views for robots, including manual control and telemetry
+- Supports filtering by state and capabilities; hides unsupported controls
+
+Accessible Functions:
+- Filter robots by state/capabilities; search by robotId
+- View robot detail: state timeline, telemetry charts, localization, logs
+- Manual controls (Operator role): set mode (IDLE/MANUAL/PAUSED), discrete commands (grip, hoist, telescope, cam toggle, rotate if supported)
+- Safety controls: stop/pause task; clear fault (if policy allows)
+- View and update config (motion limits, runtime mode, feature flags)
+
+Endpoints Used:
+- REST (implemented): GET /api/v1/robots, GET /api/v1/robots/{robotId}, GET /api/v1/robots/{robotId}/session
+- REST (implemented): PUT /api/v1/robots/{robotId}/config/motion-limits, PUT /api/v1/robots/{robotId}/config/runtime-mode, PUT /api/v1/robots/{robotId}/config/feature-flags
+- REST (planned): GET /api/v1/robots/{robotId}/capabilities, GET /api/v1/robots/{robotId}/feature-flags, GET /api/v1/robots/{robotId}/state/history, GET /api/v1/robots/{robotId}/telemetry, GET /api/v1/robots/{robotId}/logs
+- REST (planned manual commands): POST /api/v1/robots/{robotId}/commands/mode|grip|hoist|telescope|cam-toggle|rotate
+- Realtime Hub: /hubs/realtime
+- SignalR topics: robot.session.updated, robot.state.snapshot/updated, robot.telemetry.snapshot/updated, robot.log.event, robot.config.updated
+
+Backend Communication:
+- Auth via JWT; role-based authorization enforces Operator/Admin for control endpoints
+- Subscribes to robots group and robot:{robotId}; receives initial snapshots for state and telemetry
+- UI hides controls not supported by RobotCapabilities or disabled by feature flags

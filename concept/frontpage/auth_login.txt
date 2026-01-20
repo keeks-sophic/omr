@@ -1,0 +1,21 @@
+Page: Auth & Login
+
+Concept:
+- Authenticate users and establish JWT-based sessions for REST and SignalR
+- Enforce role-based access (Admin, Planner, Operator, Viewer) across pages
+
+Accessible Functions:
+- Login with credentials to obtain JWT access token
+- Fetch current user profile/roles
+- Logout (planned) and token invalidation
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/auth/login, GET /api/v1/auth/me
+- REST (planned): POST /api/v1/auth/logout, /api/v1/admin/users/* (Admin-only)
+- Realtime Hub: /hubs/realtime (connect with access token)
+
+Backend Communication:
+- Sends credentials to login; receives access token; stores securely (e.g., memory + secure storage)
+- Attaches Authorization: Bearer <token> to all REST requests
+- Passes token on SignalR connect; authorization enforced on connect/group join and message delivery
+- Role and allowedRobotIds filter UI controls and subscriptions per page

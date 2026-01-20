@@ -1,0 +1,226 @@
+========================================================
+MODULE 01: DATABASE (POSTGRES + POSTGIS + TIMESCALEDB)
+========================================================
+
+Goal:
+- Use EF Core (Npgsql) as the only data access path
+- Separate “DB functions” (repositories / query services) into a dedicated folder
+- Keep modules isolated by schema (one schema per module)
+- Initialize PostGIS + TimescaleDB extensions and module schemas
+- Enforce Model -> DTO -> Mapper flow in the app layer
+- Use EF Core migrations for schema/table evolution (no EnsureCreated in production)
+
+Local Dev Connection String:
+- Host=localhost;Port=5432;Database=backsky;Username=postgres;Password=1234
+
+Recommended config pattern:
+- appsettings.json:
+  {
+    "ConnectionStrings": {
+      "Database": "Host=localhost;Port=5432;Database=backsky;Username=postgres;Password=1234"
+    }
+  }
+
+Note:
+- Keep this as dev-only; for production use environment variables / secret store
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (DB)
+--------------------------------------------------------
+
+backend/
+  Infrastructure/
+    Persistence/
+      AppDbContext.cs
+      Init/
+        DatabaseInitService.cs
+        DatabaseInitSql.cs
+
+  Modules/
+    Maps/
+      Model/
+        *.cs entity classes
+      Dto/
+        *.cs DTO classes
+      Mapping/
+        *Mapper.cs
+      Data/
+        *Repository.cs (DB functions for Maps module)
+      Persistence/
+        *EntityConfig.cs (IEntityTypeConfiguration<> per entity)
+        MapsDbSchema.cs (schema constants)
+
+    Robots/
+      Model/
+      Dto/
+      Mapping/
+      Data/
+      Persistence/
+        RobotsDbSchema.cs
+
+    Traffic/
+      Model/
+      Dto/
+      Mapping/
+      Data/
+      Persistence/
+        TrafficDbSchema.cs
+
+Rule:
+- All EF queries and saves live under Modules/*/Data (or Repositories)
+- All EF table mapping details (schema/table/index) live under Modules/*/Persistence
+
+
+--------------------------------------------------------
+EF Core Setup (Npgsql + NetTopologySuite)
+--------------------------------------------------------
+
+Startup wiring (C# idea):
+- builder.Services.AddDbContext<AppDbContext>(opt =>
+    opt.UseNpgsql(connectionString, npgsql => npgsql.UseNetTopologySuite()));
+
+Model conventions:
+- Prefer explicit entity configurations (IEntityTypeConfiguration<T>)
+- Put ToTable(tableName, schemaName) in the configuration so schema is explicit
+
+
+--------------------------------------------------------
+Schemas (one per module)
+--------------------------------------------------------
+
+Schema naming:
+- maps, robots, traffic, tasks, ops, replay, sim, config, auth
+
+Schema constants per module (example):
+
+namespace Backend.Modules.Maps.Persistence;
+
+public static class MapsDbSchema
+{
+    public const string Name = "maps";
+}
+
+Entity configuration example:
+
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace Backend.Modules.Maps.Persistence;
+
+public sealed class MapEntityConfig : IEntityTypeConfiguration<Map>
+{
+    public void Configure(EntityTypeBuilder<Map> builder)
+    {
+        builder.ToTable("maps", MapsDbSchema.Name);
+        builder.HasKey(x => x.Id);
+    }
+}
+
+Rule:
+- Never rely on the default schema for module entities
+
+
+--------------------------------------------------------
+Database Initialization (extensions + schemas)
+--------------------------------------------------------
+
+On app startup (recommended order):
+0) Ensure the database exists (dev only convenience)
+1) Ensure extensions exist (must happen BEFORE migrations that use PostGIS/Timescale types)
+2) Apply EF Core migrations (this creates schemas/tables/indexes)
+3) Run post-migration steps (Timescale hypertables, data backfills, idempotent upgrades)
+
+Core SQL (execute once / idempotent, pre-migration):
+- CREATE EXTENSION IF NOT EXISTS postgis;
+- CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+Timescale init pattern:
+- Create a normal table via EF migrations in a dedicated schema (e.g., ops.robot_telemetry_samples)
+- Convert it into hypertable after migrations:
+  SELECT create_hypertable('ops.robot_telemetry_samples', by_range('ts'), if_not_exists => TRUE);
+
+Where to put init logic:
+- Infrastructure/Persistence/Init/DatabaseInitService.cs as a hosted service
+- Keep SQL strings in Infrastructure/Persistence/Init/DatabaseInitSql.cs
+
+Rule:
+- EF Core migrations own schema/table/index creation and evolution
+- PostGIS/Timescale “enablement” happens before migrations
+- Hypertable conversion and other idempotent upgrades happen after migrations
+
+
+--------------------------------------------------------
+Schema Creation via EF Core (recommended)
+--------------------------------------------------------
+
+Goal:
+- Each module schema is created through EF Core migrations, not manual SQL.
+
+How it works:
+- Each entity configuration uses ToTable(tableName, schemaName).
+- The initial migration should include schema creation operations:
+  - migrationBuilder.EnsureSchema("maps");
+  - migrationBuilder.EnsureSchema("auth");
+  - migrationBuilder.EnsureSchema("robots");
+  - ...
+
+When adding a new module/schema:
+1) Add <ModuleName>DbSchema.cs constant (e.g., "traffic")
+2) Add the module entity configs using ToTable(..., "<schema>")
+3) Add a new migration:
+   - dotnet ef migrations add AddTrafficModule
+4) Update the database:
+   - dotnet ef database update
+
+Rule:
+- Do not rely on EnsureCreated for long-term evolution.
+- Prefer db.Database.Migrate() / MigrateAsync() at startup to apply migrations.
+
+
+--------------------------------------------------------
+EF Core Migrations (workflow)
+--------------------------------------------------------
+
+Recommended commands (local dev):
+- dotnet ef migrations add InitialCreate
+- dotnet ef database update
+
+Recommended runtime behavior:
+- On startup:
+  - Ensure extensions exist (PostGIS/Timescale)
+  - Apply db.Database.MigrateAsync()
+  - Run idempotent post-migration steps (hypertables, backfills)
+
+Rule:
+- Any one-off data migrations/backfills should be:
+  - idempotent
+  - tracked by a table or safe checks
+  - executed after migrations
+
+
+--------------------------------------------------------
+Data Flow Rule (Model -> DTO -> Mapper)
+--------------------------------------------------------
+
+Model:
+- EF Core entity classes only (persistence representation)
+- Lives under Modules/*/Model
+
+DTO:
+- Transport shape for API/SignalR (what the frontend sees)
+- Lives under Modules/*/Dto
+
+Mapper:
+- Pure conversions between Model and DTO
+- Lives under Modules/*/Mapping
+- No database calls inside mappers
+
+Repository / Data functions:
+- Query and save logic using AppDbContext
+- Lives under Modules/*/Data
+- Returns Model to services, or maps to DTO at the boundary (controller/hub)
+
+Boundaries:
+- Controllers and hubs should return DTOs only
+- Database layer should never depend on DTOs

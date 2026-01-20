@@ -1,0 +1,244 @@
+========================================================
+BACKENDV3 AUTH MODULE - IMPLEMENTATION NOTES
+========================================================
+
+Scope:
+- This document describes what is implemented in backendV3 Auth module,
+  how it is implemented, and how to maintain/scale it.
+
+Root folder:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3
+
+
+========================================================
+1) WHAT IS IMPLEMENTED
+========================================================
+
+1.1 Core authentication (JWT)
+- Login endpoint issues JWT access token with:
+  - sub (userId)
+  - unique_name (username)
+  - jti (token id)
+  - roles (one claim per role)
+- User registration endpoint creates an account with role Pending.
+- All endpoints require a non-pending role by default (global default/fallback policy).
+- “Me” endpoint returns current user identity and roles.
+- Logout revokes current token via jti so it can’t be reused.
+
+Implemented endpoints:
+- POST /api/v1/auth/login
+- POST /api/v1/auth/register
+- GET  /api/v1/auth/me
+- POST /api/v1/auth/logout
+
+Controllers:
+- Modules/Auth/Api/AuthController.cs
+
+
+1.2 Role-based access control (RBAC)
+- Centralized policies:
+  - Admin: requires role "Admin"
+  - Operator: requires "Operator" OR "Admin"
+  - Viewer: requires "Viewer" OR "Operator" OR "Admin"
+- Pending users:
+  - Can authenticate and obtain tokens
+  - Cannot access modules/endpoints protected by default policy
+  - Only “account-only” endpoints should allow Pending (me/logout)
+- Policies are defined in one place and referenced by modules.
+- Default and fallback policies enforce non-pending access by default.
+
+Security policy source:
+- Infrastructure/Security/AuthorizationPolicies.cs
+
+
+1.3 Admin user management (current implementation)
+- Admin-only endpoints to manage users and roles assignment:
+  - List users (+ roles)
+  - Get a user by id (+ roles)
+  - Create user
+  - Update user (display name, optional password, optional disable)
+  - Disable user
+  - Replace roles for user
+
+Implemented endpoints:
+- GET  /api/v1/admin/users
+- GET  /api/v1/admin/users/{userId}
+- POST /api/v1/admin/users
+- PUT  /api/v1/admin/users/{userId}
+- POST /api/v1/admin/users/{userId}/disable
+- POST /api/v1/admin/users/{userId}/roles
+
+Controller:
+- Modules/Auth/Api/AdminUsersController.cs
+
+
+1.4 Persistence (EF Core, per-module schema)
+- Postgres DB access via EF Core (Npgsql).
+- Auth data stored under schema: auth
+  - auth.users
+  - auth.roles
+  - auth.user_roles
+  - auth.revoked_tokens
+
+DbContext:
+- Infrastructure/Persistence/AppDbContext.cs
+
+Entity configurations:
+- Modules/Auth/Persistence/*.cs
+
+
+1.5 DB initialization + dev seeding
+- Startup initializer creates DB extensions and schemas:
+  - postgis
+  - timescaledb
+  - schemas including auth (and placeholders for other modules)
+- In Development:
+  - Ensures roles exist: Admin, Operator, Viewer
+  - Seeds 3 test users if database has no users
+
+Seed users (dev):
+- admin / admin123 (Admin)
+- operator / operator123 (Operator)
+- viewer / viewer123 (Viewer)
+
+Initializer and seed:
+- Infrastructure/Persistence/Init/DatabaseInitService.cs
+- Infrastructure/Persistence/Init/DatabaseInitSql.cs
+- Modules/Auth/Persistence/AuthSeed.cs
+
+
+1.6 Endpoint route constants
+- Central route constants for reuse:
+- Endpoints/ApiRoutes.cs
+
+
+========================================================
+2) HOW IT IS IMPLEMENTED
+========================================================
+
+2.1 Request pipeline (Program.cs)
+- ASP.NET Web app configured with:
+  - Controllers
+  - OpenAPI in Development
+  - EF Core DbContext with Npgsql + NetTopologySuite
+  - Authentication: JwtBearer
+  - Authorization: policies + fallback authenticated policy
+  - Hosted service: DatabaseInitService
+
+Key file:
+- Program.cs
+
+
+2.2 JWT authentication details
+- JWT validation parameters:
+  - Validate issuer and audience
+  - Validate signature using symmetric key
+  - RoleClaimType = "roles" so [Authorize(Policy=...)] can work with role claims
+  - NameClaimType = "unique_name"
+- Key source:
+  - Environment variable BACKENDV3_JWTKEY overrides appsettings Jwt:Key
+
+Files:
+- Infrastructure/Security/JwtOptions.cs
+- Infrastructure/Security/JwtTokenService.cs
+
+
+2.3 Token revocation (logout)
+- Logout stores jti into auth.revoked_tokens.
+- JwtBearer OnTokenValidated checks whether jti exists in revoked_tokens:
+  - if yes, the request is rejected.
+
+Files:
+- Infrastructure/Security/JwtBearerEventsFactory.cs
+- Modules/Auth/Data/TokenRepository.cs
+- Modules/Auth/Model/RevokedToken.cs
+
+
+2.4 Password storage
+- Passwords are hashed using PBKDF2-SHA256 with salt.
+- Stored format:
+  pbkdf2$sha256$<iterations>$<saltBase64>$<hashBase64>
+
+File:
+- Infrastructure/Security/PasswordHasher.cs
+
+
+2.5 Data layering (Model -> DTO -> Mapper)
+- Model (EF entities):
+  - Modules/Auth/Model/*.cs
+- DTO (API responses/requests):
+  - Modules/Auth/Dto/*.cs
+- Mapper:
+  - Modules/Auth/Mapping/UserMapper.cs
+- Controllers return DTOs (or small anonymous payloads for me/logout).
+
+
+2.6 Role storage and assignment strategy
+- Roles are stored in auth.roles table.
+- User-role relationship is many-to-many via auth.user_roles.
+- Admin role changes update user_roles for that user.
+
+Files:
+- Modules/Auth/Data/RoleRepository.cs
+- Modules/Auth/Persistence/UserRoleEntityConfig.cs
+
+
+========================================================
+3) HOW TO MAINTAIN AND SCALE
+========================================================
+
+3.1 Adding a new backend module
+- Default security already applies:
+  - because AuthorizationPolicies sets default + fallback policies requiring Viewer/Operator/Admin
+- For each new module endpoint:
+  - choose the smallest required policy (Viewer/Operator/Admin)
+  - add [Authorize(Policy = AuthorizationPolicies.<...>)] on write endpoints
+
+Why it scales:
+- Security logic is not duplicated per module.
+- Role inheritance is centralized in one file (AuthorizationPolicies.cs).
+
+
+3.2 Adding a new role in the future
+Recommended process:
+1) Insert role in auth.roles (via a seed step or admin endpoint).
+2) Decide where the new role fits in policy inheritance.
+3) Update AuthorizationPolicies.AddPolicies mapping.
+4) Issue tokens with the new role (already automatic because roles are read from DB at login).
+
+Optional improvement:
+- Add role management endpoints:
+  - GET/POST/DELETE /api/v1/admin/roles
+  - This makes role evolution self-service without DB manual edits.
+
+
+3.3 Scaling access management beyond RBAC
+If Viewer/Operator/Admin becomes too coarse, add one of:
+- Module-scoped policies:
+  - e.g., MapsEditor, TrafficOperator, OpsViewer
+- Permission claims:
+  - put "perm" claims in JWT (perm:maps.write, perm:traffic.write)
+  - policies then RequireClaim("perm", "maps.write")
+- Resource-based authorization:
+  - checks using entity ownership or scope (e.g., can edit only maps you created)
+
+The current structure supports this because:
+- Authentication is middleware-based
+- Authorization is policy-based and centralized
+
+
+3.4 Database evolution (recommended next step)
+Current implementation uses EnsureCreated for fast bootstrapping.
+For production-grade evolution:
+- Add EF Core migrations and replace EnsureCreated with Migrate
+- Keep schema creation and PostGIS/Timescale extension creation as idempotent SQL
+- Keep seed logic gated by environment
+
+
+3.5 Operational hardening checklist
+- Move Jwt:Key out of appsettings.json for production; use environment variables only.
+- Add refresh tokens if you need long-lived sessions.
+- Add audit logging for admin actions (create/update/roles/disable).
+- Add rate limiting / lockout for login to mitigate brute force.
+- Add uniqueness rules for username case-insensitive at DB level
+  (functional index on lower(username)) if needed.

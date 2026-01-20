@@ -1,0 +1,335 @@
+========================================================
+BACKENDV3 MAP MODULE - IMPLEMENTATION NOTES (MULTI-MAP)
+========================================================
+
+Scope:
+- This document describes what is implemented in backendV3 Map module,
+  how it is implemented, and how to maintain/scale it.
+
+Root folder:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3
+
+
+========================================================
+1) WHAT IS IMPLEMENTED
+========================================================
+
+1.1 Multi-map + versioned map storage (maps schema)
+- Module schema: maps
+- Logical model:
+  - Map = logical container (mapId)
+  - MapVersion = version history for one mapId
+- Entities (EF Core Model):
+  - Map
+  - MapVersion
+  - MapNode (junction)
+  - MapPath (edge between nodes)
+  - MapPoint (user-defined action point)
+  - QrAnchor (QR anchor along a path)
+- Geometry is stored in PostGIS using NetTopologySuite:
+  - nodes.location: geometry(Point, 0)
+  - paths.location: geometry(LineString, 0)
+  - points.location: geometry(Point, 0)
+  - qr_anchors.location: geometry(Point, 0) (derived)
+
+Key persistence fields:
+- maps.maps:
+  - MapId, Name (unique), UpdatedAt, ActiveMapVersionId
+- maps.map_versions:
+  - MapVersionId, MapId, Version (per-map), Status (DRAFT|PUBLISHED), PublishedAt
+
+Files:
+- Modules/Maps/Model/*.cs
+- Modules/Maps/Persistence/*.cs
+- Infrastructure/Persistence/AppDbContext.cs
+
+
+1.2 RBAC access control aligned with concept
+- Read endpoints: require Viewer policy (viewer/operator/admin)
+- Write endpoints: require Operator policy (operator/admin)
+- Pending users:
+  - are authenticated but blocked from module access by global default/fallback policy
+
+Files:
+- Infrastructure/Security/AuthorizationPolicies.cs
+- Modules/Maps/Api/MapsController.cs
+
+
+1.3 REST API endpoints aligned with multi-map frontend
+Base:
+- /api/v1/maps
+
+Maps (logical container)
+- POST   /api/v1/maps
+  - Create a new map (creates an initial DRAFT version internally)
+- GET    /api/v1/maps
+  - List maps (MapDto[])
+- GET    /api/v1/maps/{mapId}
+  - Get a map (MapDto)
+
+Versions (scoped to mapId)
+- GET    /api/v1/maps/{mapId}/versions
+  - List versions for a map (MapVersionDto[])
+- GET    /api/v1/maps/{mapId}/versions/{mapVersionId}
+  - Get version metadata (MapVersionDto)
+- GET    /api/v1/maps/{mapId}/draft                (Operator)
+  - Returns an editable DRAFT version:
+    - returns latest draft if exists
+    - otherwise clones from active/latest and returns the new draft
+- POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/clone   (Operator)
+  - Clone a version to a new DRAFT version
+- POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/publish (Operator)
+  - Publish a DRAFT:
+    - sets version Status=PUBLISHED
+    - updates maps.maps.ActiveMapVersionId
+
+Snapshot
+- GET    /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
+
+Entity CRUD (scoped to a version)
+Nodes:
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes/{nodeId}
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/nodes/{nodeId}/maintenance
+
+Paths:
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/paths
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}/maintenance
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/paths/{pathId}/rest
+
+Points:
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/points
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/points/{pointId}
+
+QR anchors:
+- GET/POST /api/v1/maps/{mapId}/versions/{mapVersionId}/qrs
+- PUT      /api/v1/maps/{mapId}/versions/{mapVersionId}/qrs/{qrId}
+
+Write rule:
+- All write endpoints reject edits if the target version is not an editable DRAFT.
+
+Primary controller:
+- Modules/Maps/Api/MapsController.cs
+
+Route constants:
+- Endpoints/ApiRoutes.cs (ApiRoutes.Maps.*)
+
+
+1.4 Save strategy (autosave + manual save without version explosion)
+- Autosave:
+  - Frontend calls per-entity endpoints after each edit action
+  - Writes update the current DRAFT version in-place (no new versions per action)
+- Manual save:
+  - Frontend batches diffs into multiple per-entity calls (one UX action)
+  - Optional future improvement: snapshot bulk upsert endpoint
+- Version creation is limited to:
+  - Create map
+  - Clone version
+  - Publish version
+
+Draft retention:
+- Server enforces a simple retention policy:
+  - keeps the newest 5 drafts per mapId (older drafts are deleted with their entities)
+
+Files:
+- Modules/Maps/Service/MapManagementService.cs
+
+
+1.5 SignalR map events (frontend streaming)
+- Hub path:
+  - /hubs/realtime
+- Event names:
+  - map.version.created
+  - map.version.published
+  - map.entity.updated
+- Payload includes mapId and mapVersionId:
+  - map.version.created:  { mapId, mapVersionId }
+  - map.version.published:{ mapId, mapVersionId }
+  - map.entity.updated:   { mapId, mapVersionId, entityType, id }
+
+Publisher:
+- Modules/Maps/Service/MapHubPublisher.cs
+
+Constants:
+- Realtime/SignalRRoutes.cs
+
+
+========================================================
+2) HOW IT IS IMPLEMENTED
+========================================================
+
+2.1 EF Core schema + geometry mapping
+- Schema constant:
+  - Modules/Maps/Persistence/MapsDbSchema.cs -> "maps"
+- Entity configurations:
+  - MapEntityConfig -> maps.maps
+  - MapVersionEntityConfig -> maps.map_versions
+  - MapNodeEntityConfig -> maps.map_nodes
+  - MapPathEntityConfig -> maps.map_paths
+  - MapPointEntityConfig -> maps.map_points
+  - QrAnchorEntityConfig -> maps.qr_anchors
+- Indexes:
+  - maps.maps: unique Name, UpdatedAt, ActiveMapVersionId
+  - map_versions: unique (MapId, Version), (MapId, Status), CreatedAt, PublishedAt
+  - Spatial GiST indexes on geometry columns (Location) for nodes/paths/points/qrs
+- NetTopologySuite is enabled in Program.cs via UseNetTopologySuite.
+
+Files:
+- Modules/Maps/Persistence/*EntityConfig.cs
+- Program.cs
+
+
+2.2 DTO boundary and mapping
+- DTOs use simple coordinate structures for frontend rendering:
+  - GeomDto: { x, y }
+  - PathDto includes Points: {x,y}[] derived from LineString coordinates
+- Multi-map DTOs:
+  - MapDto: MapId, Name, ActiveMapVersionId, UpdatedAt
+  - MapVersionDto: MapVersionId, MapId, Version, Status, PublishedAt
+- Model <-> DTO conversion lives in:
+  - Modules/Maps/Mapping/MapMappers.cs
+
+Files:
+- Modules/Maps/Dto/*.cs
+- Modules/Maps/Mapping/MapMappers.cs
+
+
+2.3 Service layer orchestration
+MapManagementService:
+- Implements multi-map operations:
+  - create map (+ initial draft version)
+  - list maps, get map
+  - list versions, get version
+  - get-or-create draft
+  - clone version
+  - publish version (per mapId)
+- Implements entity CRUD:
+  - create/update/list nodes, paths, points, qrs
+  - maintenance toggles for node/path
+  - rest options for path
+- Guards write operations:
+  - only editable DRAFT versions are writable
+  - published versions are read-only
+- Updates maps.maps.UpdatedAt on edits
+- Emits SignalR events via MapHubPublisher after writes
+
+MapSnapshotService:
+- Returns a read-optimized snapshot payload:
+  - version + nodes + paths + points + qrs
+- Validates that mapVersionId belongs to mapId
+
+Files:
+- Modules/Maps/Service/MapManagementService.cs
+- Modules/Maps/Service/MapSnapshotService.cs
+- Modules/Maps/Service/MapHubPublisher.cs
+
+
+2.4 Geometry strategy (current)
+- Path geometry:
+  - Frontend requests do not provide a polyline, so paths are stored as a straight LineString
+    between fromNode and toNode.
+  - lengthMeters is derived from that LineString and stored.
+- QR anchor location:
+  - qr_anchors.location is derived from distanceAlongPath by interpolating along the path geometry.
+- Node update side effects:
+  - When a node moves, any connected paths are recalculated (straight line between endpoints),
+    and QrAnchor locations for those paths are recalculated.
+
+Geometry helpers:
+- Modules/Maps/Service/MapGeometry.cs
+
+
+2.5 SignalR integration
+- Realtime hub mapped in Program.cs at /hubs/realtime.
+- MapHubPublisher broadcasts to all clients (no group scoping yet).
+- RealtimeHub contains a placeholder SendCommand method to keep parity with the existing hook.
+
+Files:
+- Program.cs
+- Realtime/RealtimeHub.cs
+- Realtime/SignalRRoutes.cs
+
+
+2.6 Database migration strategy (current)
+Current behavior:
+- DatabaseInitService uses EnsureCreated (fast bootstrap).
+- A custom, idempotent schema migration runs after EnsureCreated to support upgrades:
+  - adds maps.maps table if missing
+  - adds MapId/Status columns to maps.map_versions if missing
+  - backfills MapId/Status for legacy rows
+  - renumbers Version per map to avoid duplicates
+  - creates required indexes
+
+Files:
+- Infrastructure/Persistence/Init/DatabaseInitService.cs
+- Infrastructure/Persistence/Init/MapsMultiMapMigration.cs
+
+
+2.7 JWT roles claim mapping note (RBAC correctness)
+To ensure role claims ("roles") are preserved and [Authorize] policies work:
+- JwtSecurityTokenHandler.DefaultMapInboundClaims is disabled in Program.cs.
+
+Files:
+- Program.cs
+
+
+========================================================
+3) HOW TO MAINTAIN AND SCALE
+========================================================
+
+3.1 Adding polyline paths (recommended next step)
+Current limitation:
+- CreatePathRequest does not include points, so paths are straight.
+
+To support real polylines:
+- Extend CreatePathRequest/UpdatePathRequest to accept points: {x,y}[]
+- Map to a LineString with all coordinates (SRID 0)
+- Update PathDto points mapping remains unchanged (already outputs points)
+- Update QR interpolation to work with multi-segment LineStrings:
+  - walk segments until the target distance is reached
+
+
+3.2 Versioning and publish rules
+Current behavior:
+- Publishing is per-mapId:
+  - the published version is marked Status=PUBLISHED
+  - maps.maps.ActiveMapVersionId is updated
+  - published versions are treated as read-only (no edits)
+
+If you need stricter constraints:
+- Add validation:
+  - prevent publishing empty versions
+  - prevent publishing when there are maintenance-only nodes/paths if not allowed
+- Add soft delete or archival semantics for old versions
+
+
+3.3 Scaling event delivery
+Current behavior:
+- Broadcast to all clients.
+
+For scale:
+- Add group scoping by mapId/mapVersionId:
+  - join group "maps:{mapId}" or "maps:{mapVersionId}" when a client opens a map
+  - publish events to that group only
+- Keep event names centralized in Realtime/SignalRRoutes.cs
+
+
+3.4 DB evolution
+Current implementation uses EnsureCreated + a custom migration.
+For production:
+- Add EF Core migrations and switch to Migrate on startup
+- Keep PostGIS extension enablement as idempotent SQL
+- Keep schema creation in DatabaseInitSql as idempotent SQL
+
+
+3.5 Performance considerations
+- Add indexes as query patterns grow:
+  - map_nodes(mapVersionId)
+  - map_paths(mapVersionId)
+  - map_points(mapVersionId)
+  - qr_anchors(mapVersionId)
+- Prefer snapshots for large renders:
+  - one request to load all entities
+- Consider paging or bounding-box queries if maps become large.
+

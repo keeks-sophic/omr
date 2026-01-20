@@ -1,0 +1,21 @@
+Page: Replay
+
+Concept:
+- Incident review and playback of historical robot activity
+- Visualize robot state timeline, telemetry overlays, task events, traffic summaries, and logs
+
+Accessible Functions:
+- Create replay session: pick robotId, time window, playback speed
+- Controls: play, pause, seek
+- Views: state timeline, telemetry overlays (pose/motion), task events + route progress, traffic schedule/holds summaries, logs and fault explanations
+
+Endpoints Used:
+- REST (implemented): POST /api/v1/replay/sessions, POST /api/v1/replay/sessions/{replaySessionId}/start, POST /api/v1/replay/sessions/{replaySessionId}/stop, POST /api/v1/replay/sessions/{replaySessionId}/seek
+- REST (planned): GET /api/v1/replay/sessions/{replaySessionId}
+- Realtime Hub: /hubs/realtime
+- SignalR topics: replay.session.status, replay.event
+
+Backend Communication:
+- Auth via JWT; read-only access for Viewer and above
+- REST for session lifecycle; SignalR streams events; initial snapshot on subscribe
+- Replay data never publishes to live robot subjects; strictly read-only playback
