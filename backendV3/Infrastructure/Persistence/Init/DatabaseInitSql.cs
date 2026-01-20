@@ -7,8 +7,5 @@ public static class DatabaseInitSql
         "CREATE EXTENSION IF NOT EXISTS postgis;"
     };
 
-    public static readonly string[] Optional = new[]
-    {
-        "CREATE EXTENSION IF NOT EXISTS timescaledb;"
-    };
+    public static readonly string[] Optional = Array.Empty<string>();
 }

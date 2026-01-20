@@ -120,8 +120,8 @@ Protected:
 - /account
 
 Admin:
-- /admin/users (read-only list)
-- /admin/users/[userId] (read-only detail)
+- /admin/users (list + create user)
+- /admin/users/[userId] (detail + update user + disable + replace roles)
 
 Files:
 - app/(public)/login/page.tsx
@@ -143,6 +143,18 @@ Files:
 Files:
 - app/api/admin/users/route.ts
 - app/api/admin/users/[userId]/route.ts
+
+2.5.1 Admin API proxy (write)
+- POST /api/admin/users
+- PUT  /api/admin/users/[userId]
+- POST /api/admin/users/[userId]/disable
+- POST /api/admin/users/[userId]/roles
+
+Files:
+- app/api/admin/users/route.ts
+- app/api/admin/users/[userId]/route.ts
+- app/api/admin/users/[userId]/disable/route.ts
+- app/api/admin/users/[userId]/roles/route.ts
 
 2.6 Shared API client + routes + types
 - backend base URL env vars:
@@ -220,16 +232,13 @@ Files:
 4) KNOWN GAPS / NEXT IMPLEMENTATION STEPS
 ========================================================
 
-Admin writes (not implemented yet):
-- Disable user
-- Replace roles
-- Create user
-- Update user
+Admin writes:
+- Implemented for create user, update user, disable user, replace roles.
 
-Recommended approach:
-- Add Next.js route handlers under:
-  - app/api/admin/users/... (POST/PUT)
-- Add simple forms/buttons on the admin pages to call those routes.
+Remaining gaps (optional):
+- Improve error messages UX (map backend errors to friendly messages)
+- Add admin create/update validation (role combinations, required fields)
+- Add user delete/reenable (not supported by backend endpoints)
 
 
 ========================================================
@@ -243,4 +252,3 @@ Dev users (if backend seeds them):
 - admin / admin123
 - operator / operator123
 - viewer / viewer123
-

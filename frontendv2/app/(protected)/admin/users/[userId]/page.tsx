@@ -1,6 +1,7 @@
 import { ApiRoutes } from "@/lib/api/routes";
 import type { UserDto } from "@/lib/api/types";
 import { backendFetch } from "@/lib/api/backendClient";
+import AdminUserEditor from "@/components/admin-user-editor";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,8 @@ export default async function AdminUserDetailPage(props: { params: Promise<{ use
           <span className="font-medium">Disabled:</span> {user.isDisabled ? "true" : "false"}
         </div>
       </div>
+
+      <AdminUserEditor user={user} />
     </div>
   );
 }

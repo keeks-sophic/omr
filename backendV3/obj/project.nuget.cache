@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "DO2gyVwkK18=",
+  "dgSpecHash": "rHIkiAkSXV8=",
   "success": true,
-  "projectFilePath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\backendV3\\backendV3.csproj",
+  "projectFilePath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\backendv3\\backendV3.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\SA-SI-GFWP6G3\\.nuget\\packages\\humanizer.core\\2.14.1\\humanizer.core.2.14.1.nupkg.sha512",
     "C:\\Users\\SA-SI-GFWP6G3\\.nuget\\packages\\microsoft.aspnetcore.authentication.jwtbearer\\10.0.0\\microsoft.aspnetcore.authentication.jwtbearer.10.0.0.nupkg.sha512",

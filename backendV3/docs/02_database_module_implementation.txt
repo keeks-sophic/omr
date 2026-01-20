@@ -18,7 +18,7 @@ Root folder:
 1) CONNECTION STRING CONFIGURATION
 ========================================================
 
-Default config (dev):
+1.1 Default config (dev):
 - appsettings.json:
   - ConnectionStrings:Database
 
@@ -26,7 +26,13 @@ Example:
 - Host=localhost;Port=5432;Database=backsky;Username=postgres;Password=1234
 
 Environment overrides:
-- ConnectionStrings__Database
+Local-only .env workflow:
+- backendV3 loads backendV3/.env.local (and backendV3/.env) on startup if present.
+- .env.local is ignored by git; .env.example is committed as a template.
+
+Connection string rule:
+- Database connection is configured via appsettings.json/appsettings.Development.json (committed).
+- ConnectionStrings__Database is intentionally ignored to avoid accidental DB mismatches.
 
 Files:
 - appsettings.json
@@ -42,7 +48,7 @@ DatabaseInitService runs on startup and performs:
    - creates the database if it does not exist
 1) Ensure extensions exist (idempotent SQL)
    - required: PostGIS
-   - optional: TimescaleDB (skipped if not installed)
+   - timescaledb is currently disabled
 2) Apply EF Core migrations
    - db.Database.MigrateAsync()
 3) Post-migration upgrades (idempotent, safe to rerun)
@@ -86,9 +92,8 @@ Why extensions are created outside migrations:
 Required:
 - CREATE EXTENSION IF NOT EXISTS postgis;
 
-Optional:
-- CREATE EXTENSION IF NOT EXISTS timescaledb;
-  - skipped if the extension is not installed on the server
+TimescaleDB:
+- Currently ignored/disabled in backendV3 initialization.
 
 Files:
 - Infrastructure/Persistence/Init/DatabaseInitSql.cs
@@ -158,4 +163,3 @@ Runtime:
 - Timescale hypertables:
   - add post-migration hypertable conversions where needed
   - keep conversions idempotent and safe to rerun
-

@@ -22,11 +22,12 @@ public sealed class AdminUsersController : ControllerBase
         CancellationToken ct)
     {
         var list = await users.ListAsync(ct);
-        var dtos = await Task.WhenAll(list.Select(async u =>
+        var rolesMap = await rolesRepo.GetUserRolesMapAsync(list.Select(x => x.UserId).ToArray(), ct);
+        var dtos = list.Select(u =>
         {
-            var roles = await rolesRepo.GetUserRolesAsync(u.UserId, ct);
-            return UserMapper.ToDto(u, roles);
-        }));
+            rolesMap.TryGetValue(u.UserId, out var roles);
+            return UserMapper.ToDto(u, roles ?? Array.Empty<string>());
+        }).ToArray();
 
         return Ok(dtos);
     }

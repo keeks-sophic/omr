@@ -6,6 +6,23 @@ export type UserDto = {
   isDisabled: boolean;
 };
 
+export type AdminCreateUserRequest = {
+  username: string;
+  displayName: string;
+  password: string;
+  roles: string[];
+};
+
+export type AdminUpdateUserRequest = {
+  displayName: string;
+  password?: string | null;
+  isDisabled?: boolean | null;
+};
+
+export type AdminAssignRolesRequest = {
+  roles: string[];
+};
+
 export type LoginRequest = {
   username: string;
   password: string;
@@ -32,4 +49,3 @@ export type MeResponse = {
   username: string;
   roles: string[];
 };
-

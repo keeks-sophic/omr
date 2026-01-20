@@ -23,6 +23,20 @@ public sealed class RoleRepository
             .ToArrayAsync(ct);
     }
 
+    public async Task<Dictionary<Guid, string[]>> GetUserRolesMapAsync(IReadOnlyCollection<Guid> userIds, CancellationToken ct = default)
+    {
+        if (userIds.Count == 0) return new Dictionary<Guid, string[]>();
+
+        var pairs = await _db.UserRoles
+            .Where(ur => userIds.Contains(ur.UserId))
+            .Join(_db.Roles.AsNoTracking(), ur => ur.RoleId, r => r.RoleId, (ur, r) => new { ur.UserId, r.Name })
+            .ToListAsync(ct);
+
+        return pairs
+            .GroupBy(x => x.UserId)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Name).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToArray());
+    }
+
     public Task<List<Guid>> ResolveRoleIdsAsync(string[] roleNames, CancellationToken ct = default)
     {
         if (roleNames.Length == 0) return Task.FromResult(new List<Guid>());
@@ -30,4 +44,3 @@ public sealed class RoleRepository
         return _db.Roles.Where(r => names.Contains(r.Name)).Select(r => r.RoleId).ToListAsync(ct);
     }
 }
-

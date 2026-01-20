@@ -1,3 +1,4 @@
+using BackendV3.Infrastructure.Config;
 using BackendV3.Infrastructure.Persistence;
 using BackendV3.Infrastructure.Persistence.Init;
 using BackendV3.Infrastructure.Security;
@@ -10,6 +11,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
+
+DotEnv.Load();
+Environment.SetEnvironmentVariable("ConnectionStrings__Database", null);
 
 var builder = WebApplication.CreateBuilder(args);
 

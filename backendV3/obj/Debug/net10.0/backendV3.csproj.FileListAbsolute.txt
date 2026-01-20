@@ -190,3 +190,4 @@ C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\refi
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\backendV3.pdb
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\backendV3.genruntimeconfig.cache
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\ref\backendV3.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\appsettings.Development.json
