@@ -12,8 +12,7 @@ public sealed class MapEntityConfig : IEntityTypeConfiguration<Map>
         builder.HasKey(x => x.MapId);
         builder.Property(x => x.Name).IsRequired();
         builder.HasIndex(x => x.Name).IsUnique();
-        builder.HasIndex(x => x.ActiveMapVersionId);
-        builder.HasIndex(x => x.UpdatedAt);
+        builder.HasIndex(x => x.ActivePublishedMapVersionId);
+        builder.HasIndex(x => x.ArchivedAt);
     }
 }
-

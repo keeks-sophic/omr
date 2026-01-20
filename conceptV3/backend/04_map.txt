@@ -51,32 +51,53 @@ Schema:
 - maps
 
 Key concept:
-- A "Map" is a logical container (mapId).
-- A "MapVersion" is a specific published/draft state of that map.
+- A "Map" is the stable identity + human name (mapId).
+- A "MapVersion" is an immutable snapshot of the map content at a point in time.
+- All editable geometry/content is scoped to a MapVersionId.
+
+Why it can look "repeated" today:
+- Some fields can be stored on either Map or MapVersion (timestamps, "active" pointers).
+- Keeping them in both places can be convenient but introduces consistency work.
+- The structure below minimizes duplication while still keeping fast lookups.
 
 Entities (Model) and key fields:
 
-1) Map
+1) Map (logical container; minimal, stable)
 - mapId (uuid, PK)
-- name (text, unique)
-- createdBy (uuid)              // auth.users.userId
+- name (text, unique)                    // human identifier
+- createdBy (uuid)                       // auth.users.userId
 - createdAt (timestamptz)
-- updatedAt (timestamptz)
-- activeMapVersionId (uuid?)    // pointer to the published version
+- archivedAt (timestamptz?)              // optional soft-delete
+- activePublishedMapVersionId (uuid?)    // optional fast pointer (see notes)
 
-2) MapVersion
+2) MapVersion (content versioning; "history")
 - mapVersionId (uuid, PK)
 - mapId (uuid, FK -> maps.maps)
-- version (int)                 // increments per mapId
-- status (text)                 // DRAFT | PUBLISHED (recommended)
+- version (int)                          // increments per mapId (1..n)
+- status (text)                          // DRAFT | PUBLISHED
 - createdBy (uuid)
 - createdAt (timestamptz)
 - publishedAt (timestamptz?)
+- publishedBy (uuid?)                    // optional; often useful for audit
 - changeSummary (text?)
+- derivedFromMapVersionId (uuid?)        // lineage when cloning drafts
 
 Notes:
-- Only 1 version per mapId can be PUBLISHED at a time.
-- Multiple DRAFT versions can exist, but should be limited by retention rules (see autosave section).
+- Avoid storing "UpdatedAt" on maps.maps.
+  - It is derived from versions and content changes.
+  - If you want it for ordering, maintain it via application update or DB trigger.
+
+- "activePublishedMapVersionId" is optional:
+  - If present, it provides a very fast single-row lookup for map rendering.
+  - Without it, you can derive active published version by querying map_versions WHERE status='PUBLISHED'.
+  - If you keep the pointer, enforce it consistently during publish/unpublish.
+
+- Only 1 version per mapId can be PUBLISHED at a time:
+  - Recommended DB constraint: partial unique index on (mapId) WHERE status='PUBLISHED'
+
+- Draft naming:
+  - Do not store "name" on map_versions (name belongs to the map).
+  - If you need per-version labeling, add "label" text nullable to map_versions.
 
 3) MapNode (junction)
 - nodeId (uuid, PK)
@@ -177,8 +198,16 @@ DTOs (API/SignalR)
 MapDto
 - mapId
 - name
-- activeMapVersionId?
-- updatedAt
+- createdAt
+- archivedAt?
+- activePublishedMapVersionId?          // optional fast pointer (published)
+- updatedAt                            // derived for UX (not required to be stored)
+
+Notes:
+- MapDto.updatedAt should be derived for listing/sorting:
+  - simplest: MAX(map_versions.createdAt) for this mapId
+  - better: MAX(COALESCE(map_versions.publishedAt, map_versions.createdAt)) for this mapId
+  - if you need "last content change" semantics, update it on entity writes (app-side) or via triggers
 
 MapVersionDto
 - mapVersionId
@@ -187,7 +216,10 @@ MapVersionDto
 - status
 - createdAt
 - publishedAt
+- publishedBy?
 - changeSummary
+- derivedFromMapVersionId?
+- label?                               // optional UI label (not the map name)
 
 NodeDto
 - nodeId
@@ -230,6 +262,11 @@ Mapper rule:
 - DTO uses simple {x,y} for frontend
 - All conversions are in Modules/Maps/Mapping
 
+Mapper notes (when aligning to the DB structure above):
+- MapDto is not a 1:1 mapping of a single row if you expose updatedAt:
+  - updatedAt is derived (see MapDto notes)
+- MapVersionDto remains 1:1 with maps.map_versions (plus optional publishedBy/derivedFrom)
+
 
 --------------------------------------------------------
 REST Endpoints (multi-map, aligned for frontend)
@@ -262,7 +299,7 @@ Versions (scoped to mapId)
   Response: MapVersionDto
 
 - POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/clone
-  Body: { name? } or {}
+  Body: { label? } or {}
   Policy: Operator
   Response: MapVersionDto (new DRAFT)
   Emits SignalR: map.version.created
@@ -273,7 +310,7 @@ Versions (scoped to mapId)
   Response: { ok:true }
   Behavior:
   - sets this version to PUBLISHED
-  - updates maps.maps.activeMapVersionId to this mapVersionId
+  - updates maps.maps.activePublishedMapVersionId to this mapVersionId (if using pointer)
   Emits SignalR: map.version.published
 
 Draft convenience (recommended for editor UX)
@@ -282,7 +319,7 @@ Draft convenience (recommended for editor UX)
   Response: MapVersionDto
   Behavior:
   - returns the latest DRAFT for this mapId if exists
-  - otherwise clones the active version (or latest published) and returns the new DRAFT
+  - otherwise clones the active published version (or latest published) and returns the new DRAFT
 
 Snapshot
 - GET    /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
@@ -338,7 +375,7 @@ Repository / Service Responsibilities
 --------------------------------------------------------
 
 Repositories (Modules/Maps/Data):
-- MapRepository: create/list/get maps and activeMapVersionId updates
+- MapRepository: create/list/get maps and activePublishedMapVersionId updates (if used)
 - MapVersionRepository: create/clone/publish, list versions by mapId, get version
 - NodeRepository: create/update/list, maintenance toggle
 - PathRepository: create/update/list, maintenance toggle, rest options, speed limit
@@ -374,6 +411,7 @@ Important indexes:
 - maps.maps(name) unique
 - map_versions(mapId, version) unique
 - map_versions(mapId, status) (fast draft lookup)
+- map_versions(mapId) WHERE status='PUBLISHED' unique (enforce single published version)
 - map_nodes(mapVersionId)
 - map_paths(mapVersionId)
 - map_points(mapVersionId)
@@ -389,3 +427,24 @@ Constraints:
 - map_paths.fromNodeId and toNodeId must exist in same mapVersionId
 - qr_anchors.pathId must exist in same mapVersionId
 
+
+--------------------------------------------------------
+Recommended Indexes / Constraints (DB-first view)
+--------------------------------------------------------
+
+maps.maps
+- PK (mapId)
+- UNIQUE (name)
+- Optional INDEX (activePublishedMapVersionId)
+- Optional INDEX (archivedAt) for listing active vs archived
+
+maps.map_versions
+- PK (mapVersionId)
+- UNIQUE (mapId, version)
+- INDEX (mapId, status)                          // fast draft/published lookup
+- UNIQUE (mapId) WHERE status = 'PUBLISHED'      // enforce single published version
+- INDEX (createdAt), INDEX (publishedAt)
+
+Content tables (map_nodes/map_paths/map_points/qr_anchors)
+- INDEX (mapVersionId)
+- GIST INDEX (location) for geometry columns

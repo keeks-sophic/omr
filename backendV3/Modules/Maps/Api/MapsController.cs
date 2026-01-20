@@ -98,7 +98,8 @@ public sealed class MapsController : ControllerBase
         [FromServices] MapManagementService maps,
         CancellationToken ct)
     {
-        var ok = await maps.PublishVersionAsync(mapId, mapVersionId, req, ct);
+        var actor = MapManagementService.GetActorUserId(User);
+        var ok = await maps.PublishVersionAsync(mapId, mapVersionId, req, actor, ct);
         return ok ? Ok(new { ok = true }) : NotFound();
     }
 

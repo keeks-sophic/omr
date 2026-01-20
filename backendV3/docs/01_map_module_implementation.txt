@@ -34,9 +34,15 @@ Root folder:
 
 Key persistence fields:
 - maps.maps:
-  - MapId, Name (unique), UpdatedAt, ActiveMapVersionId
+  - MapId, Name (unique), CreatedAt
+  - ArchivedAt (nullable, soft-delete)
+  - ActivePublishedMapVersionId (nullable, pointer to published version)
+  - Note: "UpdatedAt" is derived from map_versions for API responses
 - maps.map_versions:
-  - MapVersionId, MapId, Version (per-map), Status (DRAFT|PUBLISHED), PublishedAt
+  - MapVersionId, MapId, Version (per-map), Status (DRAFT|PUBLISHED)
+  - PublishedAt, PublishedBy
+  - DerivedFromMapVersionId (nullable, clone lineage)
+  - Label (nullable, optional per-version UI label)
 
 Files:
 - Modules/Maps/Model/*.cs
@@ -81,7 +87,8 @@ Versions (scoped to mapId)
 - POST   /api/v1/maps/{mapId}/versions/{mapVersionId}/publish (Operator)
   - Publish a DRAFT:
     - sets version Status=PUBLISHED
-    - updates maps.maps.ActiveMapVersionId
+    - updates maps.maps.ActivePublishedMapVersionId
+    - sets map_versions.PublishedBy from the authenticated user
 
 Snapshot
 - GET    /api/v1/maps/{mapId}/versions/{mapVersionId}/snapshot
@@ -170,8 +177,12 @@ Constants:
   - MapPointEntityConfig -> maps.map_points
   - QrAnchorEntityConfig -> maps.qr_anchors
 - Indexes:
-  - maps.maps: unique Name, UpdatedAt, ActiveMapVersionId
-  - map_versions: unique (MapId, Version), (MapId, Status), CreatedAt, PublishedAt
+  - maps.maps: unique Name, ArchivedAt, ActivePublishedMapVersionId
+  - map_versions:
+    - unique (MapId, Version)
+    - (MapId, Status), CreatedAt, PublishedAt
+    - unique published constraint: (MapId) WHERE Status='PUBLISHED'
+    - PublishedBy, DerivedFromMapVersionId
   - Spatial GiST indexes on geometry columns (Location) for nodes/paths/points/qrs
 - NetTopologySuite is enabled in Program.cs via UseNetTopologySuite.
 
@@ -185,8 +196,14 @@ Files:
   - GeomDto: { x, y }
   - PathDto includes Points: {x,y}[] derived from LineString coordinates
 - Multi-map DTOs:
-  - MapDto: MapId, Name, ActiveMapVersionId, UpdatedAt
-  - MapVersionDto: MapVersionId, MapId, Version, Status, PublishedAt
+  - MapDto:
+    - MapId, Name, CreatedAt, ArchivedAt
+    - ActivePublishedMapVersionId
+    - UpdatedAt (derived from map_versions; used for UX sorting)
+  - MapVersionDto:
+    - MapVersionId, MapId, Version, Status
+    - CreatedAt, PublishedAt, PublishedBy
+    - ChangeSummary, DerivedFromMapVersionId, Label
 - Model <-> DTO conversion lives in:
   - Modules/Maps/Mapping/MapMappers.cs
 
@@ -211,7 +228,10 @@ MapManagementService:
 - Guards write operations:
   - only editable DRAFT versions are writable
   - published versions are read-only
-- Updates maps.maps.UpdatedAt on edits
+- Exposes MapDto.UpdatedAt as a derived value from map_versions (not stored on maps.maps)
+- Publishing updates:
+  - maps.maps.ActivePublishedMapVersionId
+  - map_versions.PublishedBy
 - Emits SignalR events via MapHubPublisher after writes
 
 MapSnapshotService:
@@ -253,13 +273,24 @@ Files:
 
 2.6 Database migration strategy (current)
 Current behavior:
-- DatabaseInitService uses EnsureCreated (fast bootstrap).
-- A custom, idempotent schema migration runs after EnsureCreated to support upgrades:
-  - adds maps.maps table if missing
-  - adds MapId/Status columns to maps.map_versions if missing
-  - backfills MapId/Status for legacy rows
-  - renumbers Version per map to avoid duplicates
-  - creates required indexes
+- DatabaseInitService runs required/optional init SQL, then:
+  - bootstraps __EFMigrationsHistory against an existing schema (EfMigrationsBootstrapper)
+  - applies EF Core migrations via db.Database.MigrateAsync
+  - runs a custom, idempotent schema migrator (MapsMultiMapMigration) for legacy upgrades:
+    - ensures maps.maps exists (older databases)
+    - ensures required columns exist on maps.map_versions
+    - relaxes legacy NOT NULL constraints on map_versions.Name / map_versions.IsActive
+    - backfills MapId/Status for legacy rows and renumbers Version per mapId
+    - updates maps.maps.ActivePublishedMapVersionId (or legacy ActiveMapVersionId if present)
+    - ensures required indexes exist (including unique published-per-map index)
+
+Recent migrations:
+- Infrastructure/Persistence/Migrations/*_MapsSchemaAlign.cs
+  - drops maps.maps.UpdatedAt
+  - renames ActiveMapVersionId -> ActivePublishedMapVersionId
+  - adds maps.maps.ArchivedAt
+  - adds map_versions.PublishedBy / DerivedFromMapVersionId / Label
+  - adds unique index: map_versions(MapId) WHERE Status='PUBLISHED'
 
 Files:
 - Infrastructure/Persistence/Init/DatabaseInitService.cs
@@ -294,8 +325,9 @@ To support real polylines:
 Current behavior:
 - Publishing is per-mapId:
   - the published version is marked Status=PUBLISHED
-  - maps.maps.ActiveMapVersionId is updated
+  - maps.maps.ActivePublishedMapVersionId is updated
   - published versions are treated as read-only (no edits)
+  - DB enforces only one published version per mapId via a partial unique index
 
 If you need stricter constraints:
 - Add validation:
@@ -316,9 +348,10 @@ For scale:
 
 
 3.4 DB evolution
-Current implementation uses EnsureCreated + a custom migration.
+Current implementation uses EF Core migrations on startup (MigrateAsync) plus an idempotent legacy migrator.
 For production:
-- Add EF Core migrations and switch to Migrate on startup
+- Keep migrations as the primary schema evolution mechanism
+- Keep legacy migration logic limited to backward-compatibility (old column names / constraints / backfills)
 - Keep PostGIS extension enablement as idempotent SQL
 - Keep schema creation in DatabaseInitSql as idempotent SQL
 
@@ -332,4 +365,3 @@ For production:
 - Prefer snapshots for large renders:
   - one request to load all entities
 - Consider paging or bounding-box queries if maps become large.
-

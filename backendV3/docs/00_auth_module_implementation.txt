@@ -71,6 +71,10 @@ Implemented endpoints:
 Controller:
 - Modules/Auth/Api/AdminUsersController.cs
 
+Note:
+- Admin list endpoint loads roles in one query to avoid DbContext concurrency errors.
+- RoleRepository exposes a bulk lookup (userId -> roles[]) used by AdminUsersController.List.
+
 
 1.4 Persistence (EF Core, per-module schema)
 - Postgres DB access via EF Core (Npgsql).
@@ -88,18 +92,19 @@ Entity configurations:
 
 
 1.5 DB initialization + dev seeding
-- Startup initializer creates DB extensions and schemas:
-  - postgis
-  - timescaledb
-  - schemas including auth (and placeholders for other modules)
+- Startup initializer ensures:
+  - database exists (dev convenience)
+  - PostGIS extension exists
+  - EF Core migrations are applied
 - In Development:
-  - Ensures roles exist: Admin, Operator, Viewer
-  - Seeds 3 test users if database has no users
+  - Ensures roles exist: Admin, Operator, Viewer, Pending
+  - Seeds 4 test users if database has no users
 
 Seed users (dev):
 - admin / admin123 (Admin)
 - operator / operator123 (Operator)
 - viewer / viewer123 (Viewer)
+- pending / pending123 (Pending)
 
 Initializer and seed:
 - Infrastructure/Persistence/Init/DatabaseInitService.cs
@@ -127,6 +132,11 @@ Initializer and seed:
 
 Key file:
 - Program.cs
+
+Configuration:
+- Database connection uses appsettings.json/appsettings.Development.json.
+- ConnectionStrings__Database is intentionally ignored to avoid accidental DB mismatches.
+- backendV3 loads backendV3/.env.local (and backendV3/.env) on startup if present.
 
 
 2.2 JWT authentication details
@@ -228,10 +238,14 @@ The current structure supports this because:
 
 
 3.4 Database evolution (recommended next step)
-Current implementation uses EnsureCreated for fast bootstrapping.
-For production-grade evolution:
-- Add EF Core migrations and replace EnsureCreated with Migrate
-- Keep schema creation and PostGIS/Timescale extension creation as idempotent SQL
+Current implementation uses EF Core migrations on startup:
+- db.Database.MigrateAsync() is called by DatabaseInitService.
+- Existing databases that were created without migrations are baselined by creating __EFMigrationsHistory
+  and marking known migrations as applied.
+
+For production hardening:
+- Apply migrations via deployment pipeline where needed
+- Keep PostGIS extension creation as idempotent SQL
 - Keep seed logic gated by environment
 
 

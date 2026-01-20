@@ -4,7 +4,7 @@ using Npgsql;
 
 namespace BackendV3.Infrastructure.Persistence.Init;
 
-public sealed class DatabaseInitService : BackgroundService
+public sealed class DatabaseInitService : IHostedService
 {
     private readonly IServiceProvider _services;
     private readonly IHostEnvironment _env;
@@ -19,12 +19,12 @@ public sealed class DatabaseInitService : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         var connString = _config.GetConnectionString("Database");
         if (!string.IsNullOrWhiteSpace(connString))
         {
-            await EnsureDatabaseExistsAsync(connString, stoppingToken);
+            await EnsureDatabaseExistsAsync(connString, cancellationToken);
         }
 
         await using var scope = _services.CreateAsyncScope();
@@ -32,14 +32,14 @@ public sealed class DatabaseInitService : BackgroundService
 
         foreach (var sql in DatabaseInitSql.Required)
         {
-            await db.Database.ExecuteSqlRawAsync(sql, stoppingToken);
+            await db.Database.ExecuteSqlRawAsync(sql, cancellationToken);
         }
 
         foreach (var sql in DatabaseInitSql.Optional)
         {
             try
             {
-                await db.Database.ExecuteSqlRawAsync(sql, stoppingToken);
+                await db.Database.ExecuteSqlRawAsync(sql, cancellationToken);
             }
             catch (PostgresException ex) when (ex.SqlState is "0A000" or "42704" or "58P01")
             {
@@ -47,15 +47,17 @@ public sealed class DatabaseInitService : BackgroundService
             }
         }
 
-        await EfMigrationsBootstrapper.EnsureHistoryMatchesExistingSchemaAsync(db, _logger, stoppingToken);
-        await db.Database.MigrateAsync(stoppingToken);
-        await MapsMultiMapMigration.ApplyAsync(db, _logger, stoppingToken);
+        await EfMigrationsBootstrapper.EnsureHistoryMatchesExistingSchemaAsync(db, _logger, cancellationToken);
+        await db.Database.MigrateAsync(cancellationToken);
+        await MapsMultiMapMigration.ApplyAsync(db, _logger, cancellationToken);
 
         if (_env.IsDevelopment())
         {
-            await AuthSeed.EnsureSeededAsync(db, scope.ServiceProvider, stoppingToken);
+            await AuthSeed.EnsureSeededAsync(db, scope.ServiceProvider, cancellationToken);
         }
     }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     private async Task EnsureDatabaseExistsAsync(string connectionString, CancellationToken ct)
     {

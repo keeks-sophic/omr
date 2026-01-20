@@ -125,8 +125,11 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<Guid?>("ActiveMapVersionId")
+                    b.Property<Guid?>("ActivePublishedMapVersionId")
                         .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -138,17 +141,14 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
                     b.HasKey("MapId");
 
-                    b.HasIndex("ActiveMapVersionId");
+                    b.HasIndex("ActivePublishedMapVersionId");
+
+                    b.HasIndex("ArchivedAt");
 
                     b.HasIndex("Name")
                         .IsUnique();
-
-                    b.HasIndex("UpdatedAt");
 
                     b.ToTable("maps", "maps");
                 });
@@ -304,11 +304,20 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("CreatedBy")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("DerivedFromMapVersionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Label")
+                        .HasColumnType("text");
+
                     b.Property<Guid>("MapId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTimeOffset?>("PublishedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("PublishedBy")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -321,7 +330,15 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("CreatedAt");
 
+                    b.HasIndex("DerivedFromMapVersionId");
+
+                    b.HasIndex("MapId")
+                        .IsUnique()
+                        .HasFilter("\"Status\" = 'PUBLISHED'");
+
                     b.HasIndex("PublishedAt");
+
+                    b.HasIndex("PublishedBy");
 
                     b.HasIndex("MapId", "Status");
 

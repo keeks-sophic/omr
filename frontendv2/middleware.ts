@@ -73,7 +73,13 @@ export function middleware(req: NextRequest) {
   const roles = getRoles(payload);
   const isAdminRoute = pathname.startsWith("/admin");
   const isAccountRoute = pathname.startsWith("/account");
+  const isMapsRoute = pathname.startsWith("/maps");
+  const isMapsWriteRoute =
+    pathname === "/maps/new" ||
+    pathname.endsWith("/edit") ||
+    pathname.includes("/edit/");
   const hasNonPendingRole = roles.some((r) => r === "Viewer" || r === "Operator" || r === "Admin");
+  const hasWriteRole = roles.some((r) => r === "Operator" || r === "Admin");
 
   if (isAdminRoute && !roles.includes("Admin")) {
     const url = req.nextUrl.clone();
@@ -90,10 +96,15 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   }
 
+  if (isMapsRoute && isMapsWriteRoute && !hasWriteRole) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/access-denied";
+    return NextResponse.redirect(url);
+  }
+
   return NextResponse.next();
 }
 
 export const config = {
   matcher: ["/((?!.*\\..*).*)"],
 };
-

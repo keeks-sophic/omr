@@ -15,7 +15,7 @@ public static class MapsMultiMapMigration
         try
         {
             await EnsureMapsTableAsync(conn, ct);
-            await EnsureMapVersionsColumnsAsync(conn, ct);
+            await EnsureMapVersionsColumnsAsync(conn, logger, ct);
 
             var hasName = await ColumnExistsAsync(conn, "maps", "map_versions", "Name", ct);
             var hasIsActive = await ColumnExistsAsync(conn, "maps", "map_versions", "IsActive", ct);
@@ -49,32 +49,67 @@ CREATE TABLE IF NOT EXISTS maps.maps (
     "Name" text NOT NULL,
     "CreatedBy" uuid NULL,
     "CreatedAt" timestamp with time zone NOT NULL,
-    "UpdatedAt" timestamp with time zone NOT NULL,
-    "ActiveMapVersionId" uuid NULL,
+    "ArchivedAt" timestamp with time zone NULL,
+    "ActivePublishedMapVersionId" uuid NULL,
     CONSTRAINT "PK_maps" PRIMARY KEY ("MapId")
 );
 """;
         await ExecuteAsync(conn, sql, ct);
     }
 
-    private static async Task EnsureMapVersionsColumnsAsync(NpgsqlConnection conn, CancellationToken ct)
+    private static async Task EnsureMapVersionsColumnsAsync(NpgsqlConnection conn, ILogger logger, CancellationToken ct)
     {
         await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ADD COLUMN IF NOT EXISTS "MapId" uuid;""", ct);
         await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ADD COLUMN IF NOT EXISTS "Status" text;""", ct);
+        await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ADD COLUMN IF NOT EXISTS "PublishedBy" uuid;""", ct);
+        await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ADD COLUMN IF NOT EXISTS "DerivedFromMapVersionId" uuid;""", ct);
+        await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ADD COLUMN IF NOT EXISTS "Label" text;""", ct);
+
+        if (await ColumnExistsAsync(conn, "maps", "map_versions", "Name", ct))
+        {
+            var before = await GetIsNullableAsync(conn, "maps", "map_versions", "Name", ct);
+            await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ALTER COLUMN "Name" DROP NOT NULL;""", ct);
+            var after = await GetIsNullableAsync(conn, "maps", "map_versions", "Name", ct);
+            logger.LogInformation("Maps migration: map_versions.Name is_nullable {Before} -> {After}", before, after);
+        }
+
+        if (await ColumnExistsAsync(conn, "maps", "map_versions", "name", ct))
+        {
+            var before = await GetIsNullableAsync(conn, "maps", "map_versions", "name", ct);
+            await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ALTER COLUMN "name" DROP NOT NULL;""", ct);
+            var after = await GetIsNullableAsync(conn, "maps", "map_versions", "name", ct);
+            logger.LogInformation("Maps migration: map_versions.name is_nullable {Before} -> {After}", before, after);
+        }
+
+        if (await ColumnExistsAsync(conn, "maps", "map_versions", "IsActive", ct))
+        {
+            var before = await GetIsNullableAsync(conn, "maps", "map_versions", "IsActive", ct);
+            await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ALTER COLUMN "IsActive" DROP NOT NULL;""", ct);
+            var after = await GetIsNullableAsync(conn, "maps", "map_versions", "IsActive", ct);
+            logger.LogInformation("Maps migration: map_versions.IsActive is_nullable {Before} -> {After}", before, after);
+        }
+
+        if (await ColumnExistsAsync(conn, "maps", "map_versions", "isactive", ct))
+        {
+            var before = await GetIsNullableAsync(conn, "maps", "map_versions", "isactive", ct);
+            await ExecuteAsync(conn, """ALTER TABLE maps.map_versions ALTER COLUMN "isactive" DROP NOT NULL;""", ct);
+            var after = await GetIsNullableAsync(conn, "maps", "map_versions", "isactive", ct);
+            logger.LogInformation("Maps migration: map_versions.isactive is_nullable {Before} -> {After}", before, after);
+        }
     }
 
     private static async Task EnsureMapIndexesAsync(NpgsqlConnection conn, CancellationToken ct)
     {
         await ExecuteAsync(conn, """CREATE UNIQUE INDEX IF NOT EXISTS "IX_maps_Name" ON maps.maps ("Name");""", ct);
-        await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_maps_ActiveMapVersionId" ON maps.maps ("ActiveMapVersionId");""", ct);
-        await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_maps_UpdatedAt" ON maps.maps ("UpdatedAt");""", ct);
+        await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_maps_ActivePublishedMapVersionId" ON maps.maps ("ActivePublishedMapVersionId");""", ct);
+        await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_maps_ArchivedAt" ON maps.maps ("ArchivedAt");""", ct);
     }
 
     private static async Task CreateMapsFromLegacyNamesAsync(NpgsqlConnection conn, CancellationToken ct)
     {
         var sql = """
-INSERT INTO maps.maps ("MapId", "Name", "CreatedAt", "UpdatedAt")
-SELECT gen_random_uuid_fallback(), mv."Name", MIN(mv."CreatedAt"), MAX(mv."CreatedAt")
+INSERT INTO maps.maps ("MapId", "Name", "CreatedAt")
+SELECT gen_random_uuid_fallback(), mv."Name", MIN(mv."CreatedAt")
 FROM maps.map_versions mv
 WHERE mv."MapId" IS NULL
 GROUP BY mv."Name"
@@ -106,8 +141,8 @@ WHERE mv."MapId" IS NULL AND m."Name" = mv."Name";
         await EnsureUuidFallbackFunctionAsync(conn, ct);
 
         var sql = """
-INSERT INTO maps.maps ("MapId", "Name", "CreatedAt", "UpdatedAt")
-SELECT gen_random_uuid_fallback(), ('Imported ' || mv."MapVersionId"::text), mv."CreatedAt", mv."CreatedAt"
+INSERT INTO maps.maps ("MapId", "Name", "CreatedAt")
+SELECT gen_random_uuid_fallback(), ('Imported ' || mv."MapVersionId"::text), mv."CreatedAt"
 FROM maps.map_versions mv
 WHERE mv."MapId" IS NULL;
 
@@ -162,35 +197,30 @@ WHERE mv."MapVersionId" = r."MapVersionId";
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_MapId_Status" ON maps.map_versions ("MapId", "Status");""", ct);
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_CreatedAt" ON maps.map_versions ("CreatedAt");""", ct);
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_PublishedAt" ON maps.map_versions ("PublishedAt");""", ct);
+        await ExecuteAsync(conn, """CREATE UNIQUE INDEX IF NOT EXISTS "IX_map_versions_MapId_PublishedUnique" ON maps.map_versions ("MapId") WHERE "Status" = 'PUBLISHED';""", ct);
     }
 
     private static async Task UpdateMapsPointersAsync(NpgsqlConnection conn, bool hasName, bool hasIsActive, CancellationToken ct)
     {
-        await ExecuteAsync(conn, """
-UPDATE maps.maps m
-SET "UpdatedAt" = COALESCE(x.max_created, m."UpdatedAt")
-FROM (
-    SELECT "MapId", MAX("CreatedAt") AS max_created
-    FROM maps.map_versions
-    GROUP BY "MapId"
-) x
-WHERE m."MapId" = x."MapId";
-""", ct);
+        var hasActivePublished = await ColumnExistsAsync(conn, "maps", "maps", "ActivePublishedMapVersionId", ct);
+        var hasActiveLegacy = await ColumnExistsAsync(conn, "maps", "maps", "ActiveMapVersionId", ct);
+        var targetColumn = hasActivePublished ? "ActivePublishedMapVersionId" : (hasActiveLegacy ? "ActiveMapVersionId" : null);
+        if (targetColumn == null) return;
 
         if (hasIsActive && hasName)
         {
-            await ExecuteAsync(conn, """
+            await ExecuteAsync(conn, $"""
 UPDATE maps.maps m
-SET "ActiveMapVersionId" = v."MapVersionId"
+SET "{targetColumn}" = v."MapVersionId"
 FROM maps.map_versions v
 WHERE v."MapId" = m."MapId" AND v."IsActive" = TRUE;
 """, ct);
             return;
         }
 
-        await ExecuteAsync(conn, """
+        await ExecuteAsync(conn, $"""
 UPDATE maps.maps m
-SET "ActiveMapVersionId" = v."MapVersionId"
+SET "{targetColumn}" = v."MapVersionId"
 FROM (
     SELECT DISTINCT ON ("MapId")
         "MapId",
@@ -245,6 +275,21 @@ SELECT EXISTS (
         cmd.Parameters.AddWithValue("column", column);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is bool b && b;
+    }
+
+    private static async Task<bool?> GetIsNullableAsync(NpgsqlConnection conn, string schema, string table, string column, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+SELECT is_nullable
+FROM information_schema.columns
+WHERE table_schema = @schema AND table_name = @table AND column_name = @column;
+""", conn);
+        cmd.Parameters.AddWithValue("schema", schema);
+        cmd.Parameters.AddWithValue("table", table);
+        cmd.Parameters.AddWithValue("column", column);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        if (result is not string s) return null;
+        return string.Equals(s, "YES", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task ExecuteAsync(NpgsqlConnection conn, string sql, CancellationToken ct)

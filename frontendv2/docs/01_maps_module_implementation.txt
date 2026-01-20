@@ -1,0 +1,216 @@
+========================================================
+FRONTENDV2 (NEXT.JS) - MAP MODULE IMPLEMENTATION NOTES
+========================================================
+
+Source plan:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\conceptV3\frontend\04_map_frontend_nextjs_plan.txt
+
+Auth dependency (must reuse):
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\frontendv2\docs\00_auth_module_implementation.txt
+
+Backend dependency:
+- BackendV3 API base: /api/v1
+- Maps base: /api/v1/maps
+
+
+========================================================
+1) WHAT SHOULD BE IMPLEMENTED (PLAN)
+========================================================
+
+1.1 Pages (multi-map)
+- /maps
+- /maps/new
+- /maps/[mapId]
+- /maps/[mapId]/versions
+- /maps/[mapId]/versions/[mapVersionId]
+- /maps/[mapId]/edit
+
+1.2 Access control
+- Read routes: Viewer/Operator/Admin
+- Write routes: Operator/Admin
+- Pending-only users redirected to /pending (middleware)
+- Unauthorized users redirected to /access-denied (middleware)
+
+1.3 API consumption
+- Use Next.js route handlers as a proxy to backend:
+  - browser calls Next.js /api/*
+  - Next.js attaches Authorization header from httpOnly cookie session
+
+1.4 Editor behavior
+- Edit in a draft version obtained via GET /maps/{mapId}/draft.
+- Autosave updates entities in the same draft version (no new versions per action).
+- Publish creates a new published version pointer.
+- Provide map plotting UI with right-side Properties panel for entity fields.
+
+1.5 Realtime (SignalR)
+- Consume realtime updates from /hubs/realtime for map events.
+
+
+========================================================
+2) WHAT HAS BEEN IMPLEMENTED (CURRENT STATE)
+========================================================
+
+2.1 Route protection (middleware)
+- /maps is treated as protected.
+- /maps/new and /maps/*/edit require Operator/Admin.
+
+File:
+- middleware.ts
+
+2.2 Pages
+- /maps: lists maps, provides links to Open / Versions / Edit, and Create map for Operator/Admin.
+  - app/(protected)/maps/page.tsx
+- /maps/new: create map form (Operator/Admin).
+  - app/(protected)/maps/new/page.tsx
+- /maps/[mapId]: view the published snapshot if activePublishedMapVersionId exists.
+  - app/(protected)/maps/[mapId]/page.tsx
+- /maps/[mapId]/versions: list version history.
+  - app/(protected)/maps/[mapId]/versions/page.tsx
+- /maps/[mapId]/versions/[mapVersionId]: view a specific version snapshot.
+  - app/(protected)/maps/[mapId]/versions/[mapVersionId]/page.tsx
+- /maps/[mapId]/edit: map plotting editor for the current draft.
+  - app/(protected)/maps/[mapId]/edit/page.tsx
+
+2.3 Map plotting UI (view + edit)
+- Viewer (read-only):
+  - components/maps/map-viewer.tsx
+- Editor (create/update in draft):
+  - components/maps/map-editor.tsx
+- Shared helpers:
+  - components/maps/geom.ts
+  - components/maps/types.ts
+
+2.4 Properties panel fields (editor)
+Node:
+- label
+- geom (x, y)
+- junctionSpeedLimit
+- isMaintenance toggle (maintenance endpoint)
+
+Path:
+- direction
+- speedLimit
+- isMaintenance toggle (maintenance endpoint)
+- rest settings:
+  - isRestPath toggle
+  - restCapacity
+  - restDwellPolicy
+
+Point:
+- type (PICK_DROP / CHARGE)
+- label
+- geom (x, y)
+- attachedNodeId (optional)
+
+QR:
+- qrCode
+- pathId
+- distanceAlongPath
+
+2.5 Next.js route handlers (proxy backend)
+Maps:
+- GET  /api/maps
+- POST /api/maps
+- GET  /api/maps/[mapId]
+- GET  /api/maps/[mapId]/draft
+- GET  /api/maps/[mapId]/versions
+- GET  /api/maps/[mapId]/versions/[mapVersionId]
+- GET  /api/maps/[mapId]/versions/[mapVersionId]/snapshot
+- POST /api/maps/[mapId]/versions/[mapVersionId]/clone
+- POST /api/maps/[mapId]/versions/[mapVersionId]/publish
+
+Draft entity writes:
+- POST /api/maps/[mapId]/versions/[mapVersionId]/nodes
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/nodes/[nodeId]
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/nodes/[nodeId]/maintenance
+
+- POST /api/maps/[mapId]/versions/[mapVersionId]/paths
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/paths/[pathId]
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/paths/[pathId]/maintenance
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/paths/[pathId]/rest
+
+- POST /api/maps/[mapId]/versions/[mapVersionId]/points
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/points/[pointId]
+
+- POST /api/maps/[mapId]/versions/[mapVersionId]/qrs
+- PUT  /api/maps/[mapId]/versions/[mapVersionId]/qrs/[qrId]
+
+Files:
+- app/api/maps/**/*
+
+2.6 Shared API routes + types
+- lib/api/routes.ts (backend paths)
+- lib/api/types.ts (DTOs and request payloads)
+
+DTO alignment notes:
+- MapDto now includes:
+  - createdAt, archivedAt, activePublishedMapVersionId, updatedAt (derived)
+- MapVersionDto now includes:
+  - publishedBy, derivedFromMapVersionId, label (optional)
+- Clone request body uses { label? } (not changeSummary)
+
+
+========================================================
+3) HOW IT IS IMPLEMENTED
+========================================================
+
+3.1 Read pages (Server Components)
+- Server components call backend directly using backendFetch():
+  - reads bk_at cookie server-side
+  - attaches Authorization: Bearer <token>
+
+Files:
+- lib/api/backendClient.ts
+- app/(protected)/maps/**/page.tsx
+
+3.2 Write actions (Client Components -> Next.js API -> Backend)
+- The editor runs in a client component and sends writes to Next.js:
+  - /api/maps/{...} route handlers forward to backend /api/v1/maps/{...}
+
+Files:
+- components/maps/map-editor.tsx
+- app/api/maps/**/*
+
+3.3 Draft flow
+- /maps/[mapId]/edit:
+  - GET backend /api/v1/maps/{mapId}/draft
+  - GET backend /api/v1/maps/{mapId}/versions/{draftVersionId}/snapshot
+  - client UI edits nodes/paths/points/qrs in that same draftVersionId
+
+3.4 Autosave vs manual save
+- Autosave toggle:
+  - ON: write happens immediately per change
+  - OFF: changes are queued and applied by "Save now"
+
+3.5 QR positioning
+- QR marker position is derived from:
+  - path polyline (PathDto.points), otherwise from/to node geoms
+  - distanceAlongPath (meters in backend coordinate space)
+
+3.6 Realtime (SignalR)
+- Map editor attempts to connect to:
+  - {NEXT_PUBLIC_BACKEND_BASE_URL}/hubs/realtime
+- It listens for "map.entity.updated" and reloads the snapshot for the current mapId/mapVersionId.
+
+Files:
+- lib/realtime/useSignalR.ts
+- components/maps/map-editor.tsx
+
+Note:
+- This requires backend to accept authentication for SignalR using the session strategy being used.
+
+
+========================================================
+4) LOCAL DEV NOTES
+========================================================
+
+Frontend:
+- Run: npm run dev
+
+Backend URL configuration:
+- NEXT_PUBLIC_BACKEND_BASE_URL (for browser-only features like SignalR)
+- BACKEND_BASE_URL (for server-side route handlers if needed)
+
+RBAC:
+- Viewer can view /maps and map versions.
+- Operator/Admin can use /maps/new and /maps/*/edit.

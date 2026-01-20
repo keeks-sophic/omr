@@ -16,5 +16,8 @@ public sealed class MapVersionEntityConfig : IEntityTypeConfiguration<MapVersion
         builder.HasIndex(x => new { x.MapId, x.Status });
         builder.HasIndex(x => x.CreatedAt);
         builder.HasIndex(x => x.PublishedAt);
+        builder.HasIndex(x => x.DerivedFromMapVersionId);
+        builder.HasIndex(x => x.PublishedBy);
+        builder.HasIndex(x => x.MapId).IsUnique().HasFilter("\"Status\" = 'PUBLISHED'");
     }
 }

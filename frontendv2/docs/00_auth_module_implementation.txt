@@ -135,16 +135,16 @@ Files:
 - app/(protected)/admin/users/[userId]/page.tsx
 - components/login-form.tsx
 - components/logout-button.tsx
+- components/admin-user-create-form.tsx
+- components/admin-user-editor.tsx
+- components/admin-role-selector.tsx
 
-2.5 Admin API proxy (read-only)
-- GET /api/admin/users
-- GET /api/admin/users/[userId]
+2.5 Admin API proxy (admin users)
+Read:
+- GET  /api/admin/users
+- GET  /api/admin/users/[userId]
 
-Files:
-- app/api/admin/users/route.ts
-- app/api/admin/users/[userId]/route.ts
-
-2.5.1 Admin API proxy (write)
+Write:
 - POST /api/admin/users
 - PUT  /api/admin/users/[userId]
 - POST /api/admin/users/[userId]/disable
@@ -218,22 +218,31 @@ Decisions:
 File:
 - middleware.ts
 
-3.4 Admin read pages and proxy endpoints
-- Admin pages call server-side backendFetch() directly (fast, secure):
-  - /admin/users -> backend GET /api/v1/admin/users
-  - /admin/users/[userId] -> backend GET /api/v1/admin/users/{userId}
+3.4 Admin users (read + write)
+Read (Server Components):
+- /admin/users -> backend GET /api/v1/admin/users
+- /admin/users/[userId] -> backend GET /api/v1/admin/users/{userId}
+
+Write (Client Components calling Next.js API):
+- Create user -> POST /api/admin/users
+- Update user -> PUT /api/admin/users/[userId]
+- Disable user -> POST /api/admin/users/[userId]/disable
+- Replace roles -> POST /api/admin/users/[userId]/roles
 
 Files:
 - app/(protected)/admin/users/page.tsx
 - app/(protected)/admin/users/[userId]/page.tsx
+- components/admin-user-create-form.tsx
+- components/admin-user-editor.tsx
+- app/api/admin/users/route.ts
+- app/api/admin/users/[userId]/route.ts
+- app/api/admin/users/[userId]/disable/route.ts
+- app/api/admin/users/[userId]/roles/route.ts
 
 
 ========================================================
 4) KNOWN GAPS / NEXT IMPLEMENTATION STEPS
 ========================================================
-
-Admin writes:
-- Implemented for create user, update user, disable user, replace roles.
 
 Remaining gaps (optional):
 - Improve error messages UX (map backend errors to friendly messages)
@@ -252,3 +261,4 @@ Dev users (if backend seeds them):
 - admin / admin123
 - operator / operator123
 - viewer / viewer123
+- pending / pending123

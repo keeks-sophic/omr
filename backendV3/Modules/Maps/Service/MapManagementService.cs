@@ -35,8 +35,8 @@ public sealed class MapManagementService
             Name = name,
             CreatedBy = createdBy,
             CreatedAt = now,
-            UpdatedAt = now,
-            ActiveMapVersionId = null
+            ArchivedAt = null,
+            ActivePublishedMapVersionId = null
         };
 
         var initial = new MapVersion
@@ -53,19 +53,44 @@ public sealed class MapManagementService
         _db.MapVersions.Add(initial);
         await _db.SaveChangesAsync(ct);
         await _hub.MapVersionCreatedAsync(map.MapId, initial.MapVersionId, ct);
-        return MapMappers.ToDto(map);
+        return MapMappers.ToDto(map, now);
     }
 
     public async Task<List<MapDto>> ListMapsAsync(CancellationToken ct)
     {
-        var list = await _db.Maps.AsNoTracking().OrderByDescending(x => x.UpdatedAt).ToListAsync(ct);
-        return list.Select(MapMappers.ToDto).ToList();
+        var list = await _db.Maps.AsNoTracking()
+            .Where(x => x.ArchivedAt == null)
+            .GroupJoin(
+                _db.MapVersions.AsNoTracking(),
+                m => m.MapId,
+                v => v.MapId,
+                (m, versions) => new
+                {
+                    Map = m,
+                    UpdatedAt = versions.Max(v => (DateTimeOffset?)(v.PublishedAt ?? v.CreatedAt)) ?? m.CreatedAt
+                })
+            .OrderByDescending(x => x.UpdatedAt)
+            .ToListAsync(ct);
+
+        return list.Select(x => MapMappers.ToDto(x.Map, x.UpdatedAt)).ToList();
     }
 
     public async Task<MapDto?> GetMapAsync(Guid mapId, CancellationToken ct)
     {
-        var map = await _db.Maps.AsNoTracking().FirstOrDefaultAsync(x => x.MapId == mapId, ct);
-        return map == null ? null : MapMappers.ToDto(map);
+        var row = await _db.Maps.AsNoTracking()
+            .Where(x => x.MapId == mapId)
+            .GroupJoin(
+                _db.MapVersions.AsNoTracking(),
+                m => m.MapId,
+                v => v.MapId,
+                (m, versions) => new
+                {
+                    Map = m,
+                    UpdatedAt = versions.Max(v => (DateTimeOffset?)(v.PublishedAt ?? v.CreatedAt)) ?? m.CreatedAt
+                })
+            .FirstOrDefaultAsync(ct);
+
+        return row == null ? null : MapMappers.ToDto(row.Map, row.UpdatedAt);
     }
 
     public async Task<List<MapVersionDto>?> ListVersionsAsync(Guid mapId, CancellationToken ct)
@@ -98,9 +123,9 @@ public sealed class MapManagementService
         if (existing != null) return MapMappers.ToDto(existing);
 
         MapVersion? source = null;
-        if (map.ActiveMapVersionId.HasValue)
+        if (map.ActivePublishedMapVersionId.HasValue)
         {
-            source = await _db.MapVersions.AsNoTracking().FirstOrDefaultAsync(x => x.MapId == mapId && x.MapVersionId == map.ActiveMapVersionId.Value, ct);
+            source = await _db.MapVersions.AsNoTracking().FirstOrDefaultAsync(x => x.MapId == mapId && x.MapVersionId == map.ActivePublishedMapVersionId.Value, ct);
         }
 
         if (source == null)
@@ -134,6 +159,7 @@ public sealed class MapManagementService
 
         var now = DateTimeOffset.UtcNow;
         var nextVersion = (await _db.MapVersions.AsNoTracking().Where(x => x.MapId == mapId).MaxAsync(x => (int?)x.Version, ct) ?? 0) + 1;
+        var label = (req.Label ?? req.Name ?? string.Empty).Trim();
         var mv = new MapVersion
         {
             MapVersionId = Guid.NewGuid(),
@@ -141,7 +167,9 @@ public sealed class MapManagementService
             Version = nextVersion,
             Status = MapVersionStatuses.Draft,
             CreatedBy = createdBy,
-            CreatedAt = now
+            CreatedAt = now,
+            DerivedFromMapVersionId = src.MapVersionId,
+            Label = string.IsNullOrWhiteSpace(label) ? null : label
         };
         _db.MapVersions.Add(mv);
 
@@ -214,14 +242,13 @@ public sealed class MapManagementService
             });
         }
 
-        await TouchMapUpdatedAtAsync(mapId, now, ct);
         await _db.SaveChangesAsync(ct);
         await EnforceDraftRetentionAsync(mapId, ct);
         await _hub.MapVersionCreatedAsync(mapId, mv.MapVersionId, ct);
         return MapMappers.ToDto(mv);
     }
 
-    public async Task<bool> PublishVersionAsync(Guid mapId, Guid mapVersionId, PublishMapRequest req, CancellationToken ct)
+    public async Task<bool> PublishVersionAsync(Guid mapId, Guid mapVersionId, PublishMapRequest req, Guid? publishedBy, CancellationToken ct)
     {
         var map = await _db.Maps.FirstOrDefaultAsync(x => x.MapId == mapId, ct);
         if (map == null) return false;
@@ -238,10 +265,10 @@ public sealed class MapManagementService
 
         mv.Status = MapVersionStatuses.Published;
         mv.PublishedAt = DateTimeOffset.UtcNow;
+        mv.PublishedBy = publishedBy;
         mv.ChangeSummary = req.ChangeSummary;
 
-        map.ActiveMapVersionId = mapVersionId;
-        map.UpdatedAt = DateTimeOffset.UtcNow;
+        map.ActivePublishedMapVersionId = mapVersionId;
 
         await _db.SaveChangesAsync(ct);
         await _hub.MapVersionPublishedAsync(mapId, mapVersionId, ct);
@@ -595,9 +622,7 @@ public sealed class MapManagementService
 
     private async Task TouchMapUpdatedAtAsync(Guid mapId, DateTimeOffset now, CancellationToken ct)
     {
-        var map = await _db.Maps.FirstOrDefaultAsync(x => x.MapId == mapId, ct);
-        if (map == null) return;
-        map.UpdatedAt = now;
+        await Task.CompletedTask;
     }
 
     private async Task EnforceDraftRetentionAsync(Guid mapId, CancellationToken ct)

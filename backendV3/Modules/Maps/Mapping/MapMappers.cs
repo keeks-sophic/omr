@@ -5,14 +5,16 @@ namespace BackendV3.Modules.Maps.Mapping;
 
 public static class MapMappers
 {
-    public static MapDto ToDto(Map m)
+    public static MapDto ToDto(Map m, DateTimeOffset updatedAt)
     {
         return new MapDto
         {
             MapId = m.MapId,
             Name = m.Name,
-            ActiveMapVersionId = m.ActiveMapVersionId,
-            UpdatedAt = m.UpdatedAt
+            CreatedAt = m.CreatedAt,
+            ArchivedAt = m.ArchivedAt,
+            ActivePublishedMapVersionId = m.ActivePublishedMapVersionId,
+            UpdatedAt = updatedAt
         };
     }
 
@@ -26,7 +28,10 @@ public static class MapMappers
             Status = v.Status,
             CreatedAt = v.CreatedAt,
             PublishedAt = v.PublishedAt,
-            ChangeSummary = v.ChangeSummary
+            PublishedBy = v.PublishedBy,
+            ChangeSummary = v.ChangeSummary,
+            DerivedFromMapVersionId = v.DerivedFromMapVersionId,
+            Label = v.Label
         };
     }
 
