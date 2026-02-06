@@ -1,0 +1,250 @@
+========================================================
+BACKENDV3 LOGGING MODULE - IMPLEMENTATION NOTES (LOCAL DEV)
+========================================================
+
+Scope:
+- This document describes what is implemented in backendV3 Logging module,
+  how it is implemented, and how to maintain/scale it.
+
+Root folder:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3
+
+
+========================================================
+1) WHAT IS IMPLEMENTED
+========================================================
+
+1.1 Serilog logging pipeline (console + rolling files)
+- Logging is enabled at host startup via Serilog.
+- Logs are written to:
+  - Console output (dotnet run terminal)
+  - Rolling file logs under a configurable directory
+- Rolling strategy:
+  - daily rolling files
+  - keep last 14 files (days)
+- Formats:
+  - jsonl (one JSON object per line) for machine-friendly logs
+  - text (.log) for human-friendly logs
+
+Configuration (dotenv/env vars):
+- BACKENDV3_LOG_DIR
+  - default: ./logs
+- BACKENDV3_LOG_FORMAT
+  - jsonl | text
+  - default: jsonl
+- BACKENDV3_LOG_LEVEL
+  - Verbose|Debug|Information|Warning|Error|Fatal
+  - default: Information
+
+Bootstrap:
+- Infrastructure/Logging/LoggingBootstrap.cs
+- Program.cs calls LoggingBootstrap.Configure(builder.Host)
+
+1.1.1 Dotenv file location (local dev)
+- Place dotenv files in the backendV3 root folder (same folder as backendV3.csproj):
+  - backendV3/.env.local (preferred)
+  - backendV3/.env
+- backendV3 loads them at startup (DotEnv.Load()).
+
+
+1.2 Correlation id propagation (HTTP)
+- The backend accepts an inbound header:
+  - x-correlation-id
+- If missing, the backend generates a correlation id and returns it in response headers.
+- Correlation id is attached to the request scope so all logs for that request share it.
+
+Implementation:
+- Infrastructure/Logging/CorrelationIds.cs
+
+
+1.3 API request logging middleware
+- Logs all API requests with:
+  - start event: method + path
+  - end event: statusCode + durationMs
+  - exception event: exception + durationMs
+- Adds scope fields:
+  - correlationId, requestId, method, path, route (when available), userId (when available), roles (when available)
+
+Implementation:
+- Infrastructure/Logging/RequestLoggingMiddleware.cs
+- Program.cs adds middleware in pipeline
+
+
+1.4 SignalR hub invocation logging filter
+- Logs all hub method invocations:
+  - start event: hub method name
+  - end event: durationMs
+  - failed event: exception + durationMs
+- Adds scope fields:
+  - correlationId (if HttpContext exists), connectionId, hub, method, userId, roles
+
+Implementation:
+- Infrastructure/Logging/SignalRLoggingFilter.cs
+- Registered via DI as IHubFilter in Program.cs
+
+
+1.5 Event naming catalog (constants)
+- Centralized event strings exist to avoid ad-hoc names.
+- Current categories:
+  - api.*, db.*, signalr.*, nats.*
+
+Implementation:
+- Infrastructure/Logging/LogEvents.cs
+
+1.6 Logging module file structure (implemented)
+Core:
+- Infrastructure/Logging/LoggingBootstrap.cs
+- Infrastructure/Logging/RequestLoggingMiddleware.cs
+- Infrastructure/Logging/CorrelationIds.cs
+- Infrastructure/Logging/LogEvents.cs
+- Infrastructure/Logging/SignalRLoggingFilter.cs
+
+Placeholders for future integration:
+- Infrastructure/Logging/EfCoreLogging.cs
+- Infrastructure/Logging/NatsLogging.cs
+
+
+========================================================
+2) HOW IT IS IMPLEMENTED
+========================================================
+
+2.1 Packages
+- Serilog packages added to backendV3.csproj:
+  - Serilog.AspNetCore
+  - Serilog.Sinks.File
+
+File:
+- backendV3.csproj
+
+
+2.2 Bootstrapping (single place for sinks)
+- LoggingBootstrap:
+  - reads env vars
+  - ensures log directory exists
+  - configures console + file sinks
+  - configures minimum levels
+
+File:
+- Infrastructure/Logging/LoggingBootstrap.cs
+
+
+2.3 Request scope and correlation ids
+- CorrelationIds.GetOrCreate(ctx) is called by request middleware and SignalR filter.
+- For HTTP requests, it also sets the response header x-correlation-id.
+
+File:
+- Infrastructure/Logging/CorrelationIds.cs
+
+
+2.4 Middleware wiring order
+Current pipeline order in Program.cs:
+- UseCors
+- UseAuthentication
+- RequestLoggingMiddleware
+- UseAuthorization
+
+Notes:
+- Logging middleware runs after authentication so userId/roles are available when present.
+- It runs before authorization so 401/403 can still be logged with request context.
+
+File:
+- Program.cs
+
+
+2.5 SignalR filter wiring
+- SignalRLoggingFilter is registered as:
+  - IHubFilter (singleton)
+- This applies the filter to all hubs created by SignalR.
+
+File:
+- Program.cs
+
+
+========================================================
+3) HOW TO USE (LOCAL DEV)
+========================================================
+
+3.1 Recommended dotenv file
+Create backendV3/.env.local:
+BACKENDV3_LOG_DIR=./logs
+BACKENDV3_LOG_FORMAT=jsonl
+BACKENDV3_LOG_LEVEL=Information
+
+3.2 Where to find logs
+- Console:
+  - the terminal where dotnet run is executed
+- Files:
+  - open files under ./logs
+  - daily files are named:
+    - backendV3-YYYYMMDD.jsonl
+    - backendV3-YYYYMMDD.log
+
+3.2.1 Verified output (example)
+- A local run produced:
+  - backendV3/logs/backendV3-20260121.jsonl
+- It contains:
+  - startup logs
+  - EF Core command logs (when enabled by framework categories)
+  - request logs from RequestLoggingMiddleware:
+    - api.request.start
+    - api.request.end
+
+3.3 Make logs quieter/louder
+- Debugging:
+  - BACKENDV3_LOG_LEVEL=Debug
+- Quiet mode:
+  - BACKENDV3_LOG_LEVEL=Error
+- Almost off:
+  - BACKENDV3_LOG_LEVEL=Fatal
+
+3.4 Search strategy
+- Use correlation id to connect logs from one action:
+  - request start/end
+  - DB work (when logged)
+  - SignalR publishes/invocations (when logged)
+
+
+========================================================
+4) MAINTENANCE + SCALING
+========================================================
+
+4.1 Add module-specific events
+- Keep cross-cutting events in Infrastructure/Logging/LogEvents.cs.
+- For new modules, define module-specific events as constants in:
+  - Modules/<ModuleName>/Logging/<ModuleName>LogEvents.cs
+- Use event namespaces:
+  - module.<ModuleName>.*
+
+4.2 Avoid duplicate exception logs
+- Log exceptions once at the boundary:
+  - API controller boundary
+  - service boundary
+  - worker boundary
+- Avoid logging and rethrowing at every layer.
+
+4.3 Future additions (placeholders)
+- EF Core detailed logging hooks can be centralized under:
+  - Infrastructure/Logging/EfCoreLogging.cs
+- NATS logging hooks can be centralized under:
+  - Infrastructure/Logging/NatsLogging.cs
+
+
+========================================================
+5) FILES (IMPLEMENTATION MAP)
+========================================================
+
+Core:
+- Infrastructure/Logging/LoggingBootstrap.cs
+- Infrastructure/Logging/RequestLoggingMiddleware.cs
+- Infrastructure/Logging/CorrelationIds.cs
+- Infrastructure/Logging/LogEvents.cs
+- Infrastructure/Logging/SignalRLoggingFilter.cs
+
+Placeholders:
+- Infrastructure/Logging/EfCoreLogging.cs
+- Infrastructure/Logging/NatsLogging.cs
+
+Wiring:
+- Program.cs
+- backendV3.csproj
+

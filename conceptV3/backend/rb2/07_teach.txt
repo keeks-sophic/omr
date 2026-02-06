@@ -1,0 +1,359 @@
+========================================================
+MODULE 07: TEACH (MISSION AUTHORING + NESTED MISSIONS)
+========================================================
+
+Goal:
+- Provide a backend module that lets operators teach robots and create reusable Missions.
+- Store mission steps and robot state snapshots (pose + actuator positions) for future use.
+- Support nested missions (missionRef) with cycle detection and versioning.
+- Execute missions through Task module (Task assigns mission to robot).
+- Control robots only through Robot Link module:
+  - conceptV3/backend/06_robot_link.txt
+
+Non-goals:
+- Direct robot NATS publish/subscribe from Teach (Robot Link owns robot transport boundary).
+- Implementing route planning or traffic reservation logic (owned by Route/Traffic).
+- Implementing low-level motor control (owned by robot runtime).
+
+
+--------------------------------------------------------
+Module Boundary (Teach owns)
+--------------------------------------------------------
+Teach owns:
+- Mission authoring:
+  - create/update drafts
+  - publish/archive lifecycle
+  - versioning
+  - nested missions (missionRef)
+- Teach sessions:
+  - start/stop teach mode on a robot (through Robot Link)
+  - capture robot snapshots for teach points and step parameters
+- Mission validation before publish:
+  - validate required capabilities and limits using Robot Link state (identity/capabilities/settings)
+- Mission execution history:
+  - store mission runs, preferably linked to Task module taskId
+
+Teach does not own:
+- Robot connectivity and message transport (Robot Link).
+- Task assignment state machine (Task module).
+- Route graph and ETA travel-time calculations (Route module).
+- Traffic locks and time-window scheduling (Traffic module).
+
+
+--------------------------------------------------------
+Inputs / Outputs (how Teach communicates)
+--------------------------------------------------------
+REST API (frontend -> Teach):
+- Mission:
+  - list/get missions and versions
+  - create/update draft missions
+  - publish/archive
+- Teach sessions:
+  - create/start/stop session
+  - create teach points from robot snapshots
+  - list/get recorded points/snapshots
+- Execution history:
+  - list/get mission execution records
+
+SignalR (Teach -> frontend live view):
+- teach.session.updated
+- teach.point.created
+- teach.mission.updated
+- teach.execution.updated
+
+Internal calls (preferred):
+- Teach -> Robot Link:
+  - send teach control commands (set mode, jog, go-to pose, request snapshot)
+  - read latest robot state/capabilities/settings for validation
+- Teach -> Task:
+  - request mission execution by creating a task that references missionId/version
+- Teach -> Traffic (optional, recommended):
+  - acquire/heartbeat/release teach lock during teach sessions
+
+
+--------------------------------------------------------
+Robot Control (Teach via Robot Link)
+--------------------------------------------------------
+Rule:
+- Teach never publishes robot subjects directly.
+- Teach calls RobotLinkService to send teach control messages and receive teach state/snapshots.
+
+Teach control examples (concept):
+- setTeachMode(TEACH|MANUAL|AUTO)
+- jog(axis, direction, speed)
+- goToPose(x, y, heading)
+- requestSnapshot()
+- stop()
+
+Teach snapshot rule:
+- Saved teach point state is capability-driven:
+  - always include pose (x, y, heading/facing direction)
+  - include actuator positions only if the robot has those axes (hoist/rotate/telescope/etc.)
+
+
+--------------------------------------------------------
+Mission Concepts
+--------------------------------------------------------
+Mission:
+- A reusable recipe for robot work, composed of ordered steps.
+- Missions are versioned. Published missions are immutable.
+- Missions can reference other missions (nested missions) via missionRef steps.
+
+Mission step types (concept):
+- moveToPoint
+- rotate
+- hoist
+- telescope
+- grip
+- wait
+- missionRef (nested mission)
+
+Nested mission rules:
+- missionRef steps reference a specific missionId + version (published versions).
+- Publishing a mission must reject cycles across missionRef references.
+- Execution expansion depth must be bounded (max depth) to keep replay safe and predictable.
+
+
+--------------------------------------------------------
+EF Core Data Model (Teach schema)
+--------------------------------------------------------
+Schema:
+- teach
+
+Mission (versioned identity):
+- missionId (uuid, PK)
+- name (text)
+- description (text?)
+- status (text)                              // DRAFT | PUBLISHED | ARCHIVED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- archivedAt (timestamptz?)
+
+MissionVersion (immutable published snapshot; drafts also stored as versions):
+- missionVersionId (uuid, PK)
+- missionId (uuid, FK -> teach.missions)
+- version (int)                              // increments per missionId
+- status (text)                              // DRAFT | PUBLISHED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- publishedAt (timestamptz?)
+- requiredCapabilitiesJson (jsonb?)          // derived capabilities, debug-friendly
+- requiredHasHoist (bool)
+- requiredHasTelescope (bool)
+- requiredHasRotate (bool)
+- requiredHasGrip (bool)
+- stepsJson (jsonb)                          // serialized step list (ordered)
+- estimatedActionTimeSeconds (double?)       // sum of non-move requiredTimeSeconds
+- derivedFromMissionVersionId (uuid?)        // lineage for draft cloning
+
+TeachSession (live authoring session):
+- teachSessionId (uuid, PK)
+- robotId (text)
+- status (text)                              // DRAFT | RECORDING | STOPPED | FAILED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- draftMissionId (uuid?)
+- draftMissionVersionId (uuid?)              // active draft version being edited during session
+- trafficLockId (uuid?)                      // optional integration with Traffic lock
+
+TeachPoint (operator "saved point" from snapshot; referenced by steps):
+- teachPointId (uuid, PK)
+- teachSessionId (uuid, FK -> teach.teach_sessions)
+- label (text?)
+- ts (timestamptz)
+- snapshotJson (jsonb)                       // pose + actuator positions + status/faults
+
+TeachSample (optional raw stream for debugging/analysis):
+- teachSampleId (uuid, PK)
+- teachSessionId (uuid, FK)
+- ts (timestamptz)
+- rawJson (jsonb)
+
+MissionExecution (history/audit):
+- executionId (uuid, PK)
+- missionId (uuid)
+- missionVersionId (uuid?)
+- robotId (text)
+- taskId (uuid?)                             // link to Task module when executed via Task
+- status (text)                              // QUEUED | RUNNING | DONE | FAILED | CANCELED
+- requestedBy (uuid)
+- requestedAt (timestamptz)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- lastUpdateAt (timestamptz)
+- errorCode (text?)
+- errorMessage (text?)
+
+
+--------------------------------------------------------
+EF Core Mapping Notes (Teach schema)
+--------------------------------------------------------
+Schema constant:
+- Modules/Teach/Persistence/TeachDbSchema.cs -> "teach"
+
+Table recommendations:
+- teach.missions
+- teach.mission_versions
+- teach.teach_sessions
+- teach.teach_points
+- teach.teach_samples
+- teach.mission_executions
+
+Indexes / constraints (recommended):
+- missions(name) optional unique (or unique per tenant/operator if multi-tenant later)
+- mission_versions(missionId, version) unique
+- mission_versions(missionId) WHERE status='PUBLISHED' unique (only one published per missionId)
+- teach_sessions(robotId, createdAt)
+- teach_points(teachSessionId, ts)
+- mission_executions(missionId, requestedAt)
+- mission_executions(taskId) index (fast join from task history)
+
+Rule:
+- Never mutate PUBLISHED mission_versions in place.
+
+
+--------------------------------------------------------
+File Structure (backend module template)
+--------------------------------------------------------
+backend/Modules/Teach/
+  Model/
+    Mission.cs
+    MissionVersion.cs
+    TeachSession.cs
+    TeachPoint.cs
+    TeachSample.cs
+    MissionExecution.cs
+
+  Dto/
+    MissionDto.cs
+    MissionVersionDto.cs
+    TeachSessionDto.cs
+    TeachPointDto.cs
+    MissionExecutionDto.cs
+    TeachControlRequestDto.cs
+
+  Mapping/
+    MissionMapper.cs
+    TeachSessionMapper.cs
+
+  Data/
+    MissionRepository.cs
+    TeachSessionRepository.cs
+    MissionExecutionRepository.cs
+
+  Service/
+    TeachService.cs                          // authoring + validation + execution requests
+    MissionValidationService.cs              // capabilities/limits + nested mission cycle checks
+    MissionExpansionService.cs               // expand missionRef to flat steps for Task
+
+  Api/
+    MissionsController.cs
+    TeachSessionsController.cs
+    MissionExecutionsController.cs
+
+  Realtime/
+    TeachHubPublisher.cs
+
+  Persistence/
+    TeachDbSchema.cs
+    *EntityConfig.cs
+
+
+--------------------------------------------------------
+Pseudocode: Teach Session Start/Stop
+--------------------------------------------------------
+StartSession(teachSessionId):
+  session = LoadSession(teachSessionId)
+  Ensure(session.status in [DRAFT, STOPPED])
+
+  EnsureRobotOnline(session.robotId) using RobotLinkService.GetConnection
+  RobotLinkService.SendCommand(session.robotId, teachSetMode(TEACH), requiresAck=true)
+
+  AcquireTrafficTeachLockIfEnabled(session)
+  session.status = RECORDING
+  session.startedAt = Now
+  Save(session)
+  PublishRealtime(teach.session.updated)
+
+StopSession(teachSessionId):
+  session = LoadSession(teachSessionId)
+  if session.status != RECORDING: return
+
+  RobotLinkService.SendCommand(session.robotId, teachStop(), requiresAck=true)
+  ReleaseTrafficTeachLockIfHeld(session)
+  session.status = STOPPED
+  session.finishedAt = Now
+  Save(session)
+  PublishRealtime(teach.session.updated)
+
+
+--------------------------------------------------------
+Pseudocode: Create Teach Point From Robot Snapshot
+--------------------------------------------------------
+CreateTeachPoint(teachSessionId, label?):
+  session = LoadSession(teachSessionId)
+  Ensure(session.status == RECORDING)
+
+  correlationId = RobotLinkService.SendCommand(session.robotId, requestSnapshot(), requiresAck=false)
+  snapshot = WaitForRobotTeachSnapshot(session.robotId, correlationId, timeout)
+
+  point = new TeachPoint(
+    teachSessionId = session.id,
+    label = label,
+    ts = snapshot.ts,
+    snapshotJson = snapshot.payload
+  )
+  Save(point)
+  PublishRealtime(teach.point.created)
+  return point
+
+
+--------------------------------------------------------
+Pseudocode: Publish Mission (validation + cycle check)
+--------------------------------------------------------
+PublishMission(missionId, draftMissionVersionId):
+  mv = LoadMissionVersion(draftMissionVersionId)
+  Ensure(mv.status == DRAFT)
+
+  steps = ParseSteps(mv.stepsJson)
+  EnsureNoCycles(steps)                       // follows missionRef graph
+  requiredCaps = DeriveRequiredCapabilities(steps)
+
+  mv.requiredHasHoist = requiredCaps.hasHoist
+  mv.requiredHasRotate = requiredCaps.hasRotate
+  mv.requiredHasTelescope = requiredCaps.hasTelescope
+  mv.requiredHasGrip = requiredCaps.hasGrip
+  mv.requiredCapabilitiesJson = requiredCaps.asJson()
+
+  ValidateTargetsAgainstLimits(steps)          // range checks, schema validation
+
+  mv.status = PUBLISHED
+  mv.publishedAt = Now
+  Save(mv)
+  PublishRealtime(teach.mission.updated)
+  return mv
+
+EnsureNoCycles(steps):
+  graph = BuildMissionRefGraph(steps)          // missionRef -> referenced missionId/version
+  DetectCyclesOrReject(graph)
+
+
+--------------------------------------------------------
+Pseudocode: Mission Execution (Teach -> Task)
+--------------------------------------------------------
+RequestExecution(missionId, missionVersionId?, robotId?):
+  mv = ResolveMissionVersion(missionId, missionVersionId)    // latest published by default
+  flatSteps = MissionExpansionService.Expand(mv, maxDepth)
+
+  execution = CreateMissionExecution(mv, robotId, status=QUEUED)
+  Save(execution)
+
+  taskId = TaskService.CreateTaskFromMission(mv.missionId, mv.missionVersionId, robotId, flatSteps?)
+  execution.taskId = taskId
+  Save(execution)
+  PublishRealtime(teach.execution.updated)
+  return execution
+

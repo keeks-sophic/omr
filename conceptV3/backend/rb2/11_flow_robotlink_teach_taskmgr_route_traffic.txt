@@ -1,0 +1,302 @@
+========================================================
+INTEGRATED FLOW: ROBOT LINK + TEACH + TASK MANAGER + ROUTE PLANNER + TRAFFIC CONTROL
+========================================================
+
+Purpose:
+- Describe how the five backend modules work together when implemented:
+  - conceptV3/backend/06_robot_link.txt
+  - conceptV3/backend/07_teach.txt
+  - conceptV3/backend/08_task_manager.txt
+  - conceptV3/backend/09_route_planner.txt
+  - conceptV3/backend/10_traffic_control.txt
+- Provide expected working scenarios and end-to-end behavior.
+
+Core rule:
+- Robot Link is the only robot-facing boundary.
+- Teach/Task Manager/Route Planner/Traffic Control never publish robot subjects directly.
+
+
+--------------------------------------------------------
+System Roles (high level)
+--------------------------------------------------------
+Robot Link:
+- Ingest robot identity/status/telemetry/faults and expose them to backend modules.
+- Publish backend->robot commands (task/route/traffic/teach/settings).
+
+Teach:
+- Create missions by controlling robot in teach mode and saving teach points/snapshots.
+- Publish missions for later execution.
+
+Task Manager:
+- Orchestrate mission execution in manual/auto/scheduled modes.
+- Create mission tasks through Task module (Task module not detailed here).
+
+Route Planner:
+- Compute mission-aware routes with time-scaled timeline (enterAt/exitAt per edge/node).
+- Include junction instructions (TURN_CAM LEFT/RIGHT/STRAIGHT where applicable).
+
+Traffic Control:
+- Monitor robots vs plans, allocate reservations, and issue speed/hold constraints.
+- Prevent collisions and prevent opposite direction overlap on TWO_WAY paths.
+- Request reroute when needed; escalate when no reroute exists.
+
+
+--------------------------------------------------------
+Scenario 1: Robot Boot + Online Presence
+--------------------------------------------------------
+Intent:
+- Backend learns robot identity, capabilities, settings, and current pose.
+
+Steps:
+1) Robot boots and connects to NATS JetStream.
+2) Robot publishes:
+   - robots.identity.<robotId>
+   - robots.status.<robotId>
+   - robots.telemetry.<robotId>
+   - robots.settings.report.<robotId>
+3) Robot Link:
+   - validates envelopes, updates robots schema cache tables, updates lastSeenAt
+   - emits internal events (identity/status/telemetry/settings reported)
+4) Other modules consume Robot Link outputs:
+   - Teach sees capability set and pose for teach eligibility
+   - Task Manager sees online robot list for manual/auto selection
+   - Route Planner sees pose + kinematic limits inputs
+   - Traffic Control begins tracking the robot state and safety flags
+
+Expected outcome:
+- Robot is marked ONLINE (connected=true) and visible in UI.
+
+
+--------------------------------------------------------
+Scenario 2: Teach Session (Authoring a Mission)
+--------------------------------------------------------
+Intent:
+- Operator drives robot to positions and saves teach points to build a Mission.
+
+Steps:
+1) Operator creates a TeachSession for robotId.
+2) Teach asks Robot Link to enter teach mode:
+   - publish robots.teach.control.<robotId> (setTeachMode=TEACH)
+3) Robot streams teach state:
+   - robots.teach.state.<robotId> (pose + actuator states)
+4) Operator presses “Save point”:
+   - Teach requests a snapshot via Robot Link:
+     - publish robots.teach.control.<robotId> (requestSnapshot)
+   - Robot responds:
+     - robots.teach.snapshot.<robotId> (pose x,y,heading + capability-driven actuator positions)
+   - Teach stores TeachPoint.snapshotJson
+5) Teach builds a Mission draft:
+   - stepsJson references teach points and/or explicit targets
+   - includes action steps with requiredTimeSeconds
+6) Teach publishes MissionVersion:
+   - validates nested missionRef for cycles
+   - derives requiredHas* booleans and requiredCapabilitiesJson
+   - stores the published immutable mission version
+
+Expected outcome:
+- A published mission version exists that can be executed by Task Manager/Task.
+
+
+--------------------------------------------------------
+Scenario 3: Manual Run (Operator selects robot + mission)
+--------------------------------------------------------
+Intent:
+- Operator chooses a specific robot to run a mission immediately.
+
+Steps:
+1) Operator selects missionId + version and robotId in Task Manager (manual mode).
+2) Task Manager checks eligibility via Robot Link:
+   - robot is ONLINE and status is RUNNING/WARNING
+   - robot capabilities satisfy mission requiredHas*
+3) Task Manager creates a MissionRun record and requests Task module to create a mission task:
+   - Task payload references missionId + missionVersionId
+   - requestedRobotId/assignedRobotId = selected robotId
+4) Task module dispatches the task to robot through Robot Link:
+   - publish robots.task.<robotId> (taskAssign)
+5) Robot accepts and starts executing:
+   - publishes robots.task.<robotId> progress events
+   - publishes robots.telemetry.<robotId> pose updates
+6) Task Manager tracks mission run status by syncing from Task updates.
+
+Expected outcome:
+- Robot executes the mission; UI shows run progress and final completion state.
+
+
+--------------------------------------------------------
+Scenario 4: Auto Run (Task Manager selects a robot)
+--------------------------------------------------------
+Intent:
+- Operator chooses a mission; system selects the best available robot on the map.
+
+Steps:
+1) Operator selects missionId (auto mode) and optional map scope.
+2) Task Manager queries Robot Link for latest robot states and filters:
+   - ONLINE
+   - status allows execution (RUNNING/WARNING)
+   - capability matches mission requiredHas*
+   - map constraints satisfied (same mapId/mapVersionId if enforced)
+3) Task Manager selects the best robot by policy and creates task through Task module.
+4) Task module dispatches via Robot Link as in Scenario 3.
+
+Expected outcome:
+- A suitable robot is assigned automatically; operator sees the selected robot and rationale if needed.
+
+
+--------------------------------------------------------
+Scenario 5: Scheduled Mission (Repeat every N minutes)
+--------------------------------------------------------
+Intent:
+- Automatically repeat a mission periodically.
+
+Steps:
+1) Operator creates a MissionPlan (enabled=true, schedule=interval/cron).
+2) Task Manager scheduler worker wakes up:
+   - checks nextRunAt and maxConcurrentRuns
+3) At each tick:
+   - resolves mission version (PINNED or LATEST_PUBLISHED)
+   - selects robot (MANUAL pinned robot or AUTO selection)
+   - requests Task module to create a mission task
+4) If no eligible robot exists:
+   - create MissionRun with status=BLOCKED and reasonCode=NO_ELIGIBLE_ROBOT
+   - nextRunAt computed normally (or with backoff policy if configured)
+
+Expected outcome:
+- Missions run repeatedly without manual intervention and are auditable as MissionRuns.
+
+
+--------------------------------------------------------
+Scenario 6: Route Planning For a Mission (time-scaled + cam turns)
+--------------------------------------------------------
+Intent:
+- Compute a robot-executable route plan for mission movement steps with ETA and a timeline.
+
+Steps:
+1) Route Planner receives a route compute request:
+   - inputs:
+     - robot current pose (Robot Link telemetry)
+     - mission expanded move-to destinations (Teach expansion already done)
+     - map graph (Map module)
+     - current traffic feedback windows (Traffic Control published blocks/costs)
+     - occupancy windows (RouteOccupancy time-series) for other robots
+2) Route Planner runs time-aware A*:
+   - cost is earliest arrival time
+   - adds waits for hard conflicts and penalties for congestion
+3) Route Planner emits:
+   - steps including TURN_CAM(LEFT/RIGHT/STRAIGHT) at junctions when required
+   - timeline enterAt/exitAt for each edge/node
+   - etaSecondsTotal including move + waits + actions
+4) Route Planner stores RoutePlan and RouteOccupancy rows.
+5) Route Planner sends route to robot via Robot Link:
+   - publish robots.route.response.<robotId>
+
+Expected outcome:
+- Robot receives a route plan with explicit junction turn intent and can execute it deterministically.
+
+
+--------------------------------------------------------
+Scenario 7: Traffic Control Smooth Flow (two robots, shared corridors)
+--------------------------------------------------------
+Intent:
+- Prevent collisions and keep traffic smooth using reservations and speed shaping.
+
+Steps:
+1) Traffic Control consumes:
+   - robot live telemetry/status (Robot Link)
+   - route timelines (Route Planner)
+2) Traffic Control allocates time-window reservations:
+   - nodes: exclusive
+   - edges: exclusive in opposite directions on TWO_WAY
+3) Traffic Control issues control commands per robot:
+   - targetSpeedMps to arrive at reservation window startTs
+   - holdAtNodeId when a robot must wait
+4) Robots follow constraints and publish robots.traffic.state.<robotId> feedback.
+
+Expected outcome:
+- Robots do not collide; they slow down early instead of stop-and-go where possible.
+- TWO_WAY head-to-head entry is prevented by directional edge reservation rules.
+
+
+--------------------------------------------------------
+Scenario 8: Congestion Detected -> Reroute
+--------------------------------------------------------
+Intent:
+- When congestion builds, avoid creating long queues by rerouting.
+
+Steps:
+1) Traffic Control detects congestion:
+   - repeated reservation misses, queued windows, or corridor contention
+2) Traffic Control publishes higher penalties:
+   - traffic.cost.<mapVersionId> (soft penalties)
+3) Traffic Control requests reroute for selected robots:
+   - call Route Planner to compute an alternative route using updated costs
+4) Route Planner returns a new route plan and sends it to robot via Robot Link.
+
+Expected outcome:
+- Congestion reduces by distributing robots across alternate paths.
+
+
+--------------------------------------------------------
+Scenario 9: No Reroute Exists -> Hold + Operator Escalation
+--------------------------------------------------------
+Intent:
+- When blocked and no alternate path exists, keep system safe and notify operator.
+
+Steps:
+1) Traffic Control requests reroute; Route Planner returns NO_PATH/BLOCKED.
+2) Traffic Control:
+   - holds robots at safe nodes (robots.traffic.control holdAtNodeId)
+   - creates a TrafficIncident (NO_REROUTE)
+   - marks affected edges/nodes as blocked for planning feedback if needed
+3) UI shows the incident and affected robots; operator intervenes (clear obstruction, change map maintenance, etc.).
+
+Expected outcome:
+- Robots stop safely; operators are informed; system state reflects the blockage.
+
+
+--------------------------------------------------------
+Scenario 10: Robot Offline / Error During Execution
+--------------------------------------------------------
+Intent:
+- Prevent secondary collisions and keep planning consistent when a robot fails.
+
+Steps:
+1) Robot goes OFFLINE (lastSeenAt timeout) or reports ERROR in robots.status.
+2) Robot Link updates connection state and emits RobotConnectionChanged / RobotStatusUpdated.
+3) Traffic Control:
+   - treats last known segment as occupied with buffer
+   - blocks conflicting reservations and publishes traffic.blocked feedback
+4) Task Manager and Teach reflect that robot is unavailable (ONLINE/OFFLINE and ERROR).
+5) Route Planner avoids the blocked region for other robots due to traffic.blocked and occupancy windows.
+
+Expected outcome:
+- Other robots are kept away from the failed robot’s last known corridor.
+
+
+--------------------------------------------------------
+Scenario 11: Settings Edited (speed/accel/limits) -> ETA/Traffic/Teach Effects
+--------------------------------------------------------
+Intent:
+- When operators change motion limits, routing and traffic adapt and robot runtime applies safely.
+
+Steps:
+1) Operator edits motor limits via a settings endpoint (through Robot Link boundary).
+2) Robot Link publishes robots.settings.apply.<robotId> and waits for ack + convergence.
+3) Robot reports updated settings (robots.settings.report.<robotId>).
+4) Downstream effects:
+   - Route Planner uses updated kinematic limits for ETA and window timing.
+   - Traffic Control uses updated accel/decel and maxSpeed to compute safe headway and braking distance.
+   - Teach publish validation uses limitsJson to validate targets/ranges.
+
+Expected outcome:
+- The system remains consistent; ETAs and reservations reflect the new limits.
+
+
+--------------------------------------------------------
+Expected End-to-End Behavior Summary
+--------------------------------------------------------
+If all five modules are implemented:
+- Robot Link provides a stable robot boundary and canonical robot snapshot.
+- Teach produces publishable missions and teach points from robot snapshots.
+- Task Manager orchestrates when/which mission runs and selects robots in auto mode.
+- Route Planner computes time-scaled mission routes with cam turn instructions and realistic ETA.
+- Traffic Control prevents collisions, prevents two-way head-on overlap, smooths flow, and triggers reroute/escalation.

@@ -1,0 +1,309 @@
+========================================================
+MODULE 07: TASK (DISPATCH + LIFECYCLE + ETA)
+========================================================
+
+Goal:
+- Own task lifecycle as the backend source of truth.
+- Dispatch tasks to robots:
+  - MOVE_TO_POINT (simple navigation)
+  - MISSION (teach-authored mission execution)
+- Keep ETA accurate and execution smooth by integrating Route and Traffic.
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read endpoints:
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints:
+- Require policy: Operator (operator/admin)
+
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Task lifecycle state
+- Create, assign, start, progress, delay, fail, complete, cancel.
+- Maintain TaskState as the canonical lifecycle snapshot.
+
+2) Dispatch and robot selection
+- Dispatch:
+  - robots.task.<robotId> taskAssign/taskCancel
+- Auto-dispatch:
+  - choose a robot using Robot module canonical state and Mission requirements.
+
+3) ETA ownership at the task level
+- Persist ETA values on TaskState and push updates to frontend.
+- Accept ETA inputs from:
+  - Route (planned travel + action time)
+  - Traffic and robot updates (delays/holds)
+
+4) Frontend surface (REST + SignalR)
+- Provide task query and operator controls.
+- Provide realtime lifecycle and ETA updates.
+
+
+--------------------------------------------------------
+Good To Have Adviser (recommended early decisions)
+--------------------------------------------------------
+1) Idempotent dispatch
+- Use correlationId and messageId/commandId to prevent double-dispatch.
+
+2) Clear timeout policies
+- Define:
+  - no-ack timeout (robot never accepts)
+  - no-progress timeout (robot accepted but stalled)
+  - deadline breach policy (SLA)
+
+3) Minimal audit trail
+- Record who created/canceled/forced assignment and when.
+
+
+--------------------------------------------------------
+Data Model (canonical DB state)
+--------------------------------------------------------
+Schema:
+- tasks
+
+Task:
+- taskId (uuid, PK)
+- type (text)                               // MOVE_TO_POINT | MISSION | CUSTOM
+- priority (int)
+- payloadJson (jsonb)
+- createdBy (uuid)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- requestedRobotId (text?)
+- assignedRobotId (text?)
+- assignedAt (timestamptz?)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- scheduledAt (timestamptz?)
+- deadlineAt (timestamptz?)
+
+TaskState:
+- taskId (FK)
+- status (text)                             // PENDING | QUEUED | ASSIGNED | RUNNING | DONE | FAILED | CANCELED | BLOCKED | DELAYED
+- reasonCode (text?)
+- reasonMessage (text?)
+- progress (double?)
+- step (text?)
+- etaSecondsTotal (double?)
+- etaUpdatedAt (timestamptz?)
+- lastUpdateAt (timestamptz)
+- correlationId (text?)
+
+TaskEventLog (optional):
+- eventId (uuid, PK)
+- taskId
+- ts (timestamptz)
+- type (text)                               // created|assigned|started|progress|delayed|failed|done|canceled|eta
+- correlationId (text?)
+- robotId (text?)
+- payloadJson (jsonb?)
+
+TaskSchedule (optional):
+- scheduleId (uuid, PK)
+- taskTemplateJson (jsonb)
+- enabled (bool)
+- cron (text?)
+- intervalSeconds (int?)
+- timezone (text?)
+- nextRunAt (timestamptz)
+- lastRunAt (timestamptz?)
+- createdBy (uuid)
+- createdAt (timestamptz)
+
+
+--------------------------------------------------------
+Task Types (MOVE_TO_POINT vs MISSION)
+--------------------------------------------------------
+MOVE_TO_POINT:
+- Payload contains one destination (nodeId/pointId/x,y).
+- Robot requests a route with:
+  - actionsAtDestinationSeconds = 0
+
+MISSION:
+- Payload references a missionId and optional inline steps.
+- Mission steps include action durations:
+  - requiredTimeSeconds for every non-move step
+- For each mission stop point, route requests include:
+  - actionsAtDestinationSeconds = sum(requiredTimeSeconds at that stop)
+
+
+--------------------------------------------------------
+NATS (task dispatch and progress)
+--------------------------------------------------------
+Backend -> Robot:
+- robots.task.<robotId>
+  - taskAssign
+  - taskCancel
+
+Robot -> Backend:
+- robots.task.<robotId>
+  - taskProgress
+  - taskDelayed
+  - taskFailed
+  - taskDone
+- robots.cmd.ack.<robotId>
+  - ack for taskAssign/taskCancel when robot uses commandId correlation
+
+Task assignment command (concept):
+{
+  "schemaVersion": 1,
+  "type": "taskAssign",
+  "robotId": "RBT-001",
+  "taskId": "uuid",
+  "correlationId": "uuid",
+  "payload": {
+    "taskType": "MOVE_TO_POINT|MISSION|CUSTOM",
+    "priority": 10,
+    "deadlineAt": "...",
+    "moveToPoint": { "mapId": "uuid", "mapVersionId": "uuid", "destination": { "nodeId" | "pointId" | "x","y" } },
+    "mission": { "missionId": "uuid", "missionVersion": 1, "steps": [ ... ] }
+  }
+}
+
+
+--------------------------------------------------------
+Robot Selection (auto-dispatch)
+--------------------------------------------------------
+Inputs (Robot module):
+- connected + lastSeenAt freshness
+- mode/status
+- batteryPercent
+- hasHoist/hasTelescope/hasRotate/hasGrip
+- limitsJson (range and speed validation)
+
+Inputs (Teach module):
+- Mission requiredHasHoist/requiredHasTelescope/requiredHasRotate/requiredHasGrip
+
+Rule:
+- If task.type == MISSION and missionId is used:
+  - only assign robots that satisfy all Mission requiredHas* booleans.
+
+Fallback:
+- If no robot is eligible:
+  - keep task QUEUED or set BLOCKED with reasonCode
+
+
+--------------------------------------------------------
+Integration for ETA (Route + Traffic + Teach)
+--------------------------------------------------------
+Route (Module 08):
+- Provides planned ETA per route request:
+  - travel time + actionsAtDestinationSeconds
+- Task stores etaSecondsTotal and emits task.eta.updated.
+
+Traffic (Module 09):
+- Can increase effective ETA via holds/reservations.
+- For mission stop points:
+  - traffic includes action dwell time in reservation windows.
+
+Teach (Module 10):
+- Produces Missions with:
+  - requiredHas* booleans (for assignment)
+  - requiredTimeSeconds (for ETA realism)
+
+
+--------------------------------------------------------
+REST Endpoints (frontend)
+--------------------------------------------------------
+Base:
+- /api/v1/tasks
+
+Read:
+- GET  /api/v1/tasks?status=&robotId=&from=&to=
+- GET  /api/v1/tasks/{taskId}
+
+Write (Operator):
+- POST /api/v1/tasks
+  - body: { type, payload, priority?, requestedRobotId?, scheduledAt?, deadlineAt? }
+- POST /api/v1/tasks/{taskId}/cancel
+- POST /api/v1/tasks/{taskId}/reschedule
+  - body: { scheduledAt }
+- POST /api/v1/tasks/{taskId}/assign
+  - body: { robotId }
+
+
+--------------------------------------------------------
+SignalR Events (frontend live)
+--------------------------------------------------------
+Hub:
+- /hubs/realtime
+
+Events:
+- task.created
+- task.updated
+- task.assigned
+- task.progress
+- task.delayed
+- task.failed
+- task.done
+- task.canceled
+- task.eta.updated
+
+Payload (recommended):
+- { taskId, status, robotId?, progress?, step?, reasonCode?, reasonMessage?, etaSecondsTotal?, updatedAt }
+
+
+--------------------------------------------------------
+Use cases supported
+--------------------------------------------------------
+See:
+- conceptV3/backend/12_use_cases_robot_task_route_traffic_teach.txt
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (module template)
+--------------------------------------------------------
+backend/Modules/Tasks/
+  Model/
+    Task.cs
+    TaskState.cs
+    TaskEventLog.cs
+    TaskSchedule.cs
+
+  Dto/
+    TaskDto.cs
+    TaskCreateRequest.cs
+    TaskAssignRequest.cs
+    TaskRescheduleRequest.cs
+    TaskCancelRequest.cs
+    TaskStateDto.cs
+    TaskEventDto.cs
+
+  Messaging/
+    TaskContracts.V1.cs                    // NATS envelopes/payloads
+
+  Data/
+    TaskRepository.cs
+    TaskEventRepository.cs
+    TaskScheduleRepository.cs
+
+  Service/
+    TaskLifecycleService.cs                // state transitions + validation
+    TaskDispatchService.cs                 // publish robots.task.* commands
+    TaskRobotSelectionService.cs           // select robot using Robot + Mission requirements
+    TaskEtaService.cs                      // persist ETA and emit updates
+
+  Api/
+    TasksController.cs
+    TaskAssignmentsController.cs
+
+  Realtime/
+    TaskHubPublisher.cs
+
+  Worker/
+    TaskRobotProgressIngestWorker.cs       // consumes robots.task.* (progress/done/failed)
+    TaskCommandAckWorker.cs                // consumes robots.cmd.ack.*
+    TaskEtaRefreshWorker.cs                // refresh ETA using Route/Traffic signals
+    TaskSchedulerWorker.cs                 // emits scheduled tasks
+
+  Persistence/
+    TasksDbSchema.cs
+    *EntityConfig.cs

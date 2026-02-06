@@ -45,12 +45,22 @@ export default async function MapsListPage() {
         {maps.map((m) => (
           <div key={m.mapId} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <div className="flex flex-col">
-              <div className="text-sm font-medium">{m.name}</div>
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <span>{m.name}</span>
+                {m.activePublishedMapVersionId ? (
+                  <span className="rounded-full bg-emerald-600/15 px-2 py-0.5 text-xs text-emerald-600">PUBLISHED</span>
+                ) : (
+                  <span className="rounded-full bg-zinc-600/15 px-2 py-0.5 text-xs text-zinc-500">NO PUBLISH</span>
+                )}
+              </div>
               <div className="text-xs text-zinc-600 dark:text-zinc-400">
                 mapId: <span className="font-mono">{m.mapId}</span>
               </div>
               <div className="text-xs text-zinc-600 dark:text-zinc-400">
                 activePublishedMapVersionId: <span className="font-mono">{m.activePublishedMapVersionId ?? "(none)"}</span>
+              </div>
+              <div className="text-xs text-zinc-600 dark:text-zinc-400">
+                updatedAt: <span className="font-mono">{m.updatedAt}</span>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-sm">

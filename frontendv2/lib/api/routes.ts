@@ -20,6 +20,7 @@ export const ApiRoutes = {
     snapshot: (mapId: string, mapVersionId: string) => `/api/v1/maps/${mapId}/versions/${mapVersionId}/snapshot`,
     clone: (mapId: string, mapVersionId: string) => `/api/v1/maps/${mapId}/versions/${mapVersionId}/clone`,
     publish: (mapId: string, mapVersionId: string) => `/api/v1/maps/${mapId}/versions/${mapVersionId}/publish`,
+    activate: (mapId: string, mapVersionId: string) => `/api/v1/maps/${mapId}/versions/${mapVersionId}/activate`,
     nodes: (mapId: string, mapVersionId: string) => `/api/v1/maps/${mapId}/versions/${mapVersionId}/nodes`,
     nodeById: (mapId: string, mapVersionId: string, nodeId: string) =>
       `/api/v1/maps/${mapId}/versions/${mapVersionId}/nodes/${nodeId}`,

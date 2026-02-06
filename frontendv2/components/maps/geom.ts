@@ -13,7 +13,7 @@ export function distance(a: GeomDto, b: GeomDto): number {
 }
 
 export function getPathPolyline(path: PathDto, nodes: NodeDto[]): GeomDto[] {
-  if (path.points && path.points.length >= 2) return path.points;
+  if (path.points && path.points.length > 2) return path.points;
   const from = nodes.find((n) => n.nodeId === path.fromNodeId)?.geom;
   const to = nodes.find((n) => n.nodeId === path.toNodeId)?.geom;
   if (!from || !to) return [];

@@ -1,0 +1,422 @@
+========================================================
+MODULE 10: TEACH (MISSION AUTHORING + REUSABLE EXECUTION)
+========================================================
+
+Goal:
+- Author reusable Missions by teaching robots and validating capabilities/limits.
+- Ensure Missions are executable by Task module:
+  - required abilities are stored on the Mission for robot selection
+  - action durations are stored for realistic ETA and traffic scheduling
+- Enforce teaching exclusivity via Traffic lock so teaching is safe.
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read endpoints (browse missions, sessions, playback history):
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints (teach control, create/update missions, replay):
+- Require policy: Operator (operator/admin)
+
+Robot-to-backend:
+- Teach control and teach state use NATS with robot identity + authorization.
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Mission authoring and storage
+- Create/edit missions and publish them as stable references (missionId + version).
+- Support nested missions (missionRef).
+
+2) Capability-aware mission publish
+- Derive and store required abilities:
+  - requiredHasHoist/requiredHasTelescope/requiredHasRotate/requiredHasGrip
+- Validate against Robot module:
+  - has* booleans
+  - limitsJson ranges and speed limits
+
+3) Teach sessions and robot teach mode control
+- Start/stop teach sessions and collect robot state while teaching.
+- Optionally persist raw samples for analysis/debugging.
+
+4) Teach lock integration (exclusive path/area)
+- Acquire/heartbeat/release lock via Traffic module during teach.
+
+5) Execution history
+- Persist mission execution history (when executed as a task or direct replay).
+
+
+--------------------------------------------------------
+Key Concepts
+--------------------------------------------------------
+Teach session:
+- A live interaction with a robot to capture and validate actions.
+- Produces a Mission as output (draft -> published).
+
+Mission:
+- A reusable recipe that can be executed by a robot.
+- May be executed as:
+  - a task created by Task module (preferred)
+  - a direct teach replay (operator control, optional)
+
+Mission step:
+- One action in a Mission.
+- Allowed step types:
+  - moveToPoint
+  - grip
+  - rotate
+  - telescope
+  - hoist
+  - wait
+  - missionRef (nested mission)
+
+Time rule:
+- Every step except moveToPoint must specify requiredTimeSeconds.
+- moveToPoint time is computed by Route module and affected by Traffic.
+
+
+--------------------------------------------------------
+Mission Model (data that must exist)
+--------------------------------------------------------
+Schema:
+- teach
+
+Mission (reusable)
+- missionId (uuid, PK)
+- name (text)
+- description (text?)
+- version (int)
+- status (text)                             // DRAFT | PUBLISHED | ARCHIVED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- requiredHasHoist (bool)
+- requiredHasTelescope (bool)
+- requiredHasRotate (bool)
+- requiredHasGrip (bool)
+- requiredCapabilitiesJson (jsonb?)         // derived capabilities (redundant, debug-friendly)
+- stepsJson (jsonb)                         // serialized list of steps (see below)
+- estimatedActionTimeSeconds (double?)      // sum of non-move steps required times
+
+TeachSession (authoring session)
+- teachSessionId (uuid, PK)
+- robotId (text)
+- status (text)                             // DRAFT | RECORDING | STOPPED | FAILED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- draftMissionId (uuid?)                    // mission created/updated by this session
+
+TeachSample (optional raw stream for debugging/analysis)
+- teachSampleId (uuid, PK)
+- teachSessionId (FK)
+- ts (timestamptz)
+- poseX, poseY, headingRad (double?)
+- hoistHeight (double?)
+- telescopeLength (double?)
+- rotationAngleDeg (double?)
+- gripPosition (double?)
+- rawJson (jsonb?)
+
+MissionExecution (history)
+- executionId (uuid, PK)
+- missionId (uuid)
+- robotId (text)
+- taskId (uuid?)                            // link to Task module if mission executed as task
+- status (text)                             // QUEUED | RUNNING | DONE | FAILED | CANCELED
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- lastUpdateAt (timestamptz)
+- errorCode (text?)
+- errorMessage (text?)
+
+
+--------------------------------------------------------
+Mission Step Contract (capability-aware)
+--------------------------------------------------------
+Step envelope (concept):
+{
+  "schemaVersion": 1,
+  "stepId": "uuid",
+  "type": "moveToPoint|grip|rotate|telescope|hoist|wait|missionRef",
+  "requiredTimeSeconds": 2.0,
+  "payload": { ... }
+}
+
+Step payloads (concept):
+- moveToPoint:
+  - { "mapId": "uuid", "mapVersionId": "uuid", "destination": { "nodeId" | "pointId" | "x","y" } }
+- grip:
+  - { "target": "open|close|position", "positionMm": 50 }
+- rotate:
+  - { "targetDeg": 90 }
+- telescope:
+  - { "targetMm": 600 }
+- hoist:
+  - { "targetMm": 900 }
+- wait:
+  - { "reason": "stabilize" }
+- missionRef:
+  - { "missionId": "uuid", "args": { ... } }
+
+Validation rule:
+- For a given robotId, Robot module must validate:
+  - robot capabilities booleans allow required step types
+  - limitsJson allows target ranges and speed limits
+- If not supported:
+  - mission publish must fail (operator sees validation errors)
+
+Required capability derivation:
+- Teach module derives mission required abilities from stepsJson:
+  - grip step => requiredHasGrip = true
+  - rotate step => requiredHasRotate = true
+  - telescope step => requiredHasTelescope = true
+  - hoist step => requiredHasHoist = true
+- missionRef step:
+  - required abilities include the referenced mission required abilities
+  - detect and reject cycles during publish
+
+Storage rule:
+- requiredHas* booleans exist so Task module can quickly filter robots that can run the mission.
+
+
+--------------------------------------------------------
+Good To Have Adviser (recommended early decisions)
+--------------------------------------------------------
+1) MissionRef safety
+- Reject cycles during publish.
+- Limit recursion depth for missionRef.
+
+2) Duration tuning loop
+- Treat requiredTimeSeconds as a contract but track actual times during execution.
+- Allow operators to tune requiredTimeSeconds based on real performance.
+
+3) Versioning and compatibility
+- Keep mission step schema additive and versioned.
+- Preserve backward compatibility for older missions.
+
+4) Tight validation before publish
+- Validate required abilities and limitsJson:
+  - fail fast with clear validation errors in publish endpoint
+
+5) Prefer task-based execution
+- Use Task module for mission replay whenever possible for consistent audit and ETA updates.
+
+
+--------------------------------------------------------
+Teach Lock (exclusive path/area usage)
+--------------------------------------------------------
+Goal:
+- When teaching is active, other robots must not enter the teaching path/area.
+
+Teach lock scope:
+- nodeIds and pathIds (edges) derived from the teaching region and current robot corridor.
+
+Rules:
+- Teach lock is enforced by Traffic module as a hard block for other robots.
+- Route module treats teach-locked edges/nodes as blocked when planning for other robots.
+- Teach lock uses TTL + heartbeat to avoid stale locks.
+
+Lock lifecycle:
+1) Teach start:
+  - Teach module requests lock acquisition from Traffic:
+    - traffic.lock.acquire (scope, robotId, ttl)
+2) During teach:
+  - Teach module refreshes lock heartbeat:
+    - traffic.lock.heartbeat (lockId)
+3) Teach stop / fail:
+  - Teach module releases lock:
+    - traffic.lock.release (lockId)
+
+
+--------------------------------------------------------
+Robot Communication (Teach <-> Robot via NATS JetStream)
+--------------------------------------------------------
+Teach control commands (backend -> robot):
+- robots.teach.control.<robotId>
+  - teachStart
+  - teachStop
+  - teachSetMode
+  - teachReplayMission
+  - teachPause / teachResume / teachCancel
+
+Teach state stream (robot -> backend):
+- robots.teach.state.<robotId>
+  - mode
+  - actuator states (hoist/telescope/rotate/grip)
+  - replay progress and acknowledgements
+
+Idempotency:
+- Use schemaVersion and commandId/executionId for safe retries.
+
+
+--------------------------------------------------------
+Teach Authoring Flow (how missions are created)
+--------------------------------------------------------
+1) Operator creates a teach session
+- POST /api/v1/teach/sessions
+  - body: { robotId, name, description? }
+
+2) Teach module prepares for teaching
+- Validates robot capabilities and limits (Robot module)
+- Acquires teach lock from Traffic
+- Sends teachStart to robot via robots.teach.control.<robotId>
+
+3) Operator performs actions and records steps
+- Teach module collects:
+  - operator intent (UI actions)
+  - robot state feedback (robots.teach.state.<robotId>)
+- Teach module builds a draft Mission step list:
+  - moveToPoint steps (destinations)
+  - actuator steps with requiredTimeSeconds
+  - nested mission references (optional)
+
+4) Operator stops teaching
+- teachStop sent to robot
+- teach lock released
+
+5) Publish mission
+- Teach module validates the mission against:
+  - robot capability booleans
+  - limitsJson ranges (mm/deg) and speed limits
+- Mission status -> PUBLISHED
+
+
+--------------------------------------------------------
+Mission Execution (replay)
+--------------------------------------------------------
+Preferred execution:
+- Task module sends a Mission to the robot (taskAssign payload includes missionId or mission steps).
+
+Optional direct replay:
+- Teach module can directly command replay for operator workflows.
+
+Execution rules:
+- moveToPoint steps:
+  - route plan is computed (Route module)
+  - traffic control adjusts time windows and speed targets (Traffic module)
+- actuator steps (grip/rotate/telescope/hoist/wait):
+  - robot executes and reports progress
+  - traffic accounts for requiredTimeSeconds when reserving nodes/stop points
+
+
+--------------------------------------------------------
+REST Endpoints (teach + mission management)
+--------------------------------------------------------
+Base:
+- /api/v1/teach
+
+Missions:
+- GET  /api/v1/teach/missions
+- GET  /api/v1/teach/missions/{missionId}
+- POST /api/v1/teach/missions
+  - body: { name, description?, steps }
+- PUT  /api/v1/teach/missions/{missionId}
+  - body: { name?, description?, steps? }
+- POST /api/v1/teach/missions/{missionId}/publish
+- POST /api/v1/teach/missions/{missionId}/archive
+
+Teach sessions:
+- POST /api/v1/teach/sessions
+- POST /api/v1/teach/sessions/{teachSessionId}/start
+- POST /api/v1/teach/sessions/{teachSessionId}/stop
+- GET  /api/v1/teach/sessions
+- GET  /api/v1/teach/sessions/{teachSessionId}
+- GET  /api/v1/teach/sessions/{teachSessionId}/samples?from=&to=
+
+Execution history:
+- GET  /api/v1/teach/executions?robotId=&missionId=
+- GET  /api/v1/teach/executions/{executionId}
+
+
+--------------------------------------------------------
+SignalR Events (live teach + mission UI)
+--------------------------------------------------------
+Hub:
+- /hubs/realtime
+
+Event names (recommended):
+- teach.session.updated
+- teach.sample.received
+- teach.mission.updated
+- teach.lock.updated
+- teach.execution.updated
+
+
+--------------------------------------------------------
+--------------------------------------------------------
+How this module cooperates (smooth + fast ETA)
+--------------------------------------------------------
+Robot (Module 06):
+- Uses robot has* booleans and limitsJson to validate mission publish.
+- Uses robots.teach.control/state subjects for teach mode and state streaming.
+
+Task (Module 07):
+- Task selects robots using Mission requiredHas* booleans.
+- Task dispatches missions by missionId (and optional inline steps).
+
+Route (Module 08):
+- moveToPoint travel time is computed by Route.
+- Task/robot provide actionsAtDestinationSeconds for stop points so ETA includes action time.
+
+Traffic (Module 09):
+- Teach lock blocks other robots during teaching.
+- During mission execution, traffic uses action dwell time for reservation windows.
+
+Use cases supported:
+- conceptV3/backend/12_use_cases_robot_task_route_traffic_teach.txt
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (module template)
+--------------------------------------------------------
+backend/Modules/Teach/
+  Model/
+    Mission.cs
+    TeachSession.cs
+    TeachSample.cs
+    MissionExecution.cs
+
+  Dto/
+    MissionDto.cs
+    MissionCreateRequest.cs
+    MissionUpdateRequest.cs
+    TeachSessionDto.cs
+    TeachCreateSessionRequest.cs
+    TeachStartRequest.cs
+    TeachStopRequest.cs
+    MissionExecutionDto.cs
+
+  Messaging/
+    TeachContracts.V1.cs
+
+  Data/
+    TeachRepository.cs
+    MissionRepository.cs
+    MissionExecutionRepository.cs
+
+  Service/
+    MissionAuthoringService.cs
+    MissionValidationService.cs
+    TeachSessionService.cs
+    TeachRecordingService.cs
+    TeachLockService.cs
+
+  Api/
+    TeachController.cs
+    MissionsController.cs
+
+  Realtime/
+    TeachHubPublisher.cs
+
+  Worker/
+    TeachStateIngestWorker.cs                // consumes robots.teach.state.*
+
+  Persistence/
+    TeachDbSchema.cs
+    *EntityConfig.cs

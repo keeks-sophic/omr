@@ -191,3 +191,13 @@ C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\back
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\backendV3.genruntimeconfig.cache
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\obj\Debug\net10.0\ref\backendV3.dll
 C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\appsettings.Development.json
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.AspNetCore.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Extensions.Hosting.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Extensions.Logging.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Formatting.Compact.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Settings.Configuration.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Sinks.Console.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Sinks.Debug.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\Serilog.Sinks.File.dll
+C:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3\bin\Debug\net10.0\NATS.Client.dll

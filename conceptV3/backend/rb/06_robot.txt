@@ -1,0 +1,375 @@
+========================================================
+MODULE 06: ROBOT (CONNECTIVITY + CANONICAL STATE + SETTINGS)
+========================================================
+
+Goal:
+- Make backend the single source of truth for robot identity, state, and settings.
+- Provide one stable robot-facing integration surface:
+  - NATS JetStream subjects for robots
+  - REST/SignalR for frontend
+- Enable other modules (Task/Route/Traffic/Teach) to compute accurate ETA and operate safely.
+
+Non-goals (for now):
+- Vendor-specific packet formats beyond versioned envelopes (keep payloads generic and additive).
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read endpoints:
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints:
+- Require policy: Operator (operator/admin)
+
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Canonical robot state in DB
+- Identity and capabilities:
+  - robotId, vendor/model/firmwareVersion
+  - capability booleans: hasHoist/hasTelescope/hasRotate/hasGrip
+- Connection health:
+  - connected, lastSeenAt
+- Current runtime status:
+  - mode/status, estop, safetyStopActive/safetyStopReason, obstacleDetected
+  - errorCode/errorMessage, batteryPercent
+  - localized/localizationConfidence and currentMapId/currentMapVersionId
+- Last known telemetry:
+  - pose and velocity snapshot (throttled to UI)
+  - last QR scan (optional, for localization traceability)
+  - lidar health summary (optional, for diagnostics)
+
+2) Canonical robot settings in DB
+- limitsJson:
+  - per-property speed/acceleration/range constraints used by Route/Traffic/Teach
+- ioConfigJson:
+  - IO mapping and defaults (including optional sensor/scanner wiring/config)
+- Settings lifecycle:
+  - desired vs reported settings
+  - lastAppliedAt/lastReportedAt and lastApplyError
+
+3) Robot connectivity boundary (NATS)
+- Define and maintain robot subject conventions.
+- Ingest robot messages and publish operator/system commands.
+
+4) Frontend surface (REST + SignalR)
+- Provide query endpoints for current state and history (optional).
+- Provide operator endpoints to apply settings and run resets.
+- Provide live updates for dashboards and alerting.
+
+
+--------------------------------------------------------
+Good To Have Adviser (recommended early decisions)
+--------------------------------------------------------
+1) Strict settings schemaVersion + validation
+- Reject invalid limitsJson and ioConfigJson before applying.
+- Keep changes additive.
+
+2) Desired vs reported settings
+- Track:
+  - desired settings stored from frontend
+  - reported settings from robot
+  - lastAppliedAt/lastReportedAt
+  - lastApplyError
+
+3) Alert routing policy
+- Treat these as alerts:
+  - disconnected/down: connected=false
+  - emergency stop: estop=true
+  - safety stop: safetyStopActive=true (e.g., lidar obstacle stop)
+  - localization lost: localized=false (when robot is expected to be localized)
+  - lidar/scanner faults: alarm events or errorCode present
+  - fault: status=ERROR or errorCode present
+- Ensure alerts are visible in frontend and consumable by Task/Traffic policies.
+
+
+--------------------------------------------------------
+Robot Properties + Limits (used by ETA)
+--------------------------------------------------------
+Properties:
+- move
+- hoist (requires hasHoist)
+- telescope (requires hasTelescope)
+- rotate (requires hasRotate)
+- grip (requires hasGrip)
+
+Limits rule:
+- Each property has a motor speed limit.
+- Each property except move has a range limit:
+  - hoist/telescope/grip: range limits (recommended mm)
+  - rotate: angle limits (degrees)
+  - move: distance limit does not apply
+
+Recommended limitsJson structure (concept):
+{
+  "schemaVersion": 1,
+  "move": { "speedLimitMps": 1.2, "accelLimitMps2": 0.6, "decelLimitMps2": 0.8 },
+  "hoist": { "speedLimitMps": 0.15, "minMm": 0, "maxMm": 1200 },
+  "telescope": { "speedLimitMps": 0.10, "minMm": 0, "maxMm": 800 },
+  "rotate": { "speedLimitDegPerSec": 30, "minDeg": -180, "maxDeg": 180 },
+  "grip": { "speedLimitMmPerSec": 50, "minMm": 0, "maxMm": 120 }
+}
+
+
+--------------------------------------------------------
+Data Model (canonical DB state)
+--------------------------------------------------------
+Schema:
+- robots
+
+Robot (stable identity):
+- robotId (text, PK)
+- displayName (text)
+- vendor (text?)
+- model (text?)
+- firmwareVersion (text?)
+- hasHoist (bool)
+- hasTelescope (bool)
+- hasRotate (bool)
+- hasGrip (bool)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- archivedAt (timestamptz?)
+
+RobotConnection:
+- robotId (FK)
+- connected (bool)
+- lastSeenAt (timestamptz)
+- lastHelloAt (timestamptz?)
+- connectionInstanceId (text?)
+- natsClientId (text?)
+
+RobotStatus:
+- robotId (FK)
+- mode (text)                              // AUTO | MANUAL | TEACH | ...
+- status (text)                            // RUNNING | WARNING | PAUSED | OFFLINE | ERROR
+- estop (bool)
+- safetyStopActive (bool?)
+- safetyStopReason (text?)                 // ESTOP | OBSTACLE | INTERNAL_FAULT | TRAFFIC_HOLD
+- obstacleDetected (bool?)
+- errorCode (text?)
+- errorMessage (text?)
+- batteryPercent (double?)
+- localized (bool?)
+- localizationConfidence (double?)
+- localizationMethod (text?)               // QR | ODOMETRY | FUSION
+- currentMapId (uuid?)
+- currentMapVersionId (uuid?)
+- updatedAt (timestamptz)
+
+RobotTelemetry:
+- robotId (FK)
+- poseX, poseY, headingRad (double?)
+- velocityMps (double?)
+- angularVelocityRps (double?)
+- lastQrCode (text?)
+- lastQrAnchorId (uuid?)
+- lidarHealthJson (jsonb?)
+- updatedAt (timestamptz)
+- rawJson (jsonb?)
+
+RobotTaskState:
+- robotId (FK)
+- taskId (uuid?)
+- taskType (text?)
+- status (text)                            // NONE | ASSIGNED | RUNNING | DONE | FAILED | CANCELED
+- step (text?)
+- progress (double?)
+- lastUpdateAt (timestamptz)
+
+RobotSettings:
+- robotId (FK)
+- limitsJson (jsonb?)
+- ioConfigJson (jsonb?)
+- desiredSettingsJson (jsonb?)
+- reportedSettingsJson (jsonb?)
+- lastAppliedAt (timestamptz?)
+- lastReportedAt (timestamptz?)
+- lastApplyError (text?)
+- updatedBy (uuid?)
+- updatedAt (timestamptz)
+
+RobotEventLog (optional):
+- eventId (uuid, PK)
+- robotId
+- type (text)                              // status|telemetry|alarm|task|commandAck|settings|localization|safety
+- severity (text)                          // info|warn|error
+- ts (timestamptz)
+- correlationId (text?)
+- payloadJson (jsonb)
+
+
+--------------------------------------------------------
+NATS JetStream (robot-facing subjects)
+--------------------------------------------------------
+Rule:
+- All robot subjects are scoped by robotId.
+- All messages include:
+  - robotId, messageId, ts, schemaVersion, correlationId?
+
+Robot -> Backend:
+- robots.identity.<robotId>
+- robots.status.<robotId>
+- robots.telemetry.<robotId>
+- robots.task.<robotId>
+- robots.alarm.<robotId>
+- robots.cmd.ack.<robotId>
+- robots.route.request.<robotId>
+- robots.traffic.state.<robotId>
+- robots.teach.state.<robotId>
+- robots.settings.report.<robotId>
+- robots.settings.ack.<robotId>
+
+Backend -> Robot:
+- robots.cmd.<robotId>
+- robots.task.<robotId>
+- robots.route.response.<robotId>
+- robots.traffic.control.<robotId>
+- robots.teach.control.<robotId>
+- robots.settings.apply.<robotId>
+- robots.settings.reset.<robotId>
+
+Streams (recommended):
+- ROBOTS_STATE
+  - subjects: robots.identity.*, robots.status.*, robots.task.*, robots.alarm.*, robots.cmd.ack.*, robots.settings.report.*, robots.settings.ack.*
+- ROBOTS_TELEMETRY
+  - subjects: robots.telemetry.*
+- ROBOTS_COMMANDS
+  - subjects: robots.cmd.*, robots.task.*, robots.route.request.*, robots.route.response.*, robots.traffic.control.*, robots.teach.control.*, robots.settings.apply.*, robots.settings.reset.*
+
+
+--------------------------------------------------------
+REST Endpoints (frontend)
+--------------------------------------------------------
+Base:
+- /api/v1/robots
+
+Read:
+- GET  /api/v1/robots
+- GET  /api/v1/robots/{robotId}
+- GET  /api/v1/robots/{robotId}/events?from=&to=&type=
+
+Write (Operator):
+- POST /api/v1/robots/{robotId}/commands
+  - body: { name, args }
+- GET  /api/v1/robots/{robotId}/settings
+- PUT  /api/v1/robots/{robotId}/settings
+  - body: { limits?, ioConfig? }
+- POST /api/v1/robots/{robotId}/settings/motor-reset
+- POST /api/v1/robots/{robotId}/settings/io-reset
+
+
+--------------------------------------------------------
+SignalR Events (frontend live + alerting)
+--------------------------------------------------------
+Hub:
+- /hubs/realtime
+
+Events:
+- robot.connection.updated
+  - { robotId, connected, lastSeenAt }
+- robot.status.updated
+  - { robotId, mode, status, estop, safetyStopActive?, safetyStopReason?, obstacleDetected?, errorCode, batteryPercent, localized, localizationConfidence?, updatedAt }
+- robot.telemetry.updated
+  - { robotId, poseX, poseY, headingRad, velocityMps, lastQrCode?, lastQrAnchorId?, updatedAt }
+- robot.task.updated
+  - { robotId, taskId, status, step, progress, lastUpdateAt }
+
+Alert rule:
+- Consider these alert conditions:
+  - connected=false
+  - estop=true
+  - safetyStopActive=true
+  - status=ERROR or errorCode present
+  - localized=false (when robot is expected to be localized)
+
+
+--------------------------------------------------------
+How this module cooperates (smooth + fast ETA)
+--------------------------------------------------------
+Task (Module 07):
+- Uses RobotConnection and RobotStatus for availability filtering.
+- Uses has* booleans to match Mission requiredHas* fields.
+- Uses limitsJson to validate mission targets.
+
+Route (Module 08):
+- May use limitsJson.move values to bound effective speed for ETA.
+- Avoids edges blocked by Traffic and uses Traffic penalties for faster detours.
+
+Traffic (Module 09):
+- Uses limitsJson.move accel/decel to compute braking distance and speed profiles.
+- Uses robot connectivity and status:
+  - offline / estop / safetyStopActive / ERROR implies conservative occupancy and blocked edges.
+
+Teach (Module 10):
+- Validates mission steps against has* booleans and limitsJson.
+- Uses teach control/state subjects and settings where needed.
+
+Use cases supported:
+- conceptV3/backend/12_use_cases_robot_task_route_traffic_teach.txt
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (module template)
+--------------------------------------------------------
+backend/Modules/Robots/
+  Model/
+    Robot.cs
+    RobotConnection.cs
+    RobotStatus.cs
+    RobotTelemetry.cs
+    RobotTaskState.cs
+    RobotSettings.cs
+    RobotEventLog.cs
+
+  Dto/
+    RobotDto.cs
+    RobotConnectionDto.cs
+    RobotStatusDto.cs
+    RobotTelemetryDto.cs
+    RobotTaskStateDto.cs
+    RobotSettingsDto.cs
+    RobotEventDto.cs
+
+  Messaging/
+    RobotContracts.V1.cs                   // NATS envelopes/payloads
+
+  Data/
+    RobotRepository.cs
+    RobotSettingsRepository.cs
+    RobotEventRepository.cs
+
+  Service/
+    RobotRegistryService.cs                // identity + capabilities
+    RobotStateIngestService.cs             // status/telemetry/task state updates
+    RobotSettingsService.cs                // desired vs reported settings
+    RobotCommandService.cs                 // operator/system commands + ack tracking
+    RobotAlertService.cs                   // alert derivation and publishing
+
+  Api/
+    RobotsController.cs
+    RobotSettingsController.cs
+    RobotCommandsController.cs
+
+  Realtime/
+    RobotHubPublisher.cs
+
+  Worker/
+    RobotIdentityWorker.cs                 // consumes robots.identity.*
+    RobotStatusWorker.cs                   // consumes robots.status.*
+    RobotTelemetryWorker.cs                // consumes robots.telemetry.*
+    RobotTaskStateWorker.cs                // consumes robots.task.* (robot reports)
+    RobotCommandAckWorker.cs               // consumes robots.cmd.ack.*
+    RobotSettingsReportWorker.cs           // consumes robots.settings.report.*
+    RobotSettingsAckWorker.cs              // consumes robots.settings.ack.*
+    RobotOutboundPublisherWorker.cs        // publishes robots.cmd/task/route/traffic/teach/settings.*
+
+  Persistence/
+    RobotsDbSchema.cs
+    *EntityConfig.cs
+

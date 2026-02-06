@@ -1,0 +1,242 @@
+{
+  "schema": {
+    "name": "skylink.robot_config",
+    "schemaVersion": "1.0.0"
+  },
+  "config": {
+    "configVersion": 1,
+    "updatedAt": "2026-02-06T00:00:00Z"
+  },
+  "robot": {
+    "robotKey": "RB-0001",
+    "displayName": "Robot-01",
+    "vendor": "Skylink",
+    "model": "AMR-FK-500",
+    "hardwareRevision": "A",
+    "serialNumber": "SN-EXAMPLE-001",
+    "versions": {
+      "firmware": "1.2.3",
+      "software": "3.4.5"
+    }
+  },
+  "specs": {
+    "dimensionsMm": {
+      "length": 1100,
+      "width": 800,
+      "height": 350
+    },
+    "weightKg": 180,
+    "loadCapacityKg": 500,
+    "footprintPolygonMm": [
+      [550, 400],
+      [550, -400],
+      [-550, -400],
+      [-550, 400]
+    ],
+    "kinematics": {
+      "driveType": "differential",
+      "wheelDiameterMm": 200,
+      "trackWidthMm": 620,
+      "wheelbaseMm": 520,
+      "maxSlopeDeg": 5
+    }
+  },
+  "runtime": {
+    "comms": {
+      "transport": "nats_jetstream",
+      "subjects": {
+        "handshakeReq": "robots.handshake.req.{robotKey}",
+        "handshakeRes": "robots.handshake.res.{robotKey}",
+        "state": "robots.state.{robotKey}",
+        "telemetry": "robots.telemetry.{robotKey}",
+        "cmd": "robots.cmd.{robotKey}",
+        "cmdAck": "robots.cmd.ack.{robotKey}"
+      },
+      "publishRatesHz": {
+        "state": 10,
+        "telemetry": 2,
+        "handshake": 0
+      }
+    }
+  },
+  "hardware": {
+    "motors": [
+      {
+        "motorId": "M_DRIVE_L",
+        "name": "Left drive motor",
+        "motorType": "drive",
+        "communicationType": "can",
+        "connection": {
+          "canBus": "can0",
+          "canNodeId": 1
+        },
+        "limits": {
+          "maxSpeedMps": 2.0,
+          "maxAccelerationMps2": 1.0,
+          "lowerLimit": null,
+          "upperLimit": null
+        },
+        "metadata": {
+          "controlMode": "velocity",
+          "invertDirection": false,
+          "gearRatio": 12.5
+        }
+      },
+      {
+        "motorId": "M_DRIVE_R",
+        "name": "Right drive motor",
+        "motorType": "drive",
+        "communicationType": "can",
+        "connection": {
+          "canBus": "can0",
+          "canNodeId": 2
+        },
+        "limits": {
+          "maxSpeedMps": 2.0,
+          "maxAccelerationMps2": 1.0,
+          "lowerLimit": null,
+          "upperLimit": null
+        },
+        "metadata": {
+          "controlMode": "velocity",
+          "invertDirection": true,
+          "gearRatio": 12.5
+        }
+      },
+      {
+        "motorId": "M_HOIST",
+        "name": "Hoist motor",
+        "motorType": "hoist",
+        "communicationType": "can",
+        "connection": {
+          "canBus": "can0",
+          "canNodeId": 4
+        },
+        "limits": {
+          "maxSpeedMps": 0.25,
+          "maxAccelerationMps2": 0.4,
+          "lowerLimit": 0,
+          "upperLimit": 300
+        },
+        "metadata": {
+          "controlMode": "position",
+          "homeSensorId": "IO_HOIST_HOME"
+        }
+      }
+    ],
+    "ioDevices": [
+      {
+        "ioDeviceId": "IO_ESTOP_MAIN",
+        "name": "Main e-stop chain",
+        "deviceType": "estop",
+        "interfaceType": "gpio",
+        "isRequired": true,
+        "connection": {
+          "gpioChannel": "DIN_ESTOP"
+        },
+        "metadata": {
+          "latching": true,
+          "resetRequired": true
+        }
+      },
+      {
+        "ioDeviceId": "IO_LIDAR_FRONT",
+        "name": "Front lidar",
+        "deviceType": "lidar",
+        "interfaceType": "ethernet",
+        "isRequired": true,
+        "connection": {
+          "ip": "192.168.10.20",
+          "port": 2112
+        },
+        "metadata": {
+          "model": "SICK-TiM",
+          "fovDeg": 270,
+          "rangeM": 20,
+          "rateHz": 15,
+          "mount": {
+            "frame": "base_link",
+            "poseMmDeg": {
+              "xMm": 420,
+              "yMm": 0,
+              "zMm": 240,
+              "rollDeg": 0,
+              "pitchDeg": 0,
+              "yawDeg": 0
+            }
+          }
+        }
+      },
+      {
+        "ioDeviceId": "IO_IMU_1",
+        "name": "IMU",
+        "deviceType": "imu",
+        "interfaceType": "rs232",
+        "isRequired": true,
+        "connection": {
+          "serialPort": "COM5",
+          "baud": 115200,
+          "parity": "none",
+          "dataBits": 8,
+          "stopBits": 1,
+          "flowControl": "none"
+        },
+        "metadata": {
+          "rateHz": 100,
+          "mount": {
+            "frame": "base_link",
+            "poseMmDeg": {
+              "xMm": 0,
+              "yMm": 0,
+              "zMm": 120,
+              "rollDeg": 0,
+              "pitchDeg": 0,
+              "yawDeg": 0
+            }
+          }
+        }
+      },
+      {
+        "ioDeviceId": "IO_BARCODE_1",
+        "name": "Barcode scanner",
+        "deviceType": "barcode_scanner",
+        "interfaceType": "usb",
+        "isRequired": false,
+        "connection": {
+          "devicePath": "USB\\VID_0000&PID_0000"
+        },
+        "metadata": {
+          "model": "Zebra-DS3608",
+          "mount": {
+            "frame": "tool_link",
+            "poseMmDeg": {
+              "xMm": 50,
+              "yMm": 0,
+              "zMm": 80,
+              "rollDeg": 0,
+              "pitchDeg": 0,
+              "yawDeg": 0
+            }
+          }
+        }
+      }
+    ]
+  },
+  "stateModel": {
+    "robotRunStates": ["offline", "idle", "running", "stop"],
+    "robotSeverities": ["normal", "warning", "error"],
+    "motorTypeToDomain": {
+      "drive": "mobility",
+      "turn": "steering",
+      "hoist": "hoist",
+      "telescope": "telescope",
+      "rotate": "rotate",
+      "grip": "grip"
+    },
+    "defaultFaultSeverity": {
+      "warningCodes": ["over_temp", "tracking_error", "calibration_required"],
+      "errorCodes": ["over_current", "encoder_fault", "driver_fault", "estop_active", "communication_lost"]
+    }
+  }
+}
+

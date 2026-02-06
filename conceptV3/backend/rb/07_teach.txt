@@ -1,0 +1,420 @@
+========================================================
+MODULE 10: TEACH (MISSION AUTHORING + REUSABLE EXECUTION)
+========================================================
+
+Goal:
+- Provide a backend module that lets operators author reusable Missions safely.
+- Make Missions executable through the Task module with predictable ETA behavior:
+  - store required robot capabilities on the Mission (fast robot selection)
+  - store non-move action durations (traffic scheduling + ETA realism)
+- Enforce safe teaching by integrating an exclusive Traffic lock.
+
+
+--------------------------------------------------------
+Module Boundaries (what Teach owns)
+--------------------------------------------------------
+Teach owns:
+- Mission authoring:
+  - create/update missions and steps
+  - versioning and publish lifecycle (DRAFT -> PUBLISHED -> ARCHIVED)
+  - nested missions (missionRef) with cycle detection
+- Teach sessions:
+  - start/stop teaching on a specific robot
+  - ingest teach state feedback while recording
+  - optional persistence of raw samples for later analysis
+- Validation of mission executability:
+  - capability booleans (hasGrip/hasRotate/hasTelescope/hasHoist)
+  - limitsJson range validation (mm/deg bounds, speed constraints)
+- Execution history:
+  - audit log of mission runs (task-linked where possible)
+- Teach lock integration:
+  - acquire/heartbeat/release traffic lock during teach
+
+Teach does not own:
+- Robot connectivity transport implementation (Robot module owns robot boundary).
+- Task lifecycle and assignment decisions (Task module owns task state machine).
+- Route graph planning (Route module owns path planning and ETA travel time).
+- Reservation algorithm and collision avoidance (Traffic module owns time windows).
+
+
+--------------------------------------------------------
+Inputs / Outputs (how Teach communicates)
+--------------------------------------------------------
+REST API (frontend -> Teach):
+- Mission CRUD and lifecycle:
+  - list/get missions
+  - create/update mission drafts
+  - publish/archive
+- Teach session control:
+  - create/start/stop sessions
+  - fetch samples (optional)
+- Execution history:
+  - list/get execution records
+
+SignalR (Teach -> frontend live view):
+- teach.session.updated
+- teach.sample.received
+- teach.mission.updated
+- teach.lock.updated
+- teach.execution.updated
+
+NATS JetStream (robot-facing, via Robot module boundary):
+- Teach control (backend -> robot):
+  - robots.teach.control.<robotId>
+- Teach state (robot -> backend):
+  - robots.teach.state.<robotId>
+
+Internal cross-module calls (preferred):
+- Teach -> Robot:
+  - validate robot capabilities and limits for publish
+  - send teach control commands through Robot gateway
+- Teach -> Traffic:
+  - acquire/heartbeat/release teach lock
+  - translate lock into routing blocks for other robots
+- Teach -> Task (preferred execution path):
+  - request mission replay by creating a task (missionId or expanded steps)
+
+
+========================================================
+DATA MODEL (MINIMUM)
+========================================================
+
+Schema:
+- teach
+
+Mission:
+- missionId (uuid, PK)
+- name (text)
+- description (text?)
+- version (int)
+- status (text)                         // DRAFT | PUBLISHED | ARCHIVED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+- requiredHasHoist (bool)
+- requiredHasTelescope (bool)
+- requiredHasRotate (bool)
+- requiredHasGrip (bool)
+- requiredCapabilitiesJson (jsonb?)     // derived, debug-friendly
+- stepsJson (jsonb)                     // serialized list of steps
+- estimatedActionTimeSeconds (double?)  // sum(requiredTimeSeconds) excluding moveToPoint
+
+TeachSession:
+- teachSessionId (uuid, PK)
+- robotId (text)
+- status (text)                         // DRAFT | RECORDING | STOPPED | FAILED
+- createdBy (uuid)
+- createdAt (timestamptz)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- draftMissionId (uuid?)                // mission created/updated by the session
+- trafficLockId (uuid?)                 // active lock reference while recording
+
+TeachSample (optional):
+- teachSampleId (uuid, PK)
+- teachSessionId (FK)
+- ts (timestamptz)
+- poseX, poseY, headingRad (double?)
+- hoistHeight (double?)
+- telescopeLength (double?)
+- rotationAngleDeg (double?)
+- gripPosition (double?)
+- rawJson (jsonb?)
+
+MissionExecution:
+- executionId (uuid, PK)
+- missionId (uuid)
+- robotId (text)
+- taskId (uuid?)                        // link to Tasks if executed as a task
+- status (text)                         // QUEUED | RUNNING | DONE | FAILED | CANCELED
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- lastUpdateAt (timestamptz)
+- errorCode (text?)
+- errorMessage (text?)
+
+
+========================================================
+MISSION STEP CONTRACT
+========================================================
+
+Step (concept):
+{
+  "schemaVersion": 1,
+  "stepId": "uuid",
+  "type": "moveToPoint|grip|rotate|telescope|hoist|wait|missionRef",
+  "requiredTimeSeconds": 2.0,
+  "payload": { ... }
+}
+
+Type payloads (concept):
+- moveToPoint:
+  - { "mapVersionId": "uuid", "destination": { "nodeId" | "pointId" | "x","y" } }
+- grip:
+  - { "target": "open|close|position", "positionMm": 50 }
+- rotate:
+  - { "targetDeg": 90 }
+- telescope:
+  - { "targetMm": 600 }
+- hoist:
+  - { "targetMm": 900 }
+- wait:
+  - { "reason": "stabilize" }
+- missionRef:
+  - { "missionId": "uuid", "args": { ... } }
+
+Time rule:
+- Every step except moveToPoint must specify requiredTimeSeconds.
+- moveToPoint time is computed by Route and affected by Traffic.
+
+
+========================================================
+RBAC RULES (MATCH CONCEPT V3)
+========================================================
+
+Default:
+- All endpoints require authentication (global fallback policy).
+
+Read endpoints:
+- Viewer (viewer/operator/admin)
+
+Write endpoints:
+- Operator (operator/admin)
+
+Robot-to-backend:
+- Teach control/state is authenticated at robot boundary (Robot module identity + authorization).
+
+
+========================================================
+TEACH LOCK (TRAFFIC INTEGRATION)
+========================================================
+
+Goal:
+- When teaching is active, other robots must not enter the teaching corridor/area.
+
+Scope:
+- nodeIds and pathIds derived from:
+  - operator-selected region and/or
+  - current robot corridor while teaching
+
+Rules:
+- Teach lock is enforced by Traffic as a hard block for other robots.
+- Route treats locked nodes/paths as blocked when planning for other robots.
+- Lock uses TTL + heartbeat to avoid stale locks.
+
+Lifecycle:
+1) Teach start:
+  - Teach requests lock acquisition from Traffic: traffic.lock.acquire(scope, robotId, ttl)
+2) During teach:
+  - Teach sends periodic heartbeat: traffic.lock.heartbeat(lockId)
+3) Teach stop/fail:
+  - Teach releases lock: traffic.lock.release(lockId)
+
+
+========================================================
+PSEUDOCODE: SERVICES + FLOWS
+========================================================
+
+--------------------------------------------------------
+Interfaces (in-process)
+--------------------------------------------------------
+interface TeachService {
+  createSession(robotId, operatorUserId, correlationId): TeachSession
+  startSession(teachSessionId, correlationId): void
+  stopSession(teachSessionId, correlationId): void
+
+  createMissionDraft(request, operatorUserId, correlationId): Mission
+  updateMissionDraft(missionId, request, operatorUserId, correlationId): Mission
+  publishMission(missionId, operatorUserId, correlationId): Mission
+  archiveMission(missionId, operatorUserId, correlationId): void
+
+  requestMissionExecution(missionId, robotId?, operatorUserId, correlationId): MissionExecution
+}
+
+interface RobotCapabilitiesService {
+  getRobotCapabilities(robotId): RobotCapabilities
+  validateStepsAgainstRobot(robotId, steps): ValidationResult
+  sendTeachControl(robotId, teachControlEnvelope): void
+}
+
+interface TrafficLockService {
+  acquireTeachLock(robotId, scope, ttlSeconds, correlationId): TrafficLock
+  heartbeatTeachLock(lockId, correlationId): void
+  releaseTeachLock(lockId, correlationId): void
+}
+
+interface TaskClient {
+  createMissionTask(missionId, robotId?, correlationId): { taskId }
+}
+
+
+--------------------------------------------------------
+Flow A: Start Teach Session (safe exclusivity)
+--------------------------------------------------------
+TeachService.startSession(teachSessionId, correlationId):
+  session = TeachRepo.getSessionForUpdate(teachSessionId)
+  if session.status not in {DRAFT, STOPPED}:
+    return
+
+  robotCaps = RobotCapabilitiesService.getRobotCapabilities(session.robotId)
+  if robotCaps.connected == false:
+    TeachRepo.setSessionFailed(teachSessionId, reason="robot_offline")
+    SignalR.publish("teach.session.updated", { teachSessionId, status:"FAILED" })
+    return
+
+  scope = TeachScopePlanner.deriveInitialScope(session.robotId)
+  lock = TrafficLockService.acquireTeachLock(session.robotId, scope, ttlSeconds=10, correlationId)
+
+  TeachRepo.setSessionRecording(
+    teachSessionId,
+    startedAtUtc=nowUtc,
+    trafficLockId=lock.lockId
+  )
+
+  cmd = {
+    messageId: newGuid(),
+    correlationId,
+    producedAtUtc: nowUtcIso(),
+    robotId: session.robotId,
+    type: "teachStart",
+    payload: { teachSessionId }
+  }
+  RobotCapabilitiesService.sendTeachControl(session.robotId, cmd)
+
+  SignalR.publish("teach.lock.updated", { teachSessionId, lockId: lock.lockId, scope })
+  SignalR.publish("teach.session.updated", { teachSessionId, status:"RECORDING" })
+
+
+--------------------------------------------------------
+Flow B: Ingest Teach State (record samples + build draft steps)
+--------------------------------------------------------
+TeachStateIngestWorker.onRobotTeachState(robotId, msg):
+  session = TeachRepo.getActiveSessionByRobot(robotId)
+  if session is null:
+    return
+
+  TeachRepo.appendSample(session.teachSessionId, msg.payload, nowUtc)
+  SignalR.publish("teach.sample.received", { teachSessionId: session.teachSessionId, payload: msg.payload })
+
+  derivedScope = TeachScopePlanner.updateScopeIfNeeded(robotId, msg.payload)
+  if derivedScope.changed:
+    TrafficLockService.heartbeatTeachLock(session.trafficLockId, msg.correlationId)
+    TrafficLockService.updateLockScope(session.trafficLockId, derivedScope, msg.correlationId)
+    SignalR.publish("teach.lock.updated", { teachSessionId: session.teachSessionId, scope: derivedScope })
+
+  draftUpdate = TeachStepBuilder.tryAppendStepFromOperatorIntent(session.teachSessionId, msg.payload)
+  if draftUpdate.changed:
+    TeachRepo.updateDraftMissionSteps(session.draftMissionId, draftUpdate.stepsJson, nowUtc)
+    SignalR.publish("teach.mission.updated", { missionId: session.draftMissionId })
+
+
+--------------------------------------------------------
+Flow C: Stop Teach Session (release lock)
+--------------------------------------------------------
+TeachService.stopSession(teachSessionId, correlationId):
+  session = TeachRepo.getSessionForUpdate(teachSessionId)
+  if session.status != RECORDING:
+    return
+
+  if session.trafficLockId exists:
+    TrafficLockService.releaseTeachLock(session.trafficLockId, correlationId)
+
+  cmd = {
+    messageId: newGuid(),
+    correlationId,
+    producedAtUtc: nowUtcIso(),
+    robotId: session.robotId,
+    type: "teachStop",
+    payload: { teachSessionId }
+  }
+  RobotCapabilitiesService.sendTeachControl(session.robotId, cmd)
+
+  TeachRepo.setSessionStopped(teachSessionId, finishedAtUtc=nowUtc)
+  SignalR.publish("teach.session.updated", { teachSessionId, status:"STOPPED" })
+
+
+--------------------------------------------------------
+Flow D: Publish Mission (capability + limits validation)
+--------------------------------------------------------
+TeachService.publishMission(missionId, operatorUserId, correlationId):
+  mission = TeachRepo.getMissionForUpdate(missionId)
+  if mission.status != DRAFT:
+    return mission
+
+  steps = MissionSteps.parse(mission.stepsJson)
+  required = CapabilityDeriver.fromSteps(steps)
+
+  if MissionGraph.detectCycle(missionId, steps):
+    throw ValidationError("missionRef_cycle")
+
+  for each referencedMissionId in MissionGraph.references(steps):
+    referencedMission = TeachRepo.getMission(referencedMissionId)
+    required = required.union(referencedMission.requiredHas*)
+
+  validation = RobotCapabilitiesService.validateStepsAgainstRobot(
+    robotId=TeachRepo.getLastTeachRobotId(missionId),
+    steps=steps
+  )
+  if validation.ok == false:
+    throw ValidationError(validation.errors)
+
+  estimatedActionSeconds = StepTime.sumRequiredSecondsExcludingMove(steps)
+
+  TeachRepo.publishMission(
+    missionId,
+    requiredHas*=required,
+    requiredCapabilitiesJson=required.toJson(),
+    estimatedActionTimeSeconds=estimatedActionSeconds,
+    version=mission.version + 1,
+    updatedAtUtc=nowUtc
+  )
+
+  SignalR.publish("teach.mission.updated", { missionId, status:"PUBLISHED" })
+  return TeachRepo.getMission(missionId)
+
+
+--------------------------------------------------------
+Flow E: Execute Mission (preferred path via Task)
+--------------------------------------------------------
+TeachService.requestMissionExecution(missionId, robotId?, operatorUserId, correlationId):
+  mission = TeachRepo.getMission(missionId)
+  if mission.status != PUBLISHED:
+    throw ValidationError("mission_not_published")
+
+  executionId = newGuid()
+  TeachRepo.createExecution(executionId, missionId, robotId, status="QUEUED", lastUpdateAtUtc=nowUtc)
+  SignalR.publish("teach.execution.updated", { executionId, status:"QUEUED" })
+
+  task = TaskClient.createMissionTask(missionId, robotId, correlationId)
+  TeachRepo.linkExecutionToTask(executionId, task.taskId, updatedAtUtc=nowUtc)
+
+  return TeachRepo.getExecution(executionId)
+
+
+========================================================
+REST ENDPOINTS (SUMMARY)
+========================================================
+
+Base:
+- /api/v1/teach
+
+Missions:
+- GET  /api/v1/teach/missions
+- GET  /api/v1/teach/missions/{missionId}
+- POST /api/v1/teach/missions
+- PUT  /api/v1/teach/missions/{missionId}
+- POST /api/v1/teach/missions/{missionId}/publish
+- POST /api/v1/teach/missions/{missionId}/archive
+
+Teach sessions:
+- POST /api/v1/teach/sessions
+- POST /api/v1/teach/sessions/{teachSessionId}/start
+- POST /api/v1/teach/sessions/{teachSessionId}/stop
+- GET  /api/v1/teach/sessions
+- GET  /api/v1/teach/sessions/{teachSessionId}
+- GET  /api/v1/teach/sessions/{teachSessionId}/samples?from=&to=
+
+Execution history:
+- GET  /api/v1/teach/executions?robotId=&missionId=
+- GET  /api/v1/teach/executions/{executionId}
+

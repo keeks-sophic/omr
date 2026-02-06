@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "iGv+1jv3jsw=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\SA-SI-GFWP6G3\\Documents\\skylink\\newsky\\robotv3\\robotv3.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\SA-SI-GFWP6G3\\.nuget\\packages\\nats.client\\1.1.8\\nats.client.1.1.8.nupkg.sha512"
+  ],
+  "logs": []
+}

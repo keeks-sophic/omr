@@ -1,0 +1,350 @@
+========================================================
+ROBOT MODULE CONCEPT (RUNS ON THE ROBOT)
+========================================================
+
+Goal:
+- Provide a scalable robot-side runtime that can adapt to different robot specs.
+- Control motors, read IO, compute robot status, and execute tasks safely.
+- Communicate with backend through NATS JetStream for tasking and telemetry.
+
+
+--------------------------------------------------------
+1) Robot Runtime Responsibilities
+--------------------------------------------------------
+The robot module runs on the robot and is responsible for:
+- Identity: expose robot identity and capabilities (model, dimensions, version, supported features).
+- Configuration: load and apply per-motor controller properties (max speed, max acceleration, limits, etc.).
+- Hardware I/O: read sensors and controller IO (limit switches, estop, lidar, barcode scanner, etc.).
+- Motor control: command motors to move; query motors for status/errors; reset motors when needed.
+- State: compute consolidated robot status (RUNNING / WARNING / ERROR / OFFLINE / PAUSED).
+- Localization: maintain accurate position from motor feedback and/or barcode scanner corrections.
+- Task execution: consume tasks from backend, execute locally, and stream telemetry/status back.
+- Safety: stop immediately on safety input and prevent auto motion when in ERROR.
+
+
+--------------------------------------------------------
+2) Scalability Model (Motors / IO / Capabilities)
+--------------------------------------------------------
+Robots may differ by:
+- Number and types of motors (drive, lift, rotate, telescope, conveyors, etc.)
+- Number and types of IO points and sensors
+- Physical dimensions and kinematic constraints
+- Optional capabilities (barcode localization, lidar obstacle detection, hoist, etc.)
+
+Design rule:
+- Treat motors and IO as collections of typed devices discovered from configuration.
+- Runtime must not hard-code motor names or fixed IO counts.
+
+Recommended structure (concept):
+- RobotSpec: immutable identity + dimensions + capability flags.
+- MotorSet: list/map of motors with a shared interface and per-motor configuration.
+- IOSet: list/map of IO points with types (digital input, digital output, analog input, event source).
+- StatusAggregator: converts many device states into one robot status + fault list.
+- TaskExecutor: converts backend tasks into motor commands and checks completion.
+
+Runtime mode (set before start):
+- REALTIME:
+  - Robot module connects to real motor controllers and reads real IO.
+  - Motor/IO count and wiring/mapping are defined only on the robot (boot-time) for safety and deterministic control.
+- SIM:
+  - Robot module does not control real motors.
+  - Motor movement and feedback are generated using an idealized motion model (limits respected, no real disturbances).
+  - Capabilities can be modified for simulation scenarios, but only before the module starts.
+
+Rule:
+- SIM vs REALTIME cannot be changed while running.
+- Motor count and IO count are boot-time constants for both modes.
+
+
+--------------------------------------------------------
+3) Identity and Specification
+--------------------------------------------------------
+Robot identity should include:
+- robotId (unique key)
+- vendor / model
+- hardware revision / firmware version
+- dimensions (length/width/height), payload limits if applicable
+- capability set (features present and usable)
+
+Capability examples:
+- hasBarcodeScanner
+- hasLidarSafety
+- hasHoistMotor
+- hasRotateMotor
+- hasTurnMechanism
+- supportsAutoNavigation
+
+Rule:
+- Identity and capabilities are reported to backend at boot and whenever they change.
+
+Capability model (how to add capabilities):
+- Split capabilities into two parts:
+  - HardwareCapabilities (boot-time, robot-owned):
+    - derived from robot configuration and hardware discovery
+    - not editable by backend in REALTIME
+  - EffectiveCapabilities (boot-time, mode-dependent):
+    - REALTIME: equals HardwareCapabilities
+    - SIM: equals HardwareCapabilities overridden by sim configuration, to enable/disable features for testing
+- Add a new capability by:
+  - defining a capability key (example: hasConveyor, hasDockingSensor, supportsTurnInPlace)
+  - mapping it to:
+    - required motors (by type)
+    - required IO (by type)
+    - required safety interlocks
+  - updating Task/Teach validation to check EffectiveCapabilities before executing
+
+
+--------------------------------------------------------
+4) Motor Model and Controller Properties
+--------------------------------------------------------
+Each motor exposes:
+- connection state: CONNECTED / DISCONNECTED
+- motion state: IDLE / MOVING / HOMING / STOPPED / ERROR
+- measured feedback: position, velocity, current/torque (when available)
+- error codes and last error details
+- reset capability (clear faults, re-enable drive)
+
+Per-motor configurable properties (examples):
+- maxSpeed
+- maxAcceleration / maxDeceleration
+- soft limits / hard limits
+- homing parameters
+- control mode (position/velocity/torque) if supported
+
+Runtime rules:
+- Apply motor configuration before accepting tasks.
+- Continuously monitor motor connectivity and error state.
+- If a motor disconnects or enters fault, update robot fault list immediately.
+- Provide a safe reset mechanism per motor; after reset, re-validate readiness.
+
+Critical motion mechanisms (concept):
+- Move mechanism (critical):
+  - Drive motors perform normal movement (straight/curve) and provide primary odometry feedback.
+  - During move, only move/drive motors are expected to move; other actuators remain interlocked unless a task explicitly requires them.
+- Turn mechanism (optional, critical when present):
+  - Some robot variants support turning by actuating a dedicated turn motor that drives a cam up into a rail for turning.
+  - The robot must treat turn as a distinct mode with explicit engage/disengage steps and interlocks.
+  - When hasTurnMechanism=false, turn commands are rejected as capability-not-supported.
+
+Move vs Turn safety rules (concept):
+- Turn mode requires:
+  - turn mechanism present and CONNECTED
+  - no active estop/safety stop
+  - no drive motor ERROR
+  - any required IO confirmations (cam engaged switch, rail contact, etc.) when available
+- While in Turn mode:
+  - restrict motion commands to those compatible with turning
+  - continuously verify turn mechanism state; if unexpected disengage/fault occurs, stop immediately and raise ERROR
+- After turning:
+  - command turn mechanism to disengage and verify safe state before resuming normal movement
+
+
+--------------------------------------------------------
+5) IO and Sensor Model
+--------------------------------------------------------
+IO sources may include:
+- limit switches
+- estop chain / safety relay state
+- lidar obstacle detection
+- barcode scanner events
+- other sensors (proximity, bumpers, encoders, pressure, etc.)
+
+IO rules:
+- IO is configured as a list/map, not hard-coded.
+- IO values are sampled at appropriate rates (fast for safety, slower for non-critical).
+- Event-style sensors (barcode scanner, faults) produce discrete events plus last-known state.
+
+Safety IO priority:
+- Estop / safety stop inputs must be processed with highest priority.
+- On active safety stop: robot must stop locally immediately (do not wait for backend).
+
+
+--------------------------------------------------------
+6) Faults and Robot Status Semantics
+--------------------------------------------------------
+Robot maintains:
+- faults: a list of active faults (source=motor/io/system, code, severity, ts, details)
+- consolidated status:
+  - RUNNING: can execute auto motion
+  - WARNING: can still move, but a non-critical function is unavailable
+  - ERROR: must stop auto motion; robot cannot move automatically
+  - PAUSED: motion blocked by safety stop / hold state but can recover
+  - OFFLINE: not connected to backend or hardware is unavailable for safe operation
+
+Severity mapping rule:
+- WARNING: a fault that degrades capability but still allows safe navigation/motion.
+  Example: barcode scanner failed but motor feedback localization still works.
+- ERROR: a fault that prevents safe motion or control.
+  Examples: drive motor fault, estop active, safety relay open, critical sensor failure.
+
+Transition rules:
+- Any ERROR requires stopping auto motion immediately and rejecting new tasks.
+- When a fault clears, status may return to RUNNING only after readiness checks pass.
+- Backend always receives fault/state updates; robot must remain safe even if backend is unavailable.
+
+
+--------------------------------------------------------
+7) Localization / Positioning
+--------------------------------------------------------
+Robot position sources:
+- odometry from motor feedback (wheel encoders / drive feedback)
+- barcode scanner corrections (absolute reference points)
+
+Rules:
+- Maintain an internal pose estimate continuously from motor feedback.
+- When barcode events occur, correct pose according to configured map/markers.
+- Stream pose and velocity to backend at a frequency suitable for traffic control.
+
+Facing direction (heading):
+- Pose includes facing direction so backend can do traffic control and teach correctly:
+  - position: (x, y)
+  - facing direction: heading/yaw (robot forward direction) in radians or degrees
+- Heading is derived from:
+  - drive feedback (differential/ackermann kinematics) and/or IMU if present
+  - corrected using absolute references when available (barcode-based heading markers if supported)
+
+
+--------------------------------------------------------
+8) Task Execution
+--------------------------------------------------------
+Backend sends tasks; robot executes them locally by controlling motors and monitoring IO.
+
+Task execution loop (concept):
+1) Receive task assign message (with taskId and parameters).
+2) Validate prerequisites:
+   - robot status is RUNNING (not ERROR/OFFLINE/PAUSED)
+   - required capabilities exist for this task
+   - required motors are CONNECTED and not in ERROR
+3) Execute:
+   - send motor commands
+   - monitor completion conditions, timeouts, and safety IO
+4) Report:
+   - progress/telemetry while executing
+   - final state: done / failed / canceled
+
+If safety stop triggers during execution:
+- Stop immediately locally.
+- Transition to PAUSED or ERROR depending on the cause.
+- Report the change immediately to backend.
+
+
+--------------------------------------------------------
+9) Teach Support (backend teach module)
+--------------------------------------------------------
+Teach mode allows backend to control the robot to specific positions and capture a reusable robot state snapshot.
+
+Teach goals:
+- Backend can jog/position the robot (and its actuators) to a desired state.
+- Robot reports the current state so backend can save it as a teach point.
+- Saved state depends on robot capabilities and available axes.
+
+Teach snapshot (capability-driven, concept):
+- Always include:
+  - pose (x, y, heading/facing direction) from odometry and/or corrected pose source
+  - robot status + active faults
+- Include if capability/axis present:
+  - hoist length/position
+  - rotate angle
+  - telescope extension
+  - turn mechanism state (engaged/disengaged) when hasTurnMechanism=true
+
+Teach control rules:
+- Teach control messages are accepted only when robot is online and not in ERROR.
+- Safety stop always overrides teach commands and stops locally immediately.
+- Teach commands must respect the same per-motor limits and IO interlocks as normal task execution.
+
+Teach communication (concept subjects):
+- Backend -> Robot:
+  - robots.teach.control.<robotId>            // setTeachMode, jog, goToPose, requestSnapshot, stop
+- Robot -> Backend:
+  - robots.teach.state.<robotId>              // current teach mode, current pose, actuator states
+  - robots.teach.snapshot.<robotId>           // response to requestSnapshot (full captured state)
+
+Teach frequency rule:
+- robots.teach.state.<robotId> can be streamed while in teach mode (medium rate).
+- robots.teach.snapshot.<robotId> is event-driven (only when requested or on save action).
+
+
+--------------------------------------------------------
+10) NATS JetStream Communication With Backend
+--------------------------------------------------------
+Robot uses NATS JetStream subjects to:
+- publish identity, status, telemetry, faults
+- consume tasks and control messages
+
+Message characteristics:
+- versioned envelopes for compatibility
+- include robotId, messageId, ts, correlationId/commandId for dedup and tracing
+- keep high-frequency payloads compact
+
+Recommended publish categories:
+- Heartbeat / presence:
+  - robot sends periodic heartbeat so backend can mark online/offline.
+  - backend tracks lastSeenAt and marks OFFLINE after timeout.
+- Identity (low frequency):
+  - publish at boot and on-change.
+- Status (medium frequency):
+  - publish at fixed rate (e.g., 1 Hz) and immediately on critical changes.
+- Traffic / pose (higher frequency):
+  - publish pose/velocity/traffic-state more frequently for traffic control.
+- Task updates (event-driven):
+  - publish only on task state changes and optionally at a progress rate while executing.
+- Faults/alarms (event-driven):
+  - publish immediately when a fault appears/clears.
+
+Backend -> Robot categories:
+- Task assignment and cancellation
+- Traffic constraints / control
+- Settings apply/reset (optional policy)
+- Generic commands (reset motor fault, request snapshot, etc.)
+
+Frequency rule:
+- Important data uses higher frequency (traffic-state, pose).
+- Change-driven data uses publish-on-update (task lifecycle, faults, identity changes).
+
+Motor settings editing from backend (concept):
+- Backend can edit motor controller properties such as speed/acceleration/limits through desired settings messages.
+- Robot remains authoritative for safe application:
+  - validates requested settings against hardware constraints and safety policy
+  - applies changes only if allowed for the current mode and current robot status
+  - reports applied settings back to backend for convergence
+
+Recommended settings flow (concept subjects):
+- Backend -> Robot:
+  - robots.settings.apply.<robotId>           // apply new desired motor/IO parameters (boot-time safe subset)
+  - robots.settings.reset.<robotId>           // reset to robot defaults or last-known safe settings
+  - robots.cmd.<robotId>                      // operations: resetMotorFault, enableMotor, disableMotor, requestSettings
+- Robot -> Backend:
+  - robots.settings.report.<robotId>          // current effective settings after apply/reset
+  - robots.settings.ack.<robotId>             // accepted/rejected with reason, correlationId
+  - robots.cmd.ack.<robotId>                  // per-command acknowledgements
+
+Mode rule for settings:
+- REALTIME:
+  - motor/IO count and mapping are not editable from backend
+  - operational parameters (limits, max speed/accel, resets) may be editable if policy allows
+- SIM:
+  - settings and capability overrides are allowed, but only before start
+
+
+--------------------------------------------------------
+11) Online / Offline Behavior
+--------------------------------------------------------
+Robot-side:
+- If backend connection drops, continue local safety behavior and stop accepting new tasks.
+- Optionally finish or safely stop current action depending on policy and safety conditions.
+
+Backend-side:
+- Determine ONLINE/OFFLINE by:
+  - JetStream consumer presence and/or lastSeenAt heartbeat timeouts
+- Treat OFFLINE robots as not controllable for traffic scheduling and task dispatch.
+
+
+--------------------------------------------------------
+12) Summary
+--------------------------------------------------------
+This robot module is a robot-side runtime that:
+- Scales across different robot specs by defining motors, IO, and capabilities as configured device sets.
+- Executes tasks locally with strict safety/fault handling.
+- Streams identity, status, telemetry, faults, and task progress to backend via NATS JetStream.
+- Receives tasks and control messages from backend and provides timely feedback for traffic control.

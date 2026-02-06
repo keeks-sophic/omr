@@ -1,0 +1,41 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "robotv3/1.0.0": {
+        "dependencies": {
+          "NATS.Client": "1.1.8"
+        },
+        "runtime": {
+          "robotv3.dll": {}
+        }
+      },
+      "NATS.Client/1.1.8": {
+        "runtime": {
+          "lib/netstandard2.0/NATS.Client.dll": {
+            "assemblyVersion": "1.1.8.0",
+            "fileVersion": "1.1.8.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "robotv3/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "NATS.Client/1.1.8": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-ISyMFTeESWsGQR10HEg5YtgrroDMg8XGsEWRMoWBrGWGRRHq+uSU3RzSU62tFW6ULEyjXQqPrnk6giyBKE98Aw==",
+      "path": "nats.client/1.1.8",
+      "hashPath": "nats.client.1.1.8.nupkg.sha512"
+    }
+  }
+}

@@ -1,0 +1,324 @@
+========================================================
+MODULE 08: TASK MANAGER (MANUAL + AUTO + SCHEDULED MISSIONS)
+========================================================
+
+Goal:
+- Provide a backend module that orchestrates mission execution at an operator/workflow level.
+- Support:
+  - Manual mode: operator chooses which robot runs which mission
+  - Auto mode: system selects an available robot on the map to run a mission
+  - Scheduled mode: repeat mission execution based on a configured schedule
+- Trigger robot execution by creating Tasks that reference Missions:
+  - Teach module defines Missions: conceptV3/backend/07_teach.txt
+  - Task module owns lifecycle/dispatch: conceptV3/backend/rb/07_task.txt
+  - Robot communication is via Robot Link: conceptV3/backend/06_robot_link.txt
+
+Non-goals:
+- Owning the task lifecycle state machine (owned by Task module).
+- Publishing robot NATS subjects directly (owned by Robot Link).
+- Implementing mission authoring (owned by Teach).
+- Implementing map routing and collision avoidance (owned by Route/Traffic).
+
+
+--------------------------------------------------------
+Module Boundary (Task Manager owns)
+--------------------------------------------------------
+Task Manager owns:
+- Operator-facing orchestration:
+  - select mission + target scope (robotId or auto)
+  - start/stop scheduled mission plans
+  - view plan/run status (high-level)
+- Assignment policy for auto mode:
+  - eligibility filtering (online, status, capabilities, map compatibility)
+  - selection heuristics (closest/least busy/battery-aware) as a policy plug-in
+- Schedule execution:
+  - cron/interval scheduling for recurring mission runs
+  - backoff and retry strategy when no robot is available
+- Audit:
+  - who started a plan, who forced an assignment, why an auto assignment failed
+
+Task Manager does not own:
+- Task lifecycle transitions (Task module).
+- Robot hardware control and teach snapshot capture (robot runtime).
+- Traffic reservation/locks (Traffic module), but may request a lock through Traffic if needed.
+
+
+--------------------------------------------------------
+Modes
+--------------------------------------------------------
+Manual mode:
+- Operator chooses:
+  - missionId + missionVersionId (or “latest published”)
+  - robotId
+- Task Manager creates a Task (type=MISSION) via Task module and pins assignedRobotId.
+
+Auto mode:
+- Operator chooses:
+  - missionId + missionVersionId (or “latest published”)
+  - map scope (mapId/mapVersionId or “current map”)
+- Task Manager selects an eligible robot and creates a Task via Task module.
+
+Scheduled mode:
+- Operator configures:
+  - mission reference (missionId + version policy)
+  - mode (manual pinned robot or auto)
+  - schedule (cron or interval)
+  - optional concurrency limit (avoid stacking runs)
+- Task Manager runs a scheduler loop and creates Tasks at each tick.
+
+
+--------------------------------------------------------
+Robot Eligibility (Auto mode)
+--------------------------------------------------------
+Robot inputs (from Robot Link state/cache):
+- ONLINE/OFFLINE (lastSeenAt freshness)
+- status (RUNNING/WARNING/PAUSED/ERROR/OFFLINE)
+- current map association if available (currentMapId/currentMapVersionId)
+- capability flags (EffectiveCapabilities)
+- settings/limits validation inputs (limitsJson)
+
+Mission inputs (from Teach published mission version):
+- requiredHas* booleans
+- requiredCapabilitiesJson (optional)
+
+Eligibility rule (concept):
+- Robot must be ONLINE and not in ERROR/OFFLINE.
+- Robot must satisfy mission required capabilities.
+- Robot must be in a state that can accept a new task (RUNNING or WARNING).
+- If mission is map-scoped:
+  - robot must be on the same mapId/mapVersionId or be allowed to relocate by policy.
+
+Selection policy (concept):
+- Choose the “best” robot among eligible robots:
+  - prefer robot already on the target map
+  - prefer robot with fewer active tasks
+  - prefer higher battery
+  - optional: prefer closer to first mission move point (requires Route distance query)
+
+
+--------------------------------------------------------
+Integration: How Task Manager Triggers Robot Execution
+--------------------------------------------------------
+Rule:
+- Task Manager never sends missions directly to robot.
+- Task Manager asks Task module to create a task referencing the mission.
+- Task module dispatches to robot and tracks lifecycle.
+
+Execution handoff:
+- Task Manager creates Task:
+  - type = MISSION
+  - payloadJson includes missionId + missionVersionId (or expanded steps if needed)
+  - requestedRobotId and/or assignedRobotId depending on mode
+- Task module:
+  - performs dispatch via Robot Link
+  - receives robot progress events and updates canonical task state
+
+
+--------------------------------------------------------
+EF Core Data Model (taskmgr schema)
+--------------------------------------------------------
+Schema:
+- taskmgr
+
+MissionPlan (recurring plan definition):
+- planId (uuid, PK)
+- name (text)
+- description (text?)
+- enabled (bool)
+- mode (text)                                // MANUAL | AUTO
+- missionId (uuid)
+- missionVersionPolicy (text)                // PINNED | LATEST_PUBLISHED
+- pinnedMissionVersionId (uuid?)             // required when PINNED
+- pinnedRobotId (text?)                      // used when mode=MANUAL
+- mapId (uuid?)                              // optional scope for AUTO
+- mapVersionId (uuid?)                       // optional scope for AUTO
+- scheduleType (text)                        // CRON | INTERVAL
+- cron (text?)                               // when scheduleType=CRON
+- intervalSeconds (int?)                     // when scheduleType=INTERVAL
+- timezone (text?)
+- maxConcurrentRuns (int)                    // recommended default 1
+- nextRunAt (timestamptz)
+- lastRunAt (timestamptz?)
+- createdBy (uuid)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+
+MissionRun (one execution attempt produced by a plan or manual trigger):
+- runId (uuid, PK)
+- planId (uuid?)                             // null for ad-hoc/manual trigger
+- missionId (uuid)
+- missionVersionId (uuid?)
+- mode (text)                                // MANUAL | AUTO
+- requestedRobotId (text?)                   // from pinned robot (MANUAL) or chosen robot (AUTO)
+- selectedRobotId (text?)                    // final selection (AUTO) or equals requestedRobotId
+- taskId (uuid?)                             // created in Task module
+- status (text)                              // PENDING | DISPATCHED | RUNNING | DONE | FAILED | CANCELED | BLOCKED
+- reasonCode (text?)
+- reasonMessage (text?)
+- scheduledAt (timestamptz?)
+- createdAt (timestamptz)
+- startedAt (timestamptz?)
+- finishedAt (timestamptz?)
+- updatedAt (timestamptz)
+
+MissionRunEvent (optional audit trail):
+- eventId (uuid, PK)
+- runId (uuid)
+- ts (timestamptz)
+- type (text)                                // created|robotSelected|taskCreated|blocked|completed|failed
+- actorUserId (uuid?)
+- payloadJson (jsonb?)
+
+
+--------------------------------------------------------
+EF Core Mapping Notes (taskmgr schema)
+--------------------------------------------------------
+Schema constant:
+- Modules/TaskManager/Persistence/TaskManagerDbSchema.cs -> "taskmgr"
+
+Table recommendations:
+- taskmgr.mission_plans
+- taskmgr.mission_runs
+- taskmgr.mission_run_events
+
+Indexes / constraints (recommended):
+- mission_plans(enabled, nextRunAt)
+- mission_runs(planId, createdAt)
+- mission_runs(taskId) unique nullable (prevent double linking)
+- mission_runs(status, updatedAt)
+- mission_run_events(runId, ts)
+
+Scheduling rule:
+- A scheduler worker should lock a plan row when claiming a run tick.
+- Enforce maxConcurrentRuns per plan by counting active runs.
+
+
+--------------------------------------------------------
+File Structure (backend module template)
+--------------------------------------------------------
+backend/Modules/TaskManager/
+  Model/
+    MissionPlan.cs
+    MissionRun.cs
+    MissionRunEvent.cs
+
+  Dto/
+    MissionPlanDto.cs
+    MissionRunDto.cs
+    CreateMissionRunRequestDto.cs
+    UpdateMissionPlanRequestDto.cs
+
+  Mapping/
+    TaskManagerMapper.cs
+
+  Data/
+    MissionPlanRepository.cs
+    MissionRunRepository.cs
+
+  Service/
+    TaskManagerService.cs                    // manual triggers + plan management
+    RobotSelectionService.cs                 // auto mode selection policy
+    PlanSchedulerService.cs                  // computes nextRunAt, claims ticks
+    MissionRunDispatcher.cs                  // creates Tasks via Task module
+
+  Worker/
+    TaskManagerSchedulerWorker.cs            // executes plans, creates runs
+
+  Api/
+    MissionPlansController.cs
+    MissionRunsController.cs
+
+  Realtime/
+    TaskManagerHubPublisher.cs
+
+  Persistence/
+    TaskManagerDbSchema.cs
+    *EntityConfig.cs
+
+
+--------------------------------------------------------
+Pseudocode: Manual Run (operator chooses robot + mission)
+--------------------------------------------------------
+CreateManualRun(robotId, missionId, missionVersionId?):
+  mv = ResolveMissionVersion(missionId, missionVersionId)
+  Ensure(mv.status == PUBLISHED)
+
+  EnsureRobotOnline(robotId) using RobotLinkService.GetConnection
+  EnsureRobotEligible(robotId, mv.requiredHas*) using RobotLinkService.GetLatestState
+
+  run = CreateRun(mode=MANUAL, requestedRobotId=robotId, selectedRobotId=robotId, missionVersionId=mv.id)
+  Save(run)
+
+  taskId = TaskService.CreateTaskFromMission(mv.missionId, mv.missionVersionId, robotId)
+  run.taskId = taskId
+  run.status = DISPATCHED
+  Save(run)
+  PublishRealtime(run.updated)
+  return run
+
+
+--------------------------------------------------------
+Pseudocode: Auto Run (system selects robot)
+--------------------------------------------------------
+CreateAutoRun(missionId, missionVersionId?, mapScope?):
+  mv = ResolveMissionVersion(missionId, missionVersionId)
+  Ensure(mv.status == PUBLISHED)
+
+  candidates = RobotLinkService.ListRobotsLatestState()
+  eligible = FilterEligible(candidates, mv.requiredHas*, mapScope)
+
+  if eligible is empty:
+    run = CreateRun(mode=AUTO, status=BLOCKED, reasonCode="NO_ELIGIBLE_ROBOT")
+    Save(run)
+    return run
+
+  robotId = RobotSelectionService.SelectBest(eligible, mv, mapScope)
+
+  run = CreateRun(mode=AUTO, selectedRobotId=robotId, missionVersionId=mv.id)
+  Save(run)
+
+  taskId = TaskService.CreateTaskFromMission(mv.missionId, mv.missionVersionId, robotId)
+  run.taskId = taskId
+  run.status = DISPATCHED
+  Save(run)
+  PublishRealtime(run.updated)
+  return run
+
+
+--------------------------------------------------------
+Pseudocode: Scheduler Worker (recurring execution)
+--------------------------------------------------------
+Every interval (e.g., 1s):
+  plans = MissionPlanRepository.ListEnabledDuePlans(now)
+
+  for plan in plans:
+    if ActiveRunsCount(plan.planId) >= plan.maxConcurrentRuns:
+      continue
+
+    ClaimPlan(plan.planId)                   // row lock to avoid double ticks
+    mv = ResolveVersionByPolicy(plan)
+
+    if plan.mode == MANUAL:
+      run = CreateManualRun(plan.pinnedRobotId, plan.missionId, mv.missionVersionId)
+    else:
+      run = CreateAutoRun(plan.missionId, mv.missionVersionId, mapScope=(plan.mapId, plan.mapVersionId))
+
+    plan.lastRunAt = now
+    plan.nextRunAt = ComputeNextRunAt(plan, now)
+    Save(plan)
+
+
+--------------------------------------------------------
+Pseudocode: Run Status Sync (Task -> Task Manager)
+--------------------------------------------------------
+OnTaskUpdated(taskId, status):
+  run = MissionRunRepository.FindByTaskId(taskId)
+  if run is null: return
+
+  run.status = MapTaskStatusToRunStatus(status)
+  run.updatedAt = Now
+  if status is terminal:
+    run.finishedAt = Now
+  Save(run)
+  PublishRealtime(run.updated)
+

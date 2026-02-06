@@ -1,0 +1,319 @@
+========================================================
+BACKENDV3 ROBOTS MODULE - IMPLEMENTATION NOTES (NATS JETSTREAM)
+========================================================
+
+Scope:
+- This document describes what is implemented in backendV3 Robots module,
+  how it is implemented, and how to maintain/scale it.
+
+Root folder:
+- c:\Users\SA-SI-GFWP6G3\Documents\skylink\newsky\backendV3
+
+
+========================================================
+1) WHAT IS IMPLEMENTED
+========================================================
+
+1.1 Robot registry + metadata storage (robots schema)
+- Module schema: robots
+- Logical model:
+  - Robot = backend-owned metadata and lifecycle fields (displayName, enable/disable, notes, tags, lastSeenAt)
+  - RobotIdentitySnapshot = robot-owned identity envelopes persisted as history
+  - RobotCapabilitySnapshot = robot-owned capability envelopes persisted as history
+  - RobotSettingsReportedSnapshot = robot-owned reported settings envelopes persisted as history
+  - RobotCommandLog = backend audit record of commands requested/published and last ack seen
+
+Files:
+- Modules/Robots/Model/*.cs
+- Modules/Robots/Persistence/*.cs
+- Infrastructure/Persistence/AppDbContext.cs
+- Infrastructure/Persistence/Migrations/*_RobotsModule.cs
+
+
+1.2 RBAC access control aligned with concept
+- Read endpoints: require Viewer policy (viewer/operator/admin)
+- Write endpoints: require Operator policy (operator/admin)
+- Pending users:
+  - are authenticated but blocked from module access by global default/fallback policy
+
+Files:
+- Infrastructure/Security/AuthorizationPolicies.cs
+- Modules/Robots/Api/RobotsController.cs
+
+
+1.3 REST API endpoints for robots
+Base:
+- /api/v1/robots
+
+Viewer (read):
+- GET    /api/v1/robots
+  - List robots (RobotDto[])
+- GET    /api/v1/robots/{robotId}
+  - Get robot summary (RobotDto)
+- GET    /api/v1/robots/{robotId}/identity
+  - Get latest identity snapshot (RobotIdentityDto)
+- GET    /api/v1/robots/{robotId}/capability
+  - Get latest capability snapshot (RobotCapabilityDto)
+- GET    /api/v1/robots/{robotId}/settings/reported
+  - Get latest reported settings snapshot (RobotSettingsReportedDto)
+
+Operator (write):
+- PUT    /api/v1/robots/{robotId}
+  - Update backend-managed metadata:
+    - displayName, isEnabled, tags (json), notes
+- PUT    /api/v1/robots/{robotId}/settings/desired
+  - Publish desired settings to robot over JetStream
+- POST   /api/v1/robots/{robotId}/commands
+  - Publish a command to robot over JetStream
+  - Returns commandId (GUID) used as correlationId
+
+Primary controller:
+- Modules/Robots/Api/RobotsController.cs
+
+Route constants:
+- Endpoints/ApiRoutes.cs (ApiRoutes.Robots.*)
+
+
+1.4 SignalR robot events (frontend streaming)
+- Hub path:
+  - /hubs/realtime
+- Event names:
+  - robot.identity.updated
+  - robot.capability.updated
+  - robot.status.updated
+  - robot.telemetry.updated
+  - robot.settings.reported.updated
+  - robot.meta.updated
+  - robot.command.ack
+
+Publisher:
+- Modules/Robots/Service/RobotHubPublisher.cs
+
+Constants:
+- Realtime/SignalRRoutes.cs
+
+Current behavior:
+- Broadcast to all clients (no group scoping yet)
+
+
+1.5 NATS JetStream integration (robot <-> backend)
+Principle:
+- Robots module owns the NATS subjects for robot comms.
+- Robot runtime communicates with backend using JetStream only.
+- Backend is mode-agnostic (robot REAL vs MOCK looks the same over NATS).
+
+Subjects (aligned with conceptV3 docs):
+Robot -> Backend:
+- robots.identity.{robotId}
+- robots.capability.{robotId}
+- robots.status.{robotId}
+- robots.telemetry.{robotId}
+- robots.settings.reported.{robotId}
+- robots.cmd.ack.{robotId}
+
+Backend -> Robot:
+- robots.settings.desired.{robotId}
+- robots.cmd.{robotId}
+
+Envelope shape (JSON):
+{
+  "payloadVersion": 1,
+  "messageId": "uuid",
+  "robotId": "RB-001",
+  "sentAt": "timestamptz",
+  "correlationId": "uuid-or-null",
+  "type": "identity | capability | status | telemetry | settings.reported | settings.desired | cmd | cmd.ack",
+  "payload": { }
+}
+
+Streams:
+- ROBOTS_IN
+  - identity/capability/status/telemetry/settings.reported/cmd.ack
+- ROBOTS_OUT
+  - settings.desired/cmd
+
+Files:
+- Messaging/NatsJetStreamRoutes.cs
+- Workers/NatsJetStreamSetupWorker.cs
+- Modules/Robots/Worker/RobotsNatsIngestWorker.cs
+
+
+========================================================
+2) HOW IT IS IMPLEMENTED
+========================================================
+
+2.1 EF Core schema + migrations
+- Schema constant:
+  - Modules/Robots/Persistence/RobotsDbSchema.cs -> "robots"
+- Entity configurations:
+  - RobotEntityConfig -> robots.robots
+  - RobotIdentitySnapshotEntityConfig -> robots.robot_identity_snapshots
+  - RobotCapabilitySnapshotEntityConfig -> robots.robot_capability_snapshots
+  - RobotSettingsReportedSnapshotEntityConfig -> robots.robot_settings_reported_snapshots
+  - RobotCommandLogEntityConfig -> robots.robot_command_logs
+- Migration:
+  - Infrastructure/Persistence/Migrations/*_RobotsModule.cs creates the robots schema and tables
+
+Database init:
+- DatabaseInitSql.Optional includes: CREATE SCHEMA IF NOT EXISTS robots;
+
+Files:
+- Infrastructure/Persistence/Init/DatabaseInitSql.cs
+- Infrastructure/Persistence/Init/DatabaseInitService.cs
+
+
+2.2 DTO boundary and mapping
+- RobotDto is a backend-facing summary:
+  - includes backend metadata fields and optional identity/capability/reportedSettings snapshots
+- Identity/capability/settings payloads are stored as jsonb in DB and returned as JsonDocument in API DTOs
+- Mapping helpers:
+  - Modules/Robots/Mapping/RobotMapper.cs
+
+Files:
+- Modules/Robots/Dto/*.cs
+- Modules/Robots/Dto/Requests/*.cs
+- Modules/Robots/Mapping/RobotMapper.cs
+
+
+2.3 Service layer orchestration
+RobotRegistryService:
+- Builds RobotDto by merging:
+  - Robot (metadata)
+  - latest identity snapshot
+  - latest capability snapshot
+  - latest reported settings snapshot
+- Provides list/get and metadata update helpers
+
+RobotSettingsService:
+- Publishes settings.desired to robots.settings.desired.{robotId}
+- Exposes latest settings.reported snapshot (read model)
+
+RobotCommandService:
+- Persists RobotCommandLog with status=REQUESTED
+- Publishes robots.cmd.{robotId} with:
+  - correlationId = commandId
+  - payload includes commandId and commandType
+
+Files:
+- Modules/Robots/Service/*.cs
+
+
+2.4 NATS connection + configuration
+Environment variables:
+- BACKENDV3_NATS_URL (default: nats://localhost:4222)
+- BACKENDV3_NATS_TOKEN (optional)
+
+Connection:
+- Infrastructure/Messaging/NatsConnection.cs provides a shared IConnection
+- Registered as singleton in Program.cs
+
+
+2.5 JetStream stream setup (startup)
+NatsJetStreamSetupWorker:
+- Runs on startup and ensures streams exist:
+  - ROBOTS_IN subjects
+  - ROBOTS_OUT subjects
+
+Current behavior:
+- If stream already exists, it is not updated to add/remove subjects
+- If stream is missing, it is created with the configured subjects
+
+Files:
+- Workers/NatsJetStreamSetupWorker.cs
+
+
+2.6 Ingestion worker (JetStream -> DB + SignalR)
+RobotsNatsIngestWorker:
+- Creates JetStream push subscriptions using durable consumer names:
+  - robots_identity_ingest
+  - robots_capability_ingest
+  - robots_status_ingest
+  - robots_telemetry_ingest
+  - robots_settings_reported_ingest
+  - robots_command_ack_ingest
+
+Ingestion behavior:
+- Ensures Robot row exists for any incoming robotId
+- Updates robots.robots.lastSeenAt on every received message
+- Stores identity/capability/settings.reported as snapshot rows (history)
+- Publishes SignalR events:
+  - identity/capability publish a minimal "robotId changed" event
+  - status/telemetry/settings.reported publish the payload to SignalR
+  - cmd.ack updates RobotCommandLog when correlationId matches a commandId
+
+Files:
+- Modules/Robots/Worker/RobotsNatsIngestWorker.cs
+- Modules/Robots/Service/RobotHubPublisher.cs
+
+
+2.7 Authentication + claims mapping note (RBAC correctness)
+- JwtSecurityTokenHandler.DefaultMapInboundClaims is disabled in Program.cs.
+- Role claim type is set to "roles", which matches authorization policy checks.
+
+Files:
+- Program.cs
+- Infrastructure/Security/AuthorizationPolicies.cs
+
+
+========================================================
+3) HOW TO MAINTAIN AND SCALE
+========================================================
+
+3.1 Message contract and versioning
+- Keep envelope shape stable and version using payloadVersion.
+- Extend payload schemas without breaking older consumers:
+  - add fields, avoid renaming/removing fields
+- Keep subjects centralized in Messaging/NatsJetStreamRoutes.cs.
+
+
+3.2 Stream durability and acknowledgement strategy
+Current behavior:
+- JetStream push subscriptions are used with auto-ack enabled.
+
+Recommended hardening:
+- Switch to manual ack after successful processing to avoid losing messages on handler failure.
+- Consider NAK + retry and a DLQ pattern for poison messages.
+
+
+3.3 Telemetry storage and retention
+Current behavior:
+- Telemetry is streamed to SignalR but not persisted (no time-series tables yet).
+
+Recommended next steps:
+- Add a time-series table (or Timescale hypertable) for selected telemetry types.
+- Add retention policies and rate limiting on ingestion.
+
+
+3.4 SignalR scaling
+Current behavior:
+- Broadcast to all clients.
+
+For scale:
+- Add group scoping:
+  - fleet group
+  - per-robot group: robot:{robotId}
+- Publish robot updates only to relevant groups.
+
+
+3.5 Command lifecycle and UX
+Current behavior:
+- Backend persists command request and updates status when cmd.ack correlationId matches commandId.
+
+Recommended next steps:
+- Define cmd.ack payload shape strictly:
+  - status: ACKED | REJECTED | RUNNING | COMPLETED | FAILED | TIMEOUT
+  - reason/message fields
+  - progress (optional)
+- Add timeouts and reconciliation jobs:
+  - mark commands as TIMEOUT when no ack arrives within SLA
+
+
+3.6 Settings desired vs reported convergence
+Rule:
+- Backend publishes desired settings; robot publishes reported settings as truth.
+
+Recommended next steps:
+- Persist desired settings history on backend (optional).
+- Add validation of desired payload shape (per robot model/capability).
+- Add an explicit settings schemaVersion and reject incompatible updates.
+

@@ -1,0 +1,624 @@
+========================================================
+MODULE 06: ROBOT (NATS JETSTREAM ROBOT I/O + FRONTEND SIGNALR)
+========================================================
+
+Goal:
+- Provide a single backend module that communicates with robots via NATS JetStream.
+- Robot module is an I/O boundary:
+  - Read data from robot (telemetry/state/events/settings-reported).
+  - Send commands to robot (motion, task execution, diagnostics, settings-desired).
+- The backend MUST NOT "edit robot data" directly.
+  - Robot is the source of truth for its state.
+  - Backend stores snapshots/history and republishes data for other backend modules.
+- Other backend modules (route/traffic/task/teach/etc.) MUST NOT talk to NATS directly:
+  - They call Robot module APIs/services to send commands or subscribe to robot updates.
+- Expose robot data and robot settings editing UI via SignalR:
+  - Frontend receives live robot updates via SignalR.
+  - Frontend edits desired robot settings via SignalR -> backend validates -> publishes to NATS.
+  - Robot applies settings and streams back the resulting reported state via NATS.
+
+Non-goals:
+- Robot module does not implement route planning, traffic control, task orchestration, or teach logic.
+- Robot module does not perform authoritative lifecycle changes of robot state (online/offline/etc.).
+- Robot module does not bypass the robot by writing to robot state tables as “truth”.
+
+
+--------------------------------------------------------
+Concept (Data Ownership + Data Flow)
+--------------------------------------------------------
+
+Key ownership rule:
+- Robot is authoritative for:
+  - pose, velocity, battery, localization, faults, motor controller status
+  - actual applied settings (reported settings)
+- Backend is authoritative for:
+  - which robots exist in the system (registration/inventory metadata)
+  - user permissions, audit logs, command intents
+  - “desired settings” (what user wants) until robot acknowledges and reports applied values
+
+Recommended pattern: Desired vs Reported (digital twin style)
+- DesiredSettings: written by backend (from UI or other modules), sent to robot.
+- ReportedSettings: written by robot, streamed back to backend.
+- UI shows both:
+  - Desired (pending/target)
+  - Reported (actual/applied)
+
+High-level flow:
+1) Robot -> NATS JetStream -> Robot module consumers
+   - Validate message + robot identity
+   - Update DB snapshots/history
+   - Emit internal events (in-process or message bus)
+   - Push to frontend via SignalR
+2) Other backend modules -> Robot module service -> NATS JetStream
+   - Validate authorization + robot connectivity state
+   - Publish command/settings-desired to robot subjects
+   - Persist command intent + correlation id for audit/observability
+3) Robot -> NATS JetStream -> backend
+   - Acks command execution + streams state changes back (no direct backend mutation)
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+
+Default:
+- All endpoints (REST + SignalR) require authentication (global fallback policy)
+
+Read endpoints (telemetry/state/history):
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints (send commands, set desired settings):
+- Require policy: Operator (operator/admin)
+
+Admin-only (optional future):
+- Robot registration, decommission, secret/key rotation, destructive history purge
+
+Recommended policy constants:
+- Infrastructure/Security/AuthorizationPolicies.cs
+  - Viewer policy: Viewer, Operator, Admin
+  - Operator policy: Operator, Admin
+
+
+--------------------------------------------------------
+Data Model (DB)
+--------------------------------------------------------
+
+DB intent:
+- Store robot inventory metadata.
+- Store last-known snapshots for fast read.
+- Store time-series history (optional but recommended for diagnostics).
+- Store command intent/audit trail (commands are sent via NATS; DB is for audit + UI).
+- Store desired vs reported settings with versioning/correlation.
+
+Schema:
+- robots
+
+Tables (recommended):
+
+1) robots.robots (inventory / identity)
+- robotId (uuid, PK)
+- robotCode (text, unique)                 // human identifier (e.g., RB-001)
+- name (text)
+- model (text?)
+- firmwareVersion (text?)
+- createdAt (timestamptz)
+- archivedAt (timestamptz?)
+
+2) robots.robot_connectivity (last-known connectivity)
+- robotId (uuid, PK, FK -> robots.robots)
+- isOnline (bool)
+- lastSeenAt (timestamptz)
+- lastHeartbeatAt (timestamptz?)
+- connectionMetaJson (jsonb?)              // ip, wifi, etc. (from robot)
+
+3) robots.robot_state_snapshot (fast read for UI + other modules)
+- robotId (uuid, PK)
+- updatedAt (timestamptz)
+- poseX (double)
+- poseY (double)
+- poseYaw (double)
+- velocityLinear (double?)
+- velocityAngular (double?)
+- batteryPercent (double?)
+- localizationStatus (text?)              // OK | DEGRADED | LOST | ...
+- faultLevel (text?)                      // NONE | WARN | ERROR | FATAL
+- faultCodes (text[]?)                    // or jsonb for richer structure
+- stateJson (jsonb)                       // full normalized robot state payload
+
+4) robots.robot_telemetry_history (optional time-series)
+- id (bigserial, PK)
+- robotId (uuid, FK)
+- ts (timestamptz)
+- telemetryJson (jsonb)
+
+Retention:
+- keep last N days / last N rows per robot (server-side job)
+
+5) robots.robot_settings_desired
+- desiredId (uuid, PK)
+- robotId (uuid, FK)
+- createdAt (timestamptz)
+- createdBy (uuid)
+- correlationId (text)                    // ties UI request to robot ack
+- status (text)                           // PENDING | APPLIED | REJECTED | TIMEOUT
+- desiredJson (jsonb)
+
+6) robots.robot_settings_reported (last-known applied settings)
+- robotId (uuid, PK)
+- updatedAt (timestamptz)
+- correlationId (text?)                   // if robot reports acks with correlation
+- reportedJson (jsonb)
+
+7) robots.robot_command_outbox (audit of sent commands)
+- commandId (uuid, PK)
+- robotId (uuid, FK)
+- commandType (text)                      // MOVE | STOP | RESET_MOTOR | ...
+- createdAt (timestamptz)
+- createdBy (uuid)
+- correlationId (text)
+- commandJson (jsonb)
+- status (text)                           // SENT | ACKED | FAILED | TIMEOUT
+- lastUpdateAt (timestamptz)
+
+Indexes (recommended):
+- robots.robots(robotCode) unique
+- robot_state_snapshot(updatedAt)
+- robot_telemetry_history(robotId, ts desc)
+- robot_settings_desired(robotId, createdAt desc)
+- robot_command_outbox(robotId, createdAt desc)
+
+
+--------------------------------------------------------
+NATS JetStream (Robot I/O)
+--------------------------------------------------------
+
+Principle:
+- Robot module owns all NATS subjects and message schemas for robot comms.
+- Other backend modules DO NOT publish/subscribe to NATS directly.
+- Use JetStream for durability (at-least-once delivery) and replay.
+
+Streams (recommended):
+1) ROBOT_IN (robot -> backend)
+- Subjects:
+  - robot.*.heartbeat
+  - robot.*.state
+  - robot.*.telemetry
+  - robot.*.events
+  - robot.*.settings.reported
+  - robot.*.command.ack
+
+2) ROBOT_OUT (backend -> robot)
+- Subjects:
+  - robot.*.command.request
+  - robot.*.settings.desired
+
+Subject naming:
+- Use robot.{robotCode} or robot.{robotId} consistently.
+  - Prefer robotCode for ops readability, robotId for strict identity.
+  - If robotCode can change, use robotId as canonical and include robotCode in payload.
+
+Message envelope (recommended for all subjects):
+- messageId (uuid)
+- robotId (uuid)
+- robotCode (text)
+- ts (timestamptz)
+- correlationId (text?)                    // ties request <-> ack <-> reported changes
+- payloadVersion (int)
+- payload (object)
+
+Examples:
+
+robot.{robotId}.state
+- payload:
+  - pose: { x, y, yaw }
+  - velocity: { linear, angular }
+  - batteryPercent
+  - localizationStatus
+  - faultLevel
+  - faults: [{ code, message, severity }]
+
+robot.{robotId}.command.request
+- payload:
+  - commandType
+  - parameters
+  - requestedBy: { userId, username? }
+
+robot.{robotId}.command.ack
+- payload:
+  - commandType
+  - status: ACKED | REJECTED | RUNNING | DONE | FAILED
+  - reason?
+
+robot.{robotId}.settings.desired
+- payload:
+  - motors:
+    - left:  { limit, acceleration, resetRequested? }
+    - right: { limit, acceleration, resetRequested? }
+  - safety:
+    - eStopBehavior?
+  - controller:
+    - resetAllMotorsRequested?
+
+robot.{robotId}.settings.reported
+- payload:
+  - motors:
+    - left:  { limit, acceleration }
+    - right: { limit, acceleration }
+  - controller:
+    - lastResetAt?
+  - appliedFromCorrelationId?
+
+Consumers (recommended):
+- robot-state-consumer:
+  - Filter: robot.*.state, robot.*.heartbeat
+  - Ack policy: explicit ack after DB update succeeds
+- robot-telemetry-consumer:
+  - Filter: robot.*.telemetry
+  - Ack policy: explicit; store history (optional) and update snapshot (optional)
+- robot-settings-consumer:
+  - Filter: robot.*.settings.reported
+  - Ack policy: explicit; update reported settings + desired status transitions
+- robot-command-ack-consumer:
+  - Filter: robot.*.command.ack
+  - Ack policy: explicit; update command_outbox status
+
+Idempotency:
+- Maintain messageId de-duplication window per stream (optional but recommended).
+- Ensure consumers can safely process duplicates (upsert snapshots by robotId + ts).
+
+
+--------------------------------------------------------
+REST Endpoints (backend-facing)
+--------------------------------------------------------
+
+Base:
+- /api/v1/robots
+
+Inventory:
+- GET  /api/v1/robots
+  Policy: Viewer
+  Response: RobotDto[]
+
+- GET  /api/v1/robots/{robotId}
+  Policy: Viewer
+  Response: RobotDto
+
+State/Telemetry:
+- GET  /api/v1/robots/{robotId}/state
+  Policy: Viewer
+  Response: RobotStateDto
+
+- GET  /api/v1/robots/{robotId}/telemetry?from=&to=&limit=
+  Policy: Viewer
+  Response: RobotTelemetryDto[]
+
+Commands:
+- POST /api/v1/robots/{robotId}/commands
+  Policy: Operator
+  Body: RobotCommandRequestDto
+  Response: { commandId, correlationId }
+  Behavior:
+  - validate operator permissions + robot existence
+  - persist command_outbox(SENT)
+  - publish robot.{robotId}.command.request to NATS
+
+Settings (desired):
+- GET  /api/v1/robots/{robotId}/settings
+  Policy: Viewer
+  Response: { desired, reported }
+
+- PUT  /api/v1/robots/{robotId}/settings/desired
+  Policy: Operator
+  Body: RobotSettingsDesiredDto
+  Response: { desiredId, correlationId }
+  Behavior:
+  - persist robot_settings_desired(PENDING)
+  - publish robot.{robotId}.settings.desired to NATS
+  - UI sees change immediately (desired) and later sees robot-reported applied settings
+
+Note:
+- Even when using REST for settings, ALSO stream updates via SignalR for realtime UI.
+
+
+--------------------------------------------------------
+SignalR Endpoints (frontend-facing realtime)
+--------------------------------------------------------
+
+Hubs (recommended):
+- /hubs/robots
+- /hubs/robotSettings
+
+Client subscriptions:
+- robots.subscribe (optional args: robotIds[])
+- robots.unsubscribe
+
+Server -> client events:
+- robot.connected        { robotId, ts }
+- robot.disconnected     { robotId, ts }
+- robot.state.updated    { robotId, state }
+- robot.telemetry.updated{ robotId, telemetry }
+- robot.event            { robotId, event }
+- robot.settings.desired.updated  { robotId, desired }
+- robot.settings.reported.updated { robotId, reported }
+- robot.command.ack      { robotId, correlationId, status, reason? }
+
+Client -> server actions (settings editing via SignalR):
+- robotSettings.setDesired
+  Payload: { robotId, desiredSettings }
+  Policy: Operator
+  Behavior:
+  - validate + persist desired settings
+  - publish to NATS
+  - broadcast desired.updated to clients
+
+Client -> server actions (commands via SignalR, optional alternative to REST):
+- robots.sendCommand
+  Payload: { robotId, commandType, parameters }
+  Policy: Operator
+  Behavior:
+  - same as REST commands endpoint
+
+Security:
+- authorize hub connection with access token
+- validate user authorization per method call
+- optionally restrict stream events to robots the user is allowed to view
+
+
+--------------------------------------------------------
+Internal Module API (for other backend modules)
+--------------------------------------------------------
+
+The Robot module should expose a clean service interface:
+
+IRobotClient (conceptual)
+- Task<RobotState> GetLatestState(robotId)
+- Task<CommandResult> SendCommand(robotId, command)
+- Task<DesiredSettingsResult> SetDesiredSettings(robotId, desiredSettings)
+- IAsyncEnumerable<RobotUpdate> Subscribe(robotId?)             // optional, if using internal event bus
+
+Other modules usage:
+- Route module:
+  - requests robot navigation/move commands via Robot module
+- Traffic module:
+  - requests slow/stop limits or path-speed mode changes via Robot module (if robot supports)
+- Task module:
+  - requests pick/drop/charge/execute steps via Robot module
+
+Important:
+- The Robot module does NOT decide “what to do”.
+- It only transports commands to robot and transports robot state back to the system.
+
+
+--------------------------------------------------------
+Backend File Structure (complete module structure)
+--------------------------------------------------------
+
+Recommended layout (aligned with modular backend structure):
+
+- src/
+  - Infrastructure/
+    - Messaging/
+      - Nats/
+        - INatsConnectionFactory.cs
+        - NatsOptions.cs
+        - JetStream/
+          - IJetStreamPublisher.cs
+          - IJetStreamSubscriber.cs
+    - Realtime/
+      - SignalR/
+        - SignalRAuthExtensions.cs
+  - Modules/
+    - Robots/
+      - Contracts/
+        - Dtos/
+          - RobotDto.cs
+          - RobotStateDto.cs
+          - RobotTelemetryDto.cs
+          - RobotCommandRequestDto.cs
+          - RobotSettingsDesiredDto.cs
+          - RobotSettingsReportedDto.cs
+        - Events/
+          - RobotStateUpdated.cs
+          - RobotTelemetryUpdated.cs
+          - RobotSettingsReportedUpdated.cs
+          - RobotCommandAcked.cs
+      - Domain/
+        - Models/
+          - Robot.cs
+          - RobotConnectivity.cs
+          - RobotStateSnapshot.cs
+          - RobotTelemetryHistory.cs
+          - RobotSettingsDesired.cs
+          - RobotSettingsReported.cs
+          - RobotCommandOutbox.cs
+        - ValueObjects/
+          - RobotId.cs (optional)
+      - Persistence/
+        - RobotsDbSchema.cs                      // schema name "robots"
+        - RobotsDbContext.cs
+        - Configurations/
+          - RobotEntityConfiguration.cs
+          - RobotStateSnapshotConfiguration.cs
+          - RobotTelemetryHistoryConfiguration.cs
+          - RobotSettingsDesiredConfiguration.cs
+          - RobotSettingsReportedConfiguration.cs
+          - RobotCommandOutboxConfiguration.cs
+        - Migrations/
+      - Data/
+        - Repositories/
+          - RobotRepository.cs
+          - RobotStateRepository.cs
+          - RobotTelemetryRepository.cs
+          - RobotSettingsRepository.cs
+          - RobotCommandRepository.cs
+      - Messaging/
+        - Nats/
+          - Subjects/
+            - RobotSubjects.cs                    // subject naming helpers
+          - Publishers/
+            - RobotCommandPublisher.cs
+            - RobotSettingsPublisher.cs
+          - Consumers/
+            - RobotStateConsumer.cs
+            - RobotTelemetryConsumer.cs
+            - RobotSettingsReportedConsumer.cs
+            - RobotCommandAckConsumer.cs
+          - Serialization/
+            - RobotMessageEnvelope.cs
+            - RobotMessageValidator.cs
+      - Services/
+        - RobotIngestService.cs                   // orchestrates consumer -> DB -> events -> SignalR
+        - RobotCommandService.cs                  // orchestrates command requests
+        - RobotSettingsService.cs                 // desired/reported reconciliation
+        - RobotQueryService.cs                    // read models for UI and other modules
+      - Mapping/
+        - RobotDtoMapper.cs
+      - Realtime/
+        - Hubs/
+          - RobotsHub.cs
+          - RobotSettingsHub.cs
+        - Notifications/
+          - RobotSignalRNotifier.cs
+      - Api/
+        - Controllers/
+          - RobotsController.cs
+          - RobotCommandsController.cs
+          - RobotSettingsController.cs
+      - ModuleRegistration/
+        - RobotsModule.cs                         // DI + endpoints + consumers registration
+
+Notes:
+- Consumer hosting can be implemented as IHostedService per consumer, owned by RobotsModule.
+- Consumers should be resilient (reconnect, backoff, poison message handling).
+
+
+--------------------------------------------------------
+Pseudocode (Key Workflows)
+--------------------------------------------------------
+
+1) Robot state ingestion (robot -> backend -> DB -> SignalR -> other modules)
+
+on RobotStateConsumer.MessageReceived(msg):
+  if not validateEnvelope(msg):
+    ackAndDropOrDeadLetter(msg)
+    return
+
+  robotId = msg.robotId
+  state = msg.payload
+
+  begin transaction
+    upsert robots.robot_connectivity:
+      isOnline = true
+      lastSeenAt = msg.ts
+
+    upsert robots.robot_state_snapshot by robotId:
+      updatedAt = msg.ts
+      stateJson = state
+      derived columns (poseX/poseY/poseYaw/batteryPercent/...)
+  commit
+
+  publish internal event RobotStateUpdated(robotId, state, msg.ts)
+  signalR.broadcast("robot.state.updated", { robotId, state })
+  jetstream.ack(msg)
+
+
+2) Send command (other module -> robot module -> NATS -> robot -> ack -> backend)
+
+RobotCommandService.SendCommand(user, robotId, cmd):
+  assert user has OperatorPolicy
+  assert robot exists
+
+  correlationId = newCorrelationId()
+  commandId = newUuid()
+
+  persist robots.robot_command_outbox:
+    commandId, robotId, createdBy=user.userId, createdAt=now
+    correlationId, commandType, commandJson, status="SENT"
+
+  publish to NATS subject robot.{robotId}.command.request:
+    envelope = { messageId, robotId, ts=now, correlationId, payload={ cmd } }
+
+  signalR.broadcast("robot.command.sent", { robotId, commandId, correlationId }) (optional)
+  return { commandId, correlationId }
+
+RobotCommandAckConsumer.MessageReceived(msg):
+  correlationId = msg.correlationId
+  ack = msg.payload
+
+  update robots.robot_command_outbox where correlationId:
+    status = mapAckStatus(ack.status)
+    lastUpdateAt = msg.ts
+
+  signalR.broadcast("robot.command.ack", { robotId=msg.robotId, correlationId, status=ack.status, reason=ack.reason })
+  jetstream.ack(msg)
+
+
+3) Settings editing (frontend -> SignalR -> backend -> NATS -> robot -> reported -> backend -> SignalR)
+
+RobotSettingsHub.SetDesired(user, robotId, desiredSettings):
+  assert user has OperatorPolicy
+  assert robot exists
+
+  correlationId = newCorrelationId()
+  desiredId = newUuid()
+
+  persist robots.robot_settings_desired:
+    desiredId, robotId, createdBy=user.userId, createdAt=now
+    correlationId, status="PENDING", desiredJson=desiredSettings
+
+  publish robot.{robotId}.settings.desired to NATS:
+    envelope = { messageId, robotId, ts=now, correlationId, payload=desiredSettings }
+
+  signalR.broadcast("robot.settings.desired.updated", { robotId, desired=desiredSettings, correlationId })
+
+RobotSettingsReportedConsumer.MessageReceived(msg):
+  reported = msg.payload
+
+  upsert robots.robot_settings_reported:
+    robotId=msg.robotId, updatedAt=msg.ts, reportedJson=reported, correlationId=msg.correlationId
+
+  if msg.correlationId exists:
+    update robots.robot_settings_desired where correlationId:
+      status = "APPLIED" (or REJECTED based on payload)
+
+  signalR.broadcast("robot.settings.reported.updated", { robotId, reported, correlationId=msg.correlationId })
+  jetstream.ack(msg)
+
+
+4) Other modules consuming robot data
+
+Route module example:
+  state = RobotQueryService.GetLatestState(robotId)
+  if state.localizationStatus != OK:
+    fail route start
+  else:
+    RobotCommandService.SendCommand(robotId, MoveTo(goalPose))
+
+Traffic module example:
+  if congestion:
+    RobotCommandService.SendCommand(robotId, SetSpeedLimit(percent=50))
+
+Task module example:
+  RobotCommandService.SendCommand(robotId, ExecuteActionPoint(actionPointId))
+
+
+--------------------------------------------------------
+Operational Notes
+--------------------------------------------------------
+
+Reliability:
+- Use explicit acks and persist DB updates before ack.
+- Consider a dead-letter strategy for malformed messages.
+- Use correlationId end-to-end for tracing UI request -> NATS -> robot -> ack/reported -> UI.
+
+Observability:
+- Log with correlationId and robotId.
+- Add metrics:
+  - consumer lag, ack latency
+  - command round-trip latency (sent -> ack)
+  - robot lastSeenAt age distribution
+
+Safety:
+- Validate command payloads and enforce limits server-side (e.g., speed bounds).
+- Restrict settings changes to authorized users and audit all changes.
+

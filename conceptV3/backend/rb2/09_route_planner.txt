@@ -1,0 +1,439 @@
+========================================================
+MODULE 09: ROUTE PLANNER (A* + TIME-SCALED COST + ETA)
+========================================================
+
+Goal:
+- Plan a complete route for a robot to execute a Mission:
+  - takes robot current pose (x, y, heading/facing direction)
+  - expands mission move steps into a path through the map graph
+  - produces a time-scaled plan: where the robot will be at what time
+  - computes ETA for the whole mission (move + junction cornering + waits + actions)
+- Consider other robots’ planned routes when computing cost (time-based congestion/conflicts).
+- Produce robot-executable steps including junction turn instructions:
+  - at each junction, tell robot to toggle cam to LEFT / RIGHT / STRAIGHT
+
+Reference:
+- concept module: conceptV3/backend/rb/08_route.txt
+- robot runtime semantics: conceptV3/robot/robot_module_concept.txt
+- robot transport boundary: conceptV3/backend/06_robot_link.txt
+
+Non-goals:
+- Owning mission authoring (Teach module owns missions).
+- Owning task lifecycle and dispatch (Task module owns task state machine).
+- Owning collision avoidance policy and reservation enforcement (Traffic module), but Route Planner consumes time-scaled occupancy inputs.
+
+
+--------------------------------------------------------
+Module Boundary (Route Planner owns)
+--------------------------------------------------------
+Route Planner owns:
+- Graph-based planning:
+  - A* search on mapVersionId graph
+  - time-dependent cost function (time-scaled occupancy and waits)
+- ETA computation:
+  - kinematic time model using robot max accel/decel, max speed
+  - path speed limit and node (junction) speed limit
+  - cornering/turn steps at junctions
+  - explicit wait steps and mission action times
+- Packaging route for robot execution:
+  - ordered steps (MOVE, TURN_CAM, WAIT, ARRIVE_ACTIONS)
+  - timeline with expected timestamps for each node/path occupancy
+
+Route Planner does not own:
+- Map editing/versioning (Map module).
+- Teach mission structure and nested mission expansion (Teach module).
+- Final dispatch and robot communication primitives (Robot Link), but Route Planner produces the payload.
+
+
+--------------------------------------------------------
+Inputs (what the planner needs)
+--------------------------------------------------------
+Map graph (Map module / DB):
+- mapId, mapVersionId
+- Nodes: junction speed limit, maintenance flags
+- Paths: direction, maintenance flags, speed limit, geometry, length
+
+Robot state (Robot Link / cached snapshot):
+- robotId
+- pose: { x, y, headingRad }
+- maxSpeedMps, maxAccelMps2, maxDecelMps2
+- hasTurnMechanism (affects turn step semantics)
+
+Mission (Teach module, published version):
+- a sequence of steps
+- moveToPoint steps define destinations (nodeId/pointId/(x,y))
+- action steps define requiredTimeSeconds (rotate/hoist/grip/wait/etc.)
+- missionRef steps are expanded before routing (Teach owns expansion)
+
+Time-scaled occupancy (Traffic module and/or route history):
+- blocked windows (hard constraints): which edge/node is not traversable during [t0,t1)
+- cost windows (soft constraints): additional penalty for entering during [t0,t1)
+- predicted occupancy by other robots:
+  - edge occupancy intervals with robotId
+  - node occupancy intervals with robotId
+
+
+--------------------------------------------------------
+Outputs (what the planner produces)
+--------------------------------------------------------
+RoutePlan (mission-aware):
+- routePlanId (uuid)
+- robotId
+- taskId (uuid?)                              (when planned for a task)
+- mapId, mapVersionId
+- createdAt
+- etaSecondsTotal
+- timeline:
+  - a time-scaled list of occupancy segments:
+    - segmentType: NODE | EDGE
+    - id: nodeId or pathId
+    - enterAt, exitAt (timestamps)
+    - speedMpsEffective?
+    - note?
+- steps (robot executable):
+  - MOVE(pathId, distanceMeters, speedMpsEffective?)
+  - TURN_CAM(direction=LEFT|RIGHT|STRAIGHT, expectedTurnAngleDeg?)
+  - WAIT(seconds, reason)
+  - ARRIVE_ACTIONS(actionsAtDestinationSeconds, note?)
+
+Rule:
+- Steps are deterministic and minimal.
+- Timeline is authoritative for ETA and for traffic coordination.
+
+
+--------------------------------------------------------
+Cost Model (A* with time-scaled penalties)
+--------------------------------------------------------
+State definition (time-aware, concept):
+- state = (nodeId, arrivalTime)
+
+Total cost:
+- g(state): elapsed time from startTime to arrivalTime
+- h(state): optimistic remaining time to destination
+  - heuristic = straightLineDistance(node, destination) / maxPossibleSpeed
+
+Edge relaxation (time-dependent):
+- For an edge (pathId from nodeA -> nodeB):
+  1) compute earliestDepartureTime >= arrivalTime that satisfies hard constraints:
+     - edge not blocked in [departure, departure+travelTime)
+     - node/edge conflict policy (can be modeled as blocks or forced waits)
+  2) compute travelTime using kinematics + speed limits (see ETA section)
+  3) apply soft penalties if entering congested windows:
+     - addPenaltySeconds based on overlap with other robots occupancy windows
+  4) successor arrivalTime = earliestDepartureTime + travelTime + addPenaltySeconds
+
+Selection rule:
+- Choose the path that minimizes arrivalTime at destination (earliest arrival A*).
+
+
+--------------------------------------------------------
+Time-Scaled Conflicts (consider other robot routes)
+--------------------------------------------------------
+Input form:
+- A time-series of occupancy windows for each pathId and nodeId:
+  - occupiedByRobotId, enterAt, exitAt
+
+Conflict handling modes (concept):
+- HARD:
+  - treat conflicts as blocks; wait until the window clears
+- SOFT:
+  - allow overlap but add penalty to discourage it (used for non-critical congestion)
+
+Recommended default:
+- Edge occupancy is HARD (avoid shared edge occupancy in opposite directions).
+- Node occupancy is SOFT with added dwell/slowdown, unless junction is narrow (then HARD).
+
+Timescale method:
+- The planner always emits enterAt/exitAt for every edge and node it traverses.
+- These time windows are stored as time-series so other planning requests can consume them.
+
+
+--------------------------------------------------------
+ETA Model (move + corner + wait + actions)
+--------------------------------------------------------
+Effective speed limits:
+- robotMaxSpeedMps
+- pathSpeedLimitMps (per edge)
+- nodeSpeedLimitMps (junction limit, applies when passing through the node)
+
+Effective edge cruise speed:
+- vMaxEdge = min(robotMaxSpeedMps, pathSpeedLimitMps)
+
+Cornering / junction limit:
+- vMaxNode = min(robotMaxSpeedMps, nodeSpeedLimitMps, vMaxEdgePrev, vMaxEdgeNext)
+- Junction traversal may require a CAM turn step (see next section).
+
+Kinematic travel time for an edge (trapezoidal/triangular profile):
+Inputs:
+- distanceMeters
+- vMaxEdge
+- aMax (robot max accel)
+- dMax (robot max decel)
+Output:
+- travelSeconds
+
+Concept computation:
+- compute peak speed possible given distance, accel, decel
+- if peakSpeed >= vMaxEdge:
+  - accelerate to vMaxEdge, cruise, decelerate
+- else:
+  - accelerate to peakSpeed, then immediately decelerate (no cruise)
+
+Wait time sources (added to ETA):
+- time-scaled conflict waiting (edge/node availability windows)
+- explicit mission wait steps
+- action time at stops:
+  - sum(requiredTimeSeconds) for non-move steps at that stop point
+
+Total mission ETA:
+- sum(move edge travel times)
+- + sum(junction/cam turn overhead, if modeled as time)
+- + sum(wait times)
+- + sum(action times)
+
+
+--------------------------------------------------------
+Junction Turn Instructions (cam toggling)
+--------------------------------------------------------
+Problem:
+- Each node is a junction; the planner must instruct the robot whether to go straight, turn left, or turn right.
+- Some robots use a turn mechanism (cam into rail) and require explicit toggles.
+
+Turn instruction output:
+- TURN_CAM(direction=LEFT|RIGHT|STRAIGHT)
+
+Direction derivation (concept):
+- Based on incoming edge vector and outgoing edge vector at the node:
+  - compute signed angle delta between vectors
+  - if abs(delta) <= straightThreshold => STRAIGHT
+  - else if delta > 0 => LEFT
+  - else => RIGHT
+
+Robot capability rule:
+- If hasTurnMechanism=true:
+  - include TURN_CAM steps at junctions where direction is LEFT/RIGHT/STRAIGHT
+  - robot runtime handles engage/disengage interlocks locally
+- If hasTurnMechanism=false:
+  - TURN_CAM steps are omitted or converted to TURN metadata; robot uses normal steering model
+
+
+--------------------------------------------------------
+Robot Delivery (how route is sent to robot)
+--------------------------------------------------------
+Rule:
+- Route Planner produces a RoutePlan payload.
+- Sending is done through Robot Link boundary:
+  - backend -> robot: robots.route.response.<robotId>
+
+Two supported flows:
+1) Robot-requested planning:
+  - robot publishes robots.route.request.<robotId> with start + destination + taskId
+  - backend computes RoutePlan and publishes robots.route.response.<robotId>
+
+2) Backend-driven planning for a mission/task:
+  - Task module creates a mission task
+  - Route Planner computes the mission route from robot current pose
+  - Route plan is published to robot via Robot Link
+
+
+--------------------------------------------------------
+EF Core Data Model (routes schema)
+--------------------------------------------------------
+Schema:
+- routes
+
+RoutePlan:
+- routePlanId (uuid, PK)
+- robotId (text)
+- taskId (uuid?)
+- mapId (uuid)
+- mapVersionId (uuid)
+- status (text)                               // PLANNED | SENT | ACKED | SUPERSEDED | FAILED
+- createdAt (timestamptz)
+- etaSecondsTotal (double)
+- stepsJson (jsonb)                           // robot-executable steps
+- timelineJson (jsonb)                        // enterAt/exitAt per edge/node
+- costBreakdownJson (jsonb?)                  // optional diagnostics
+
+RouteOccupancy (time-series; used for time-scaled planning):
+- occupancyId (uuid, PK)
+- robotId (text)
+- routePlanId (uuid)
+- mapVersionId (uuid)
+- segmentType (text)                          // NODE | EDGE
+- segmentId (uuid)                            // nodeId or pathId
+- enterAt (timestamptz)
+- exitAt (timestamptz)
+- direction (text?)                           // optional for EDGE: FROM->TO encoding
+- createdAt (timestamptz)
+
+RouteRequestLog (optional):
+- requestId (uuid, PK)
+- robotId (text)
+- taskId (uuid?)
+- mapVersionId (uuid)
+- requestedAt (timestamptz)
+- requestJson (jsonb)
+- resultCode (text)                           // OK | NO_PATH | BLOCKED | INVALID
+- resultJson (jsonb?)
+
+
+--------------------------------------------------------
+TimescaleDB Notes (occupancy)
+--------------------------------------------------------
+Goal:
+- Query where robots are expected to be at a given time window.
+
+Recommended approach:
+- Store RouteOccupancy as a hypertable keyed by enterAt (or createdAt) and partitioned by mapVersionId.
+- Keep short retention for predicted occupancy (e.g., 24h) and longer retention for completed runs if needed.
+
+Useful queries (concept):
+- All occupancies overlapping [t0, t1] for a given mapVersionId:
+  - WHERE mapVersionId = ? AND enterAt < t1 AND exitAt > t0
+- Conflicts on a given segment (nodeId/pathId) overlapping [t0, t1].
+
+
+--------------------------------------------------------
+File Structure (backend module template)
+--------------------------------------------------------
+backend/Modules/Routes/
+  Model/
+    RoutePlan.cs
+    RouteOccupancy.cs
+    RouteRequestLog.cs
+
+  Dto/
+    RoutePlanDto.cs
+    RouteComputeMissionRequestDto.cs
+    RouteComputeMissionResponseDto.cs
+    RouteStepDto.cs
+    RouteTimelineSegmentDto.cs
+
+  Messaging/
+    RouteContracts.V1.cs
+
+  Data/
+    RoutePlanRepository.cs
+    RouteOccupancyRepository.cs
+    RouteRequestLogRepository.cs
+
+  Service/
+    RoutePlannerService.cs                    // A* time-aware planning
+    RouteCostModelService.cs                  // kinematics + junction turn costs
+    RouteGraphCache.cs                        // mapVersionId graph snapshots
+    RouteOccupancyQueryService.cs             // timescale overlap queries
+    RouteValidationService.cs
+
+  Worker/
+    RobotRouteRequestWorker.cs
+    RobotRouteResponsePublisherWorker.cs
+
+  Api/
+    RoutesController.cs                       // preview + get route
+    MissionRoutesController.cs                // compute mission route for operator/task
+
+  Persistence/
+    RoutesDbSchema.cs
+    *EntityConfig.cs
+
+
+--------------------------------------------------------
+Pseudocode: Plan Mission Route (high-level)
+--------------------------------------------------------
+PlanMissionRoute(robotId, mapId, mapVersionId, missionSteps, startPose, startTime):
+  expanded = TeachMissionExpansionService.Expand(missionSteps)
+
+  routeSteps = []
+  timeline = []
+  now = startTime
+  pose = startPose
+
+  for each mission stop in expanded (moveToPoint destinations grouped with actions at stop):
+    destination = ResolveDestination(stop.moveToPoint)
+
+    pathResult = AStarTimeAware(
+      mapVersionId,
+      startNodeOrPose = pose,
+      destination = destination,
+      startTime = now,
+      robotKinematics = GetRobotKinematics(robotId),
+      occupancyWindows = QueryOccupancyWindows(mapVersionId, now, planningHorizon)
+    )
+
+    Append(pathResult.steps to routeSteps)
+    Append(pathResult.timeline to timeline)
+    now = pathResult.arrivalTime
+    pose = pathResult.endPose
+
+    actionSeconds = Sum(stop.action.requiredTimeSeconds)
+    if actionSeconds > 0:
+      routeSteps.Add(ARRIVE_ACTIONS(actionSeconds))
+      timeline.Add(NODE_OCCUPANCY(currentNode, enterAt=now, exitAt=now+actionSeconds, note="actions"))
+      now = now + actionSeconds
+
+  etaSecondsTotal = (now - startTime).TotalSeconds
+  return RoutePlan(routeSteps, timeline, etaSecondsTotal)
+
+
+--------------------------------------------------------
+Pseudocode: A* Time-Aware (earliest arrival)
+--------------------------------------------------------
+AStarTimeAware(mapVersionId, start, destination, startTime, robotKinematics, occupancyWindows):
+  openSet = PriorityQueue()
+  bestArrival = Map<NodeId, Timestamp>()
+
+  startNode = SnapPoseToGraphNodeOrVirtualNode(start)
+  bestArrival[startNode] = startTime
+  openSet.Push(startNode, f = Heuristic(startNode, destination, robotKinematics, startTime))
+
+  while openSet not empty:
+    current = openSet.PopMin()
+    currentTime = bestArrival[current]
+
+    if current == destinationNode:
+      return ReconstructPathWithTimeline(current, bestArrival)
+
+    for each outgoing edge e(current -> next):
+      travel = ComputeEdgeTravelTime(e, robotKinematics, nodeLimits, pathLimits)
+      depart = FindEarliestDeparture(current, e, currentTime, travel, occupancyWindows)
+      penalty = ComputeCongestionPenalty(e, depart, depart + travel, occupancyWindows)
+      arrival = depart + travel + penalty
+
+      if next not in bestArrival or arrival < bestArrival[next]:
+        bestArrival[next] = arrival
+        cameFrom[next] = (current, e, depart, arrival)
+        f = arrival + Heuristic(next, destination, robotKinematics, arrival)
+        openSet.PushOrDecreaseKey(next, f)
+
+  return NoPath(resultCode="NO_PATH")
+
+
+--------------------------------------------------------
+Pseudocode: Build Robot Steps (cam turns + waits)
+--------------------------------------------------------
+ReconstructPathWithTimeline(destinationNode, cameFrom):
+  edges = BacktrackEdges(cameFrom, destinationNode)
+
+  steps = []
+  timeline = []
+
+  prevEdge = null
+  for each edge in edges in order:
+    if prevEdge != null:
+      turnDir = ComputeTurnDirection(prevEdge, edge)
+      if RobotHasTurnMechanism:
+        steps.Add(TURN_CAM(turnDir))
+
+    if edge.departAt > lastTime:
+      steps.Add(WAIT(seconds=(edge.departAt - lastTime).TotalSeconds, reason="traffic/occupancy"))
+
+    steps.Add(MOVE(edge.pathId, edge.lengthMeters, speedMpsEffective=edge.speed))
+    timeline.Add(EDGE_OCCUPANCY(edge.pathId, enterAt=edge.departAt, exitAt=edge.arrivalAt))
+    timeline.Add(NODE_OCCUPANCY(edge.toNodeId, enterAt=edge.arrivalAt, exitAt=edge.arrivalAt, note="arrive"))
+
+    lastTime = edge.arrivalAt
+    prevEdge = edge
+
+  return { steps, timeline, arrivalTime=lastTime, endPose=NodePose(destinationNode) }
+

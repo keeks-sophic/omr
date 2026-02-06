@@ -1,0 +1,408 @@
+========================================================
+MODULE 06: ROBOT (ROBOT CONFIG + STATE + NATS JETSTREAM)
+========================================================
+
+Goal:
+- Provide a single backend module that represents every robot in the system
+- Handshake robots into the system over NATS JetStream
+- Persist robot inventory, capabilities, and configuration in Postgres (EF Core)
+- Stream robot state to frontend via SignalR for live dashboards
+- Expose REST API endpoints for CRUD robot config (frontend/admin)
+- Keep robot data usable across backend modules (tasks/traffic/teach/etc.)
+
+Transport Rules (aligned with 00_connections.txt):
+- Robot <-> Backend:
+  - Telemetry ingest + state + handshake + command ack: NATS JetStream
+- Frontend <-> Backend:
+  - Robot config CRUD and listing: REST API
+  - Live robot state streaming: SignalR
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (Robot module)
+--------------------------------------------------------
+
+backend/
+  Endpoints/
+    ApiRoutes.cs                       // add Robots routes here
+
+  Realtime/
+    SignalRRoutes.cs                   // add robot state events + groups
+
+  Messaging/
+    NatsJetStreamRoutes.cs             // add robot subjects/streams/consumers
+
+  Modules/
+    Robots/
+      Model/
+        Robot.cs
+        RobotConfig.cs
+        RobotMotor.cs
+        RobotIoDevice.cs
+        RobotHandshakeSession.cs
+        RobotStateSample.cs
+
+      Dto/
+        RobotDto.cs
+        RobotConfigDto.cs
+        RobotMotorDto.cs
+        RobotIoDeviceDto.cs
+        RobotStateDto.cs
+        RobotHandshakeRequest.cs
+        RobotHandshakeResponse.cs
+
+      Mapping/
+        RobotMapper.cs
+        RobotConfigMapper.cs
+        RobotStateMapper.cs
+
+      Data/
+        RobotRepository.cs
+        RobotConfigRepository.cs
+        RobotStateRepository.cs
+
+      Service/
+        RobotRegistryService.cs         // handshake + identity resolution
+        RobotConfigService.cs           // CRUD config + validation
+        RobotStateService.cs            // merges telemetry to state, persists samples
+
+      Api/
+        RobotsController.cs             // viewer/operator/admin read endpoints
+        RobotConfigController.cs        // operator/admin CRUD
+        AdminRobotConfigController.cs   // admin-only advanced config edits
+
+      Realtime/
+        RobotHubPublisher.cs            // emits SignalR robot state updates
+
+      Worker/
+        RobotNatsIngestWorker.cs        // subscribes to telemetry/state subjects
+        RobotHandshakeWorker.cs         // subscribes to handshake subjects
+
+      Messaging/
+        RobotNatsContracts.cs           // module message envelopes (optional)
+
+      Persistence/
+        RobotsDbSchema.cs               // "robots"
+        RobotEntityConfig.cs
+        RobotConfigEntityConfig.cs
+        RobotMotorEntityConfig.cs
+        RobotIoDeviceEntityConfig.cs
+        RobotHandshakeSessionEntityConfig.cs
+        RobotStateSampleEntityConfig.cs
+
+
+--------------------------------------------------------
+Access Control (RBAC, aligned with 02_auth.txt)
+--------------------------------------------------------
+
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Recommended policy usage:
+- Viewer policy:
+  - robot list, robot details, current robot state, basic config read
+- Operator policy:
+  - operational config edits (update limits/speeds), enable/disable robot, assign tags
+- Admin policy:
+  - CRUD robot inventory (create/delete robots), advanced hardware config edits
+  - add/remove motors and IO devices, change communication drivers, schema-level actions
+
+Notes:
+- Pending users are authenticated but blocked by fallback policy
+- Keep policy names and role inheritance centralized in Infrastructure/Security/AuthorizationPolicies.cs
+
+
+--------------------------------------------------------
+Core Concepts (what the module owns)
+--------------------------------------------------------
+
+Robot identity:
+- A robot is a stable backend entity with a robotId (uuid) and a unique robotKey (string)
+- robotKey is what the robot uses to identify itself during handshake (e.g., serial number)
+- robotId is what backend and frontend use for all references
+
+Handshake:
+- Robots are not trusted by default; handshake establishes:
+  - robot identity (robotKey -> robotId mapping)
+  - backend-supplied config version/desired profile
+  - robot-reported software version/model/dimensions
+  - an active session record for observability (connectedAt/lastSeenAt)
+
+Robot state model:
+- Robot run state (connectivity/behavior):
+  - OFFLINE | IDLE | RUNNING | STOP
+- Robot state severity (health):
+  - NORMAL | WARNING | ERROR
+
+Robot config:
+- Stable identity fields:
+  - model, version, dimensions (length/width/height, etc.)
+- Hardware configuration (admin-managed, scalable):
+  - motors: type + communication + limits
+  - IO devices: type + interface + metadata
+
+Scalability rule:
+- Motor types and IO device types must be extendable without schema rewrites everywhere
+- Store types as strings/enums with a stable canonical name and allow new values later
+
+
+--------------------------------------------------------
+Data Model (EF Core, robots schema)
+--------------------------------------------------------
+
+Schema:
+- robots
+
+Entities (Model) and key fields:
+
+1) Robot (inventory + identity)
+- robotId (uuid, PK)
+- robotKey (text, unique)                       // robot-provided identity key
+- displayName (text)
+- isDisabled (bool)
+- createdAt, updatedAt (timestamptz)
+
+2) RobotConfig (current desired config)
+- robotConfigId (uuid, PK)
+- robotId (uuid, FK -> robots.robots)
+- configVersion (int)                           // increments on backend changes
+- model (text)
+- firmwareVersion (text?)
+- lengthMm, widthMm, heightMm (int?)
+- metadataJson (jsonb?)                         // future-safe extension point
+- updatedAt (timestamptz)
+
+3) RobotMotor (admin-managed)
+- motorId (uuid, PK)
+- robotId (uuid, FK)
+- name (text)                                   // human name, unique per robot
+- motorType (text)                              // Drive | Turn | Hoist | Telescope | Rotate | Grip | ...
+- communicationType (text)                      // CAN | RS232 | ...
+- maxSpeed (double?)
+- maxAcceleration (double?)
+- lowerLimit (double?)
+- upperLimit (double?)
+- metadataJson (jsonb?)
+
+4) RobotIoDevice (admin-managed)
+- ioDeviceId (uuid, PK)
+- robotId (uuid, FK)
+- name (text)
+- deviceType (text)                             // LimitSensor | Estop | BarcodeScanner | Lidar | Imu | ...
+- interfaceType (text)                          // CAN | RS232 | GPIO | USB | Ethernet | ...
+- isRequired (bool)
+- metadataJson (jsonb?)                         // per-device extra fields
+
+5) RobotHandshakeSession (observability + last-seen)
+- sessionId (uuid, PK)
+- robotId (uuid, FK)
+- connectedAt (timestamptz)
+- lastSeenAt (timestamptz)
+- remoteInfo (text?)                            // optional: connection/robot network info
+- lastHandshakeRequestJson (jsonb?)
+- lastHandshakeResponseJson (jsonb?)
+
+6) RobotStateSample (optional persisted timeseries)
+- sampleId (uuid, PK)
+- robotId (uuid, FK)
+- ts (timestamptz)
+- runState (text)                               // OFFLINE/IDLE/RUNNING/STOP
+- severity (text)                               // NORMAL/WARNING/ERROR
+- poseJson (jsonb?)                             // optional (x/y/theta) until a richer model exists
+- batteryPercent (double?)
+- metadataJson (jsonb?)
+
+Notes (aligned with 01_database.txt):
+- All EF Core query/save logic lives under Modules/Robots/Data
+- All entity table mapping + indexes live under Modules/Robots/Persistence
+- DTOs are returned by API/SignalR only (Model -> DTO -> Mapper)
+- For timeseries, RobotStateSample can later be converted to Timescale hypertable
+
+
+--------------------------------------------------------
+NATS JetStream (robot streaming + handshake)
+--------------------------------------------------------
+
+Purpose:
+- Provide robot handshake + state ingest + command distribution channels
+- Keep subjects/streams/consumers centralized in Messaging/NatsJetStreamRoutes.cs
+
+Subject naming rules (aligned with 00_connections.txt):
+- Dot-separated, scoped by robotKey or robotId:
+  - robots.handshake.{robotKey}
+  - robots.state.{robotKey}
+  - robots.telemetry.{robotKey}
+  - robots.cmd.{robotKey}
+  - robots.cmd.ack.{robotKey}
+
+Recommended subjects (Robot module needs at minimum):
+- Handshake request (robot -> backend):
+  - robots.handshake.req.{robotKey}
+- Handshake response (backend -> robot):
+  - robots.handshake.res.{robotKey}
+
+- Robot state (robot -> backend):
+  - robots.state.{robotKey}
+
+Optional now / useful soon:
+- Telemetry samples (robot -> backend):
+  - robots.telemetry.{robotKey}
+- Commands (backend -> robot):
+  - robots.cmd.{robotKey}
+- Command ack (robot -> backend):
+  - robots.cmd.ack.{robotKey}
+
+JetStream resources:
+- Streams (ALL_CAPS, stable):
+  - ROBOTS_HANDSHAKE
+  - ROBOTS_STATE
+  - ROBOTS_TELEMETRY
+  - ROBOTS_COMMANDS
+  - ROBOTS_COMMAND_ACKS
+
+- Consumers:
+  - handshake_ingest
+  - state_ingest
+  - telemetry_ingest
+  - command_ack_ingest
+
+Worker responsibilities:
+- RobotHandshakeWorker:
+  - subscribes to robots.handshake.req.*
+  - validates/creates Robot + RobotConfig if needed
+  - emits robots.handshake.res.{robotKey} with assigned robotId + configVersion
+  - updates RobotHandshakeSession lastSeenAt
+
+- RobotNatsIngestWorker:
+  - subscribes to robots.state.* (and robots.telemetry.* if enabled)
+  - updates in-memory current state cache (per robotId)
+  - persists RobotStateSample optionally (throttled)
+  - triggers SignalR publish for live frontend updates
+
+
+--------------------------------------------------------
+REST Endpoints (frontend config CRUD)
+--------------------------------------------------------
+
+Base:
+- /api/v1/robots
+
+Robot inventory:
+- GET    /api/v1/robots
+  Policy: Viewer
+  Response: RobotDto[]
+
+- GET    /api/v1/robots/{robotId}
+  Policy: Viewer
+  Response: RobotDto
+
+Robot config (frontend needs CRUD now):
+- GET    /api/v1/robots/{robotId}/config
+  Policy: Viewer
+  Response: RobotConfigDto
+
+- PUT    /api/v1/robots/{robotId}/config
+  Policy: Operator
+  Body: RobotConfigDto (or a request DTO)
+  Response: RobotConfigDto
+
+Admin hardware config (admin can add motors/IO):
+- GET    /api/v1/admin/robots/{robotId}/hardware
+  Policy: Admin
+  Response: { motors: RobotMotorDto[], io: RobotIoDeviceDto[] }
+
+- PUT    /api/v1/admin/robots/{robotId}/hardware/motors
+  Policy: Admin
+  Body: RobotMotorDto[] (replace set)
+  Response: { ok:true }
+
+- PUT    /api/v1/admin/robots/{robotId}/hardware/io
+  Policy: Admin
+  Body: RobotIoDeviceDto[] (replace set)
+  Response: { ok:true }
+
+Behavior rules:
+- Robot config updates increment configVersion
+- Handshake response includes latest configVersion so robots can detect updates
+
+
+--------------------------------------------------------
+SignalR Events (frontend streaming robot states)
+--------------------------------------------------------
+
+Hub path (in Realtime/SignalRRoutes.cs):
+- /hub/robots
+
+Groups:
+- fleet
+- robot:{robotId}
+
+Event names (lowerCamelCase, in Realtime/SignalRRoutes.cs):
+- robotState
+- robotHandshake
+- robotConfigChanged
+
+Payload intent (recommended):
+- robotState: RobotStateDto
+  - { robotId, runState, severity, ts, ... }
+- robotHandshake: { robotId, robotKey, connectedAt, configVersion }
+- robotConfigChanged: { robotId, configVersion, updatedAt }
+
+
+--------------------------------------------------------
+Repository / Service Responsibilities
+--------------------------------------------------------
+
+Repositories (Modules/Robots/Data):
+- RobotRepository:
+  - create/get/list robots, resolve robotKey -> robotId, disable robot
+- RobotConfigRepository:
+  - get/update config, increment configVersion, read by robotId
+- RobotStateRepository:
+  - append RobotStateSample, query latest sample per robotId, history paging
+
+Services (Modules/Robots/Service):
+- RobotRegistryService:
+  - owns handshake flow and identity resolution
+  - enforces disabled robot behavior (reject handshake/ingest if disabled)
+- RobotConfigService:
+  - validates config updates (limits, required fields)
+  - emits robotConfigChanged SignalR event on updates
+- RobotStateService:
+  - owns current state cache and write throttling rules
+  - maps incoming NATS payloads into state DTOs for streaming
+
+
+--------------------------------------------------------
+DB Indexes / Constraints (recommended)
+--------------------------------------------------------
+
+robots.robots
+- PK (robotId)
+- UNIQUE (robotKey)
+- INDEX (isDisabled)
+
+robots.robot_configs
+- PK (robotConfigId)
+- UNIQUE (robotId)                               // 1 current config per robot
+- INDEX (updatedAt)
+
+robots.robot_motors
+- PK (motorId)
+- INDEX (robotId)
+- UNIQUE (robotId, name)
+
+robots.robot_io_devices
+- PK (ioDeviceId)
+- INDEX (robotId)
+- UNIQUE (robotId, name)
+
+robots.robot_handshake_sessions
+- PK (sessionId)
+- INDEX (robotId)
+- INDEX (lastSeenAt)
+
+robots.robot_state_samples
+- PK (sampleId)
+- INDEX (robotId, ts DESC)
+

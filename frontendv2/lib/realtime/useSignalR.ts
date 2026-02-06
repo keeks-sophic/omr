@@ -1,6 +1,6 @@
 "use client";
 
-import { HubConnection, HubConnectionBuilder } from "@microsoft/signalr";
+import { HubConnection, HubConnectionBuilder, LogLevel } from "@microsoft/signalr";
 import { useEffect, useState } from "react";
 
 function getBackendBaseUrl(): string {
@@ -8,24 +8,66 @@ function getBackendBaseUrl(): string {
   return base.replace(/\/$/, "");
 }
 
+let shared: HubConnection | null = null;
+let subscribers = 0;
+let startPromise: Promise<void> | null = null;
+
+function isBenignStartStopError(err: unknown) {
+  if (!(err instanceof Error)) return false;
+  return err.message.includes("stopped during negotiation");
+}
+
+function getOrCreateConnection() {
+  if (shared) return shared;
+  const hubUrl = `${getBackendBaseUrl()}/hubs/realtime`;
+  shared = new HubConnectionBuilder()
+    .withUrl(hubUrl, { withCredentials: true })
+    .withAutomaticReconnect()
+    .configureLogging({
+      log: (level, message) => {
+        if (message.includes("stopped during negotiation")) return;
+        if (level === LogLevel.Error) console.error(message);
+        else if (level === LogLevel.Warning) console.warn(message);
+        else if (level === LogLevel.Information) console.info(message);
+        else console.debug(message);
+      },
+    })
+    .build();
+  return shared;
+}
+
 export function useSignalR() {
-  const [connection] = useState<HubConnection>(() => {
-    const hubUrl = `${getBackendBaseUrl()}/hubs/realtime`;
-    return new HubConnectionBuilder().withUrl(hubUrl, { withCredentials: true }).withAutomaticReconnect().build();
+  const [connection] = useState<HubConnection | null>(() => {
+    if (typeof window === "undefined") return null;
+    return getOrCreateConnection();
   });
   const [isConnected, setIsConnected] = useState(false);
 
   useEffect(() => {
-    connection
-      .start()
-      .then(() => setIsConnected(true))
-      .catch(() => setIsConnected(false));
+    if (!connection) return;
+    subscribers += 1;
+
+    if (!startPromise) {
+      startPromise = connection
+        .start()
+        .then(() => setIsConnected(true))
+        .catch((err) => {
+          if (!isBenignStartStopError(err)) setIsConnected(false);
+        })
+        .finally(() => {
+          startPromise = null;
+        });
+    }
 
     connection.onclose(() => setIsConnected(false));
     connection.onreconnected(() => setIsConnected(true));
 
     return () => {
-      void connection.stop();
+      subscribers -= 1;
+      if (subscribers <= 0) {
+        subscribers = 0;
+        void connection.stop();
+      }
     };
   }, [connection]);
 

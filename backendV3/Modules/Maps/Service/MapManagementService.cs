@@ -257,12 +257,6 @@ public sealed class MapManagementService
         if (mv == null) return false;
         if (!IsEditableDraft(mv)) return false;
 
-        var previouslyPublished = await _db.MapVersions.Where(x => x.MapId == mapId && x.Status == MapVersionStatuses.Published && x.MapVersionId != mapVersionId).ToListAsync(ct);
-        foreach (var v in previouslyPublished)
-        {
-            v.Status = MapVersionStatuses.Draft;
-        }
-
         mv.Status = MapVersionStatuses.Published;
         mv.PublishedAt = DateTimeOffset.UtcNow;
         mv.PublishedBy = publishedBy;
@@ -272,6 +266,20 @@ public sealed class MapManagementService
 
         await _db.SaveChangesAsync(ct);
         await _hub.MapVersionPublishedAsync(mapId, mapVersionId, ct);
+        return true;
+    }
+
+    public async Task<bool> SetActivePublishedVersionAsync(Guid mapId, Guid mapVersionId, CancellationToken ct)
+    {
+        var map = await _db.Maps.FirstOrDefaultAsync(x => x.MapId == mapId, ct);
+        if (map == null) return false;
+
+        var mv = await _db.MapVersions.AsNoTracking().FirstOrDefaultAsync(x => x.MapId == mapId && x.MapVersionId == mapVersionId, ct);
+        if (mv == null) return false;
+        if (!string.Equals(mv.Status, MapVersionStatuses.Published, StringComparison.OrdinalIgnoreCase)) return false;
+
+        map.ActivePublishedMapVersionId = mapVersionId;
+        await _db.SaveChangesAsync(ct);
         return true;
     }
 

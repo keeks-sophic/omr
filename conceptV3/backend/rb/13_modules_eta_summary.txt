@@ -1,0 +1,188 @@
+========================================================
+MODULE SUMMARY: ROBOT + TASK + ROUTE + TRAFFIC + TEACH (SMOOTH + FAST ETA)
+========================================================
+
+Goal:
+- Provide a short, precise reference for:
+  - what each module is responsible for
+  - good-to-have decisions
+  - how modules cooperate to produce smooth motion and fast, accurate ETA
+
+
+--------------------------------------------------------
+MODULE 06: ROBOT
+--------------------------------------------------------
+Responsible:
+- Own canonical robot state and settings in DB:
+  - Robot identity + capability booleans: hasHoist/hasTelescope/hasRotate/hasGrip
+  - RobotStatus: mode/status/estop/errorCode
+  - RobotTelemetry: pose/velocity
+  - RobotSettings.limitsJson: per-property speed/accel/range limits
+- Provide robot connectivity boundary via NATS and publish to frontend via SignalR.
+- Provide operator settings updates and resets:
+  - apply limits/io config
+  - motor reset, IO reset
+
+Good to have:
+- Strict settings schemaVersion + validation.
+- Desired vs reported settings with lastAppliedAt/lastReportedAt and apply errors.
+- Alert routing policy for disconnect/estop/error to operators.
+
+Cooperate for smooth + fast ETA:
+- Provides accurate robot limitsJson so:
+  - Route can estimate travel time more accurately (effective speed)
+  - Traffic can compute braking distance and speed profiles correctly
+- Emits alerts:
+  - robot.connection.updated connected=false (robot down/disconnected)
+  - robot.status.updated estop=true or status=ERROR
+
+Key NATS subjects:
+- robots.task.<robotId>
+- robots.route.request.<robotId> / robots.route.response.<robotId>
+- robots.traffic.state.<robotId> / robots.traffic.control.<robotId>
+- robots.teach.control.<robotId> / robots.teach.state.<robotId>
+- robots.settings.apply.<robotId> / robots.settings.reset.<robotId>
+- robots.settings.report.<robotId> / robots.settings.ack.<robotId>
+
+
+--------------------------------------------------------
+MODULE 07: TASK
+--------------------------------------------------------
+Responsible:
+- Task lifecycle (source of truth) and dispatch:
+  - task type: MOVE_TO_POINT or MISSION
+  - publish robots.task.<robotId> taskAssign/taskCancel
+- Robot selection (auto-dispatch) using Robot + Teach metadata:
+  - connected/lastSeenAt, mode/status
+  - robot hasHoist/hasTelescope/hasRotate/hasGrip
+  - Mission requiredHasHoist/requiredHasTelescope/requiredHasRotate/requiredHasGrip
+  - limitsJson validation for mission targets
+- Aggregate progress/delay/error:
+  - robots.task.<robotId> progress/done/delayed/failed
+  - publish task updates to frontend (SignalR)
+
+Good to have:
+- Idempotent dispatch (taskId + correlationId).
+- Clear timeouts:
+  - no ack, no progress, deadline breach.
+- Record a minimal audit trail (who dispatched/canceled/forced assign).
+
+Cooperate for smooth + fast ETA:
+- For mission tasks:
+  - use Mission requiredHas* fields to select a compatible robot quickly
+  - propagate action requiredTimeSeconds into route requests:
+    - actionsAtDestinationSeconds per stop point
+- Accept ETA updates:
+  - initial ETA from Route
+  - dynamic delays from robot updates and traffic-derived conditions
+
+
+--------------------------------------------------------
+MODULE 08: ROUTE
+--------------------------------------------------------
+Responsible:
+- Compute route plan (A*) using Map graph + constraints:
+  - maintenance blocks (hard)
+  - Traffic blocked edges (hard)
+  - Traffic cost penalties (soft)
+- Output steps and ETA:
+  - travel time from effectiveSpeed
+  - add actionsAtDestinationSeconds into total ETA when needed
+
+Good to have:
+- Deterministic planning (stable neighbor ordering/tie-breakers).
+- Cache map graph snapshots for published versions.
+- Observability: compute duration, no-path reasons.
+
+Cooperate for smooth + fast ETA:
+- Uses Traffic inputs:
+  - traffic.blocked.<mapVersionId> to avoid unsafe paths (offline/estop/locks)
+  - traffic.cost.<mapVersionId> to avoid congested / action-dwell-heavy regions when faster alternatives exist
+- Uses mission action timing:
+  - actionsAtDestinationSeconds makes ETA realistic for “move + act at stop point”
+
+
+--------------------------------------------------------
+MODULE 09: TRAFFIC
+--------------------------------------------------------
+Responsible:
+- Safety control for multi-robot motion:
+  - node exclusivity (hard)
+  - two-way conflict prevention (hard)
+  - following distance (speed caps)
+  - time-window reservations (space + time, not only occupancy-now)
+- Smooth motion shaping:
+  - speed targets that avoid unnecessary stops
+  - braking distance and early slow-down
+- External locks:
+  - teach lock blocks nodes/paths for other robots
+- Offline/estop/error handling:
+  - treat robot location as occupied conservatively
+  - deny conflicts, publish blocked edges when needed
+- Publish routing feedback:
+  - traffic.blocked.<mapVersionId> (hard blocked edges)
+  - traffic.cost.<mapVersionId> (penalties in seconds)
+
+Good to have:
+- Wait-for graph deadlock detection and resolution.
+- Time-window pressure and action-dwell pressure metrics for cost updates.
+- Clear operator tools:
+  - force hold/release
+  - manual block/unblock edges
+
+Cooperate for smooth + fast ETA:
+- Reservations include action dwell time:
+  - if robot must perform actions at a stop point, extend endTs for that node window
+- Prefer speed adjustment over full stop:
+  - schedule arrival to match reservation window startTs
+- Enable reroute:
+  - publish blocked edges for down/estop/offline to force safe detours
+  - publish penalties to encourage faster alternatives
+
+
+--------------------------------------------------------
+MODULE 10: TEACH
+--------------------------------------------------------
+Responsible:
+- Teach sessions that produce reusable Missions:
+  - mission steps: moveToPoint/grip/rotate/telescope/hoist/wait/missionRef
+  - requiredTimeSeconds for every non-move step
+- Capability-aware mission publish:
+  - derive requiredHasHoist/requiredHasTelescope/requiredHasRotate/requiredHasGrip from steps (including nested missionRef)
+  - reject publish if robot capability or limitsJson validation fails
+- Teach lock integration:
+  - request traffic.lock.acquire/heartbeat/release to prevent interference during teach
+
+Good to have:
+- MissionRef cycle detection and recursion depth limit.
+- Track actual action durations vs requiredTimeSeconds for tuning.
+- Version missions (version int) and keep additive schema changes.
+
+Cooperate for smooth + fast ETA:
+- Stores mission required abilities so Task selects the right robot quickly.
+- Stores requiredTimeSeconds so Route/Traffic can:
+  - include action time into ETA
+  - reserve enough node time windows to avoid stop-and-go behavior
+
+
+--------------------------------------------------------
+System Suggestions (recommended)
+--------------------------------------------------------
+1) Treat “blocked vs penalized” as the core reroute model
+- Block unsafe edges (maintenance, teach locks, offline/estop occupancy).
+- Penalize congested/dwell-heavy edges to prefer faster alternatives when possible.
+
+2) Use action time consistently
+- Mission defines requiredTimeSeconds.
+- Route adds actionsAtDestinationSeconds into ETA.
+- Traffic extends reservation windows by action time.
+
+3) Make alerts first-class
+- robot disconnected / estop / ERROR should trigger:
+  - frontend alert
+  - traffic blocking for safety
+  - task delayed/failed policy as configured
+
+4) Keep contracts stable and versioned
+- schemaVersion for all robot/route/teach/task payload families.
+- Additive changes only.

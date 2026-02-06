@@ -11,6 +11,21 @@ public static class JwtBearerEventsFactory
     {
         return new JwtBearerEvents
         {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"].ToString();
+                if (string.IsNullOrWhiteSpace(accessToken))
+                {
+                    accessToken = context.Request.Cookies["bk_at"];
+                }
+
+                if (!string.IsNullOrWhiteSpace(accessToken))
+                {
+                    context.Token = accessToken;
+                }
+
+                return Task.CompletedTask;
+            },
             OnTokenValidated = async context =>
             {
                 var jti = context.Principal?.FindFirst(JwtRegisteredClaimNames.Jti)?.Value;

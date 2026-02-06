@@ -1,0 +1,585 @@
+========================================================
+ROBOT IMPLEMENTATION: MODELS + DTOS + MAPPERS + FILE STRUCTURE
+========================================================
+
+Goal:
+- Provide a concrete robot-side implementation layout that matches ConceptV3 backend messaging.
+- Separate:
+  - Models (internal robot state and control abstractions)
+  - DTOs (wire contracts for NATS JetStream payloads)
+  - Mappers (pure transformations between Models and DTOs)
+
+
+--------------------------------------------------------
+Top-Level Robot Layout (recommended)
+--------------------------------------------------------
+robot/
+  robot_config.json
+
+  src/
+    Program.cs
+
+    Shared/
+      Time/
+        Clock.cs
+      Id/
+        IdGenerator.cs
+      Json/
+        JsonSerializerOptionsFactory.cs
+      Errors/
+        Result.cs
+      Logging/
+        Logger.cs
+
+    Messaging/
+      Nats/
+        NatsJetStreamClient.cs
+        NatsSubscriptions.cs
+        NatsPublishers.cs
+        NatsTopics.cs
+
+      Contracts/
+        Envelope.V1.cs
+
+        RobotContracts.V1.cs
+        SettingsContracts.V1.cs
+        TaskContracts.V1.cs
+        RouteContracts.V1.cs
+        TrafficContracts.V1.cs
+        TeachContracts.V1.cs
+
+    Modules/
+      Robot/
+      Settings/
+      Safety/
+      Localization/
+      Plc/
+      Task/
+      Route/
+      Traffic/
+      Teach/
+
+
+--------------------------------------------------------
+Shared Models (robot internal)
+--------------------------------------------------------
+src/Shared/Model/
+  Pose2D.cs
+  Velocity2D.cs
+  RobotCapabilities.cs
+  RobotLimits.cs
+  RobotIoConfig.cs
+  PlcConfig.cs
+  PlcConnectionState.cs
+  MotorType.cs
+  MotorState.cs
+  MotorStatus.cs
+  MotorTuning.cs
+  RobotStatus.cs
+  LidarConfig.cs
+  LidarHealth.cs
+  ObstacleDetectionState.cs
+  SafetyStopState.cs
+  QrScanResult.cs
+  LocalizationState.cs
+
+Pose2D:
+- x (double)
+- y (double)
+- headingRad (double)
+
+Velocity2D:
+- linearMps (double)
+- angularRps (double)
+
+RobotCapabilities:
+- hasHoist (bool)
+- hasTelescope (bool)
+- hasRotate (bool)
+- hasGrip (bool)
+
+PlcConfig:
+- enabled (bool)
+- endpoint (string?)
+- connectTimeoutMs (int?)
+- pollHz (double?)                          // recommended 10..50
+- useMockWhenDisconnected (bool)
+
+PlcConnectionState:
+- connected (bool)
+- lastSeenAt (string?)
+- lastError (string?)
+
+MotorType:
+- MOVE | HOIST | TELESCOPE | ROTATE | GRIP
+
+MotorState:
+- OFF | RUNNING | ERROR
+
+MotorStatus:
+- motor (MotorType)
+- state (MotorState)
+- errorCode (string?)
+- errorMessage (string?)
+- updatedAt (string)
+
+MotorTuning:
+- move:
+  - accelLimitMps2 (double)
+  - decelLimitMps2 (double)
+- hoist:
+  - accelLimitMps2 (double)
+  - decelLimitMps2 (double)
+- telescope:
+  - accelLimitMps2 (double)
+  - decelLimitMps2 (double)
+- rotate:
+  - accelLimitDegPerSec2 (double)
+  - decelLimitDegPerSec2 (double)
+- grip:
+  - accelLimitMmPerSec2 (double)
+  - decelLimitMmPerSec2 (double)
+
+RobotStatus:
+- RUNNING | WARNING | PAUSED | ERROR | OFFLINE
+
+Status derivation (robot-side contract):
+- status is computed by the robot and sent in robots.status.<robotId>.
+- Recommended mapping:
+  - OFFLINE: plc.enabled=true and plc not connected and useMockWhenDisconnected=false
+  - ERROR: move motor MotorStatus.state=ERROR
+  - PAUSED: estop=true OR safetyStopActive=true OR safetyStopReason in {ESTOP, OBSTACLE, TRAFFIC_HOLD}
+  - WARNING: any non-move motor MotorStatus.state=ERROR
+  - RUNNING: otherwise
+- Publish rule:
+  - Robot must publish robots.status immediately on any change of:
+    - status
+    - estop / safetyStopActive / safetyStopReason / obstacleDetected
+    - motor status transitions
+
+RobotLimits (mirrors backend limitsJson intent):
+- schemaVersion (int)
+- move:
+  - speedLimitMps (double)
+  - accelLimitMps2 (double)
+  - decelLimitMps2 (double)
+- hoist:
+  - speedLimitMps (double)
+  - minMm (double)
+  - maxMm (double)
+- telescope:
+  - speedLimitMps (double)
+  - minMm (double)
+  - maxMm (double)
+- rotate:
+  - speedLimitDegPerSec (double)
+  - minDeg (double)
+  - maxDeg (double)
+- grip:
+  - speedLimitMmPerSec (double)
+  - minMm (double)
+  - maxMm (double)
+
+LidarConfig:
+- lidarCount (int)                           // 1 or 2
+- minRangeMeters (double)
+- maxRangeMeters (double)
+- stopDistanceMeters (double)               // distance threshold for safety stop
+- warnDistanceMeters (double)
+
+LidarHealth:
+- lidarIndex (int)
+- connected (bool)
+- lastScanAt (string)
+- faultCode (string?)
+
+ObstacleDetectionState:
+- obstacleDetected (bool)
+- nearestObstacleMeters (double?)
+- detectionSource (string?)                 // lidar0 | lidar1 | fused
+- updatedAt (string)
+
+SafetyStopState:
+- estopPressed (bool)
+- safetyStopActive (bool)                   // forced stop due to sensors/estop
+- safetyStopReason (string?)                // ESTOP | OBSTACLE | INTERNAL_FAULT | TRAFFIC_HOLD
+- updatedAt (string)
+
+QrScanResult:
+- barcodeType (string)                      // QR
+- code (string)
+- mapId (string?)
+- mapVersionId (string?)
+- anchorId (string?)                        // qr anchor id if used
+- pose (Pose2D?)                            // resolved pose on map (if available)
+- ts (string)
+
+LocalizationState:
+- localized (bool)
+- method (string?)                          // QR | ODOMETRY | FUSION
+- confidence (double?)                      // 0..1
+- lastFixAt (string?)
+- lastQr (QrScanResult?)
+
+
+--------------------------------------------------------
+Messaging DTOs (wire contracts)
+--------------------------------------------------------
+Rule:
+- DTOs are serialized payload shapes for NATS JetStream.
+- Envelope is shared; payloads vary by subject/type.
+
+src/Messaging/Contracts/Envelope.V1.cs
+- EnvelopeV1<TPayload>:
+  - schemaVersion (int)
+  - type (string)
+  - robotId (string)
+  - messageId (string)
+  - ts (string)
+  - correlationId (string?)
+  - payload (TPayload)
+
+src/Messaging/Contracts/RobotContracts.V1.cs
+- RobotIdentityReportV1:
+  - displayName (string?)
+  - vendor (string?)
+  - model (string?)
+  - firmwareVersion (string?)
+  - capabilities (RobotCapabilitiesDtoV1)
+- RobotStatusReportV1:
+  - mode (string)
+  - status (string)                         // RUNNING | WARNING | PAUSED | ERROR | OFFLINE
+  - estop (bool)
+  - safetyStopActive (bool?)
+  - safetyStopReason (string?)
+  - obstacleDetected (bool?)
+  - motors (MotorStatusDtoV1[]?)
+  - errorCode (string?)
+  - errorMessage (string?)
+  - batteryPercent (double?)
+  - localized (bool?)
+  - localizationConfidence (double?)
+  - currentMapId (string?)
+  - currentMapVersionId (string?)
+- RobotTelemetryReportV1:
+  - pose (Pose2DDtoV1)
+  - velocity (Velocity2DDtoV1)
+  - lidar (LidarStatusDtoV1?)
+  - qr (QrScanDtoV1?)
+  - localization (LocalizationStatusDtoV1?)
+- RobotAlarmEventV1:
+  - severity (string)
+  - code (string)
+  - message (string?)
+- CommandAckV1:
+  - commandId (string)
+  - status (string)
+  - error (string?)
+
+Backend -> Robot command payloads (concept):
+- ResetMotorErrorCommandV1:
+  - type (string)                           // resetMotorError
+  - motor (string)                          // move|hoist|telescope|rotate|grip
+
+src/Messaging/Contracts/SettingsContracts.V1.cs
+- SettingsReportV1:
+  - schemaVersion (int)
+  - limits (RobotLimitsDtoV1)
+  - motors (MotorTuningDtoV1?)              // accel/decel tuning per motor
+  - ioConfig (RobotIoConfigDtoV1?)
+- SettingsApplyV1:
+  - schemaVersion (int)
+  - limits (RobotLimitsDtoV1?)
+  - motors (MotorTuningDtoV1?)
+  - ioConfig (RobotIoConfigDtoV1?)
+- SettingsResetV1:
+  - resetType (string)                       // MOTOR | IO
+- SettingsAckV1:
+  - commandId (string)
+  - status (string)
+  - error (string?)
+
+src/Messaging/Contracts/TaskContracts.V1.cs
+- TaskAssignV1:
+  - taskId (string)
+  - taskType (string)                        // MOVE_TO_POINT | MISSION | CUSTOM
+  - priority (int?)
+  - deadlineAt (string?)
+  - moveToPoint (MoveToPointDtoV1?)
+  - mission (MissionDtoV1?)
+- TaskCancelV1:
+  - taskId (string)
+- TaskProgressV1:
+  - taskId (string)
+  - status (string)                          // RUNNING | ...
+  - step (string?)
+  - progress (double?)
+  - etaSecondsRemaining (double?)
+- TaskDelayedV1:
+  - taskId (string)
+  - reasonCode (string)
+  - reasonMessage (string?)
+- TaskFailedV1:
+  - taskId (string)
+  - errorCode (string)
+  - errorMessage (string?)
+- TaskDoneV1:
+  - taskId (string)
+
+src/Messaging/Contracts/RouteContracts.V1.cs
+- RouteRequestV1:
+  - taskId (string?)
+  - mapId (string)
+  - mapVersionId (string)
+  - start (Pose2DDtoV1)
+  - destination (DestinationDtoV1)
+  - actionsAtDestinationSeconds (double?)
+  - constraints (RouteConstraintsDtoV1?)
+- RouteResponseV1:
+  - taskId (string?)
+  - routeId (string)
+  - etaSecondsTotal (double)
+  - segments (RouteSegmentDtoV1[])
+  - steps (RouteStepDtoV1[])
+
+src/Messaging/Contracts/TrafficContracts.V1.cs
+- TrafficStateV1:
+  - mapId (string?)
+  - mapVersionId (string?)
+  - pose (Pose2DDtoV1)
+  - velocityMps (double?)
+  - currentNodeId (string?)
+  - currentPathId (string?)
+  - routeId (string?)
+  - brakingDistanceMeters (double?)
+  - actionTimeSecondsRemaining (double?)
+- TrafficControlV1:
+  - allowEnterNodeId (string?)
+  - allowEnterPathId (string?)
+  - maxSpeedMps (double?)
+  - targetSpeedMps (double?)
+  - holdAtNodeId (string?)
+  - reservationWindow (ReservationWindowDtoV1?)
+  - actionWindow (ActionWindowDtoV1?)
+
+src/Messaging/Contracts/TeachContracts.V1.cs
+- TeachStartV1:
+  - sessionId (string)
+- TeachStopV1:
+  - sessionId (string)
+- TeachSetModeV1:
+  - mode (string)
+- TeachReplayMissionV1:
+  - missionId (string)
+  - missionVersion (int?)
+- TeachStateV1:
+  - mode (string)
+  - actuator (ActuatorStateDtoV1)
+  - replay (ReplayStateDtoV1?)
+
+Common DTO primitives (in a shared DTO file):
+- Pose2DDtoV1, Velocity2DDtoV1
+- RobotCapabilitiesDtoV1
+- RobotLimitsDtoV1 and per-axis inner DTOs
+- DestinationDtoV1 (nodeId | pointId | x,y)
+- PlcConnectionDtoV1
+- MotorStatusDtoV1
+- MotorTuningDtoV1
+- LidarStatusDtoV1
+- QrScanDtoV1
+- LocalizationStatusDtoV1
+
+
+--------------------------------------------------------
+Mappers (Model <-> DTO)
+--------------------------------------------------------
+Rule:
+- Mappers are pure functions. No I/O. No NATS. No hardware.
+
+src/Modules/Robot/Mapping/
+  RobotIdentityMapper.cs
+  RobotStatusMapper.cs
+  RobotTelemetryMapper.cs
+  MotorStatusMapper.cs
+
+src/Modules/Settings/Mapping/
+  RobotLimitsMapper.cs
+  RobotIoConfigMapper.cs
+  MotorTuningMapper.cs
+
+src/Modules/Safety/Mapping/
+  SafetyStopMapper.cs
+  LidarStatusMapper.cs
+
+src/Modules/Localization/Mapping/
+  QrScanMapper.cs
+  LocalizationStatusMapper.cs
+
+src/Modules/Plc/Mapping/
+  PlcConnectionMapper.cs
+
+src/Modules/Task/Mapping/
+  TaskAssignMapper.cs
+  TaskProgressMapper.cs
+  MissionMapper.cs
+
+src/Modules/Route/Mapping/
+  RouteRequestMapper.cs
+  RouteResponseMapper.cs
+
+src/Modules/Traffic/Mapping/
+  TrafficStateMapper.cs
+  TrafficControlMapper.cs
+
+src/Modules/Teach/Mapping/
+  TeachControlMapper.cs
+  TeachStateMapper.cs
+
+
+--------------------------------------------------------
+Per-Module File Structure (robot-side)
+--------------------------------------------------------
+backend module mapping intent:
+- Robot module docs: conceptV3/backend/06_robot.txt
+- Task module docs: conceptV3/backend/07_task.txt
+- Route module docs: conceptV3/backend/08_route.txt
+- Traffic module docs: conceptV3/backend/09_traffic.txt
+- Teach module docs: conceptV3/backend/10_teach.txt
+
+src/Modules/Robot/
+  Model/
+    RobotIdentityModel.cs
+    RobotStatusModel.cs
+    RobotTelemetryModel.cs
+  Dto/
+    (wire DTOs live in src/Messaging/Contracts)
+  Mapping/
+    RobotIdentityMapper.cs
+    RobotStatusMapper.cs
+    RobotTelemetryMapper.cs
+  Service/
+    RobotStateService.cs                    // local aggregation of state
+  Worker/
+    IdentityPublisherWorker.cs              // publishes robots.identity.*
+    StatusPublisherWorker.cs                // publishes robots.status.*
+    TelemetryPublisherWorker.cs             // publishes robots.telemetry.*
+    AlarmPublisherWorker.cs                 // publishes robots.alarm.*
+    CommandAckPublisherWorker.cs            // publishes robots.cmd.ack.*
+
+src/Modules/Settings/
+  Model/
+    RobotSettingsModel.cs                   // desired/applied snapshot
+  Mapping/
+    RobotLimitsMapper.cs
+    RobotIoConfigMapper.cs
+    MotorTuningMapper.cs
+  Service/
+    SettingsManager.cs                      // apply locally + manage bootstrap policy
+  Worker/
+    SettingsReportPublisherWorker.cs        // publishes robots.settings.report.*
+    SettingsApplySubscriberWorker.cs        // consumes robots.settings.apply.*
+    SettingsResetSubscriberWorker.cs        // consumes robots.settings.reset.*
+    SettingsAckPublisherWorker.cs           // publishes robots.settings.ack.*
+
+src/Modules/Plc/
+  Model/
+    PlcConfigModel.cs
+    PlcConnectionModel.cs
+    PlcSnapshotModel.cs                     // raw inputs for motors/estop/scanner
+  Mapping/
+    PlcConnectionMapper.cs
+  Service/
+    PlcClientService.cs                     // connect/read/write to PLC
+    PlcMockService.cs                       // mock when plc disabled/disconnected
+    PlcRouterService.cs                     // choose PLC vs mock and expose a unified snapshot
+  Worker/
+    PlcPollWorker.cs                        // polls at plc.pollHz and updates snapshot
+
+src/Modules/Safety/
+  Model/
+    LidarConfigModel.cs
+    LidarHealthModel.cs
+    ObstacleDetectionModel.cs
+    SafetyStopModel.cs
+  Mapping/
+    SafetyStopMapper.cs
+    LidarStatusMapper.cs
+  Service/
+    LidarDriverService.cs                   // read 1..2 lidars
+    ObstacleDetectionService.cs             // fuse + decide stop
+    EstopMonitorService.cs                  // physical estop input
+    SafetyStopService.cs                    // enforce forced stop locally
+  Worker/
+    SafetyStatusPublisherWorker.cs          // publishes robots.status.* (estop/safetyStop/obstacleDetected)
+    SafetyAlarmPublisherWorker.cs           // publishes robots.alarm.* (lidar faults)
+
+src/Modules/Localization/
+  Model/
+    QrScanModel.cs
+    LocalizationModel.cs
+  Mapping/
+    QrScanMapper.cs
+    LocalizationStatusMapper.cs
+  Service/
+    BarcodeScannerService.cs                // read QR/barcode scans
+    QrLocalizationService.cs                // convert QR -> map pose
+    LocalizationFusionService.cs            // fuse QR + odometry
+  Worker/
+    LocalizationTelemetryPublisherWorker.cs // publishes robots.telemetry.* (pose/localization)
+    LocalizationStatusPublisherWorker.cs    // publishes robots.status.* (localized/confidence/map association)
+
+src/Modules/Task/
+  Model/
+    TaskExecutionModel.cs
+    MissionExecutionModel.cs
+    MissionStepModel.cs
+  Mapping/
+    TaskAssignMapper.cs
+    TaskProgressMapper.cs
+    MissionMapper.cs
+  Service/
+    TaskExecutor.cs                         // task state machine
+    MissionReplayEngine.cs                  // executes mission steps
+  Worker/
+    TaskSubscriberWorker.cs                 // consumes robots.task.*
+    TaskProgressPublisherWorker.cs          // publishes robots.task.* progress/done/failed
+
+src/Modules/Route/
+  Model/
+    ActiveRouteModel.cs
+  Mapping/
+    RouteRequestMapper.cs
+    RouteResponseMapper.cs
+  Service/
+    RouteClient.cs                          // request/await route responses
+    RouteFollower.cs                        // convert route to navigation goals
+  Worker/
+    RouteResponseSubscriberWorker.cs        // consumes robots.route.response.*
+
+src/Modules/Traffic/
+  Model/
+    TrafficStateModel.cs
+    TrafficControlModel.cs
+  Mapping/
+    TrafficStateMapper.cs
+    TrafficControlMapper.cs
+  Service/
+    ConstraintEnforcer.cs                   // merge traffic constraints into local motion controller
+  Worker/
+    TrafficStatePublisherWorker.cs          // publishes robots.traffic.state.*
+    TrafficControlSubscriberWorker.cs       // consumes robots.traffic.control.*
+
+src/Modules/Teach/
+  Model/
+    TeachSessionModel.cs
+    TeachReplayModel.cs
+  Mapping/
+    TeachControlMapper.cs
+    TeachStateMapper.cs
+  Service/
+    TeachModeService.cs
+    TeachReplayService.cs
+  Worker/
+    TeachControlSubscriberWorker.cs         // consumes robots.teach.control.*
+    TeachStatePublisherWorker.cs            // publishes robots.teach.state.*
+

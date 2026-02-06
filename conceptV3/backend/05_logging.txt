@@ -1,0 +1,197 @@
+========================================================
+MODULE 05: LOGGING (LOCAL DEV)
+========================================================
+
+Goal:
+- Make backend logs useful during local development.
+- Log the full lifecycle of:
+  - API requests
+  - Database work
+  - SignalR connections + events
+  - NATS publish/consume (when added)
+- Keep logs consistent so new modules can plug in easily.
+
+
+--------------------------------------------------------
+Local Dev Configuration (dotenv)
+--------------------------------------------------------
+BackendV3 loads dotenv files at startup:
+- backendV3/.env.local (preferred for local dev)
+- backendV3/.env
+
+This document assumes you configure logging ONLY through dotenv for local dev.
+
+Recommended backendV3/.env.local (example):
+BACKENDV3_LOG_DIR=./logs
+BACKENDV3_LOG_FORMAT=jsonl
+BACKENDV3_LOG_LEVEL=Information
+
+--------------------------------------------------------
+Logging Module File Structure (reference)
+--------------------------------------------------------
+This matches the backend layout style described in:
+- conceptV3/backend/03_backend_file_structure.txt
+
+Recommended placement:
+backend/
+  Program.cs
+
+  Infrastructure/
+    Logging/
+      LoggingBootstrap.cs
+      LogEvents.cs
+      CorrelationIds.cs
+      RequestLoggingMiddleware.cs
+      SignalRLoggingFilter.cs
+      EfCoreLogging.cs
+      NatsLogging.cs
+
+Modules (optional per-module event constants):
+backend/Modules/<ModuleName>/
+  Logging/
+    <ModuleName>LogEvents.cs
+
+Rules:
+- Configure sinks (console + file) in one place only (Program.cs or LoggingBootstrap.cs).
+- Cross-cutting event names live in Infrastructure/Logging/LogEvents.cs.
+- Module-specific event names live in Modules/<ModuleName>/Logging/<ModuleName>LogEvents.cs.
+- Middleware/filters live under Infrastructure/Logging so every module benefits automatically.
+
+
+--------------------------------------------------------
+Where Logs Are Saved (local dev)
+--------------------------------------------------------
+Backend writes logs to:
+- Console output (terminal running dotnet)
+- Rolling log files under BACKENDV3_LOG_DIR
+
+Default file behavior:
+- Directory: ./logs
+- Format:
+  - jsonl: backendV3-YYYYMMDD.jsonl
+  - text:  backendV3-YYYYMMDD.log
+- Rolling: daily
+- Retention: keep last 14 files (days)
+
+
+--------------------------------------------------------
+Enable / Disable Logging Quickly (dotenv)
+--------------------------------------------------------
+Recommended approach:
+- Do not fully disable logging. Reduce volume using log level.
+
+Common values:
+- Normal (useful dev):
+  - BACKENDV3_LOG_LEVEL=Information
+- Debugging:
+  - BACKENDV3_LOG_LEVEL=Debug
+- Quiet mode:
+  - BACKENDV3_LOG_LEVEL=Error
+- Almost off (only catastrophic):
+  - BACKENDV3_LOG_LEVEL=Fatal
+
+Notes:
+- Fatal is supported by the file logger (Serilog). If Fatal is not recognized in your environment, use Critical.
+
+
+--------------------------------------------------------
+What Must Be Logged
+--------------------------------------------------------
+1) API (HTTP)
+- Request start + end:
+  - method, path, statusCode, durationMs
+- Auth context (when available):
+  - userId, roles
+- Failures:
+  - errorCode, exception type, durationMs
+
+2) Database (EF Core)
+- Migrations:
+  - start/end/failure
+- Transactions:
+  - begin/commit/rollback
+- Errors:
+  - constraint violations (unique/fk), timeouts, retries
+
+3) SignalR
+- Connection lifecycle:
+  - negotiate, connect, disconnect, reconnect
+- Server push:
+  - event name, key ids (mapId/mapVersionId/etc)
+- Failures:
+  - unauthorized, handler exception
+
+4) NATS JetStream (when implemented)
+- Connection lifecycle:
+  - connect, disconnect
+- Stream/consumer lifecycle:
+  - ensure/create, configuration drift
+- Message flow:
+  - publish, consume start/stop, ack/nak, redeliveries
+- Failures:
+  - handler exceptions, poison messages
+
+
+--------------------------------------------------------
+Event Naming (scales to new modules)
+--------------------------------------------------------
+Keep event names stable and searchable:
+- Cross-cutting:
+  - api.*
+  - db.*
+  - signalr.*
+  - nats.*
+- Module events:
+  - module.<ModuleName>.*
+
+Examples:
+- api.request.start
+- db.transaction.rollback
+- signalr.connect
+- module.maps.snapshot.loaded
+- module.auth.login.failed
+
+
+--------------------------------------------------------
+Structured Fields (minimum set)
+--------------------------------------------------------
+Every log entry should include (when available):
+- event
+- correlationId
+- requestId
+- userId
+- roles
+- durationMs
+- entityType, entityId (when relevant)
+
+
+--------------------------------------------------------
+Correlation IDs (local dev)
+--------------------------------------------------------
+Use one correlation id to link:
+- API request -> DB write -> SignalR publish -> (future) NATS publish
+
+Rules:
+- Accept "x-correlation-id" if provided by client.
+- If missing, generate it and include it in the response.
+
+
+--------------------------------------------------------
+Do / Do Not
+--------------------------------------------------------
+Do:
+- Log once at the boundary (controller/service/worker) with full context.
+- Use stable event strings (no ad-hoc random messages for important events).
+
+Do not:
+- Log passwords, JWT keys, tokens, authorization headers, or DB connection strings.
+- Log the same exception multiple times at different layers.
+
+
+--------------------------------------------------------
+How To Read Logs (local dev)
+--------------------------------------------------------
+- Console: search the terminal output
+- Files:
+  - open latest file under ./logs
+  - search by correlationId / event / userId

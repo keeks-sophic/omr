@@ -1,0 +1,515 @@
+========================================================
+MODULE 06: ROBOT LINK (ROBOT MESSAGING GATEWAY)
+========================================================
+
+Goal:
+- Provide one backend module that owns all communication with the robot runtime:
+  - Robot runtime concept: conceptV3/robot/robot_module_concept.txt
+- Expose a stable in-process interface so other backend modules do not publish/subscribe robot subjects directly.
+- Centralize:
+  - NATS JetStream subjects and message envelope validation
+  - command correlation + acknowledgements + timeouts
+  - connection health (online/offline) derivation
+  - settings apply/report flow for motor controller properties
+
+Non-goals:
+- Replacing domain logic of other modules (Task/Route/Traffic/Teach).
+- Implementing vendor-specific motor protocols (robot runtime owns hardware control).
+
+
+--------------------------------------------------------
+Why This Module Exists (single robot boundary)
+--------------------------------------------------------
+Rule:
+- All robot-facing NATS subjects are produced/consumed only by Robot Link.
+- Other modules interact through:
+  - RobotLinkService (send commands, request snapshots, apply settings)
+  - RobotStateQuery (read cached/canonical robot state)
+  - RobotEvents (subscribe to internal events: status/telemetry/fault/ack)
+
+Benefit:
+- Avoid duplicated NATS code in every module.
+- Ensure consistent envelope versions, correlationId usage, and online/offline rules.
+
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Robot inbound ingestion
+- Consume robot messages:
+  - identity, status, telemetry, alarms/faults
+  - task/teach state reports (robot-reported state)
+  - settings reports + acknowledgements
+  - command acknowledgements
+- Validate and normalize payloads before other modules consume them.
+
+2) Robot outbound command publishing
+- Publish backend->robot commands:
+  - task control, traffic control, teach control, settings apply/reset, generic commands
+- Track pending requests and correlate acks.
+
+3) Connection health and online/offline state
+- Maintain lastSeenAt per robot based on inbound messages.
+- Publish internal events when robots transition ONLINE/OFFLINE.
+
+4) Settings editing boundary
+- Accept operator-driven edits for motor properties (speed/accel/limits/reset policy).
+- Apply settings to robot via NATS; reconcile desired vs reported.
+- Enforce mode rules aligned with robot runtime:
+  - REALTIME: motor/IO count and mapping are robot-owned boot-time constants
+  - SIM: capability/settings overrides allowed only before start
+
+
+--------------------------------------------------------
+Robot Runtime Alignment (important shared rules)
+--------------------------------------------------------
+Robot-side concepts (source of truth):
+- conceptV3/robot/robot_module_concept.txt
+
+Key alignment points:
+- Pose includes facing direction (heading/yaw).
+- SIM vs REALTIME set before start (cannot change while running).
+- Capabilities split:
+  - HardwareCapabilities: robot-owned at boot
+  - EffectiveCapabilities: SIM can override before start
+- Fault semantics:
+  - WARNING: degraded but can still move
+  - ERROR: must stop auto motion; cannot accept auto move commands
+
+
+--------------------------------------------------------
+NATS JetStream Subjects (robot-facing)
+--------------------------------------------------------
+Rule:
+- All subjects are scoped by robotId.
+- All messages include: schemaVersion, robotId, messageId, ts, correlationId?
+
+Robot -> Backend (inbound):
+- robots.identity.<robotId>
+- robots.status.<robotId>
+- robots.telemetry.<robotId>
+- robots.alarm.<robotId>
+- robots.cmd.ack.<robotId>
+- robots.settings.report.<robotId>
+- robots.settings.ack.<robotId>
+- robots.task.<robotId>                      (robot-reported task state/progress)
+- robots.teach.state.<robotId>
+- robots.teach.snapshot.<robotId>            (if implemented by robot runtime)
+- robots.traffic.state.<robotId>
+
+Backend -> Robot (outbound):
+- robots.cmd.<robotId>
+- robots.settings.apply.<robotId>
+- robots.settings.reset.<robotId>
+- robots.task.<robotId>                      (assign/cancel)
+- robots.traffic.control.<robotId>
+- robots.teach.control.<robotId>
+
+
+--------------------------------------------------------
+Message Envelope (shared minimum)
+--------------------------------------------------------
+Minimum envelope (concept):
+{
+  "schemaVersion": 1,
+  "type": "string",
+  "robotId": "RBT-001",
+  "messageId": "uuid",
+  "ts": "2026-01-21T00:00:00Z",
+  "correlationId": "uuid?",
+  "payload": { }
+}
+
+Correlation rule:
+- Outbound messages that require acknowledgement must provide correlationId.
+- Inbound ack messages must include correlationId for matching and deduplication.
+
+
+--------------------------------------------------------
+Internal API (used by other backend modules)
+--------------------------------------------------------
+RobotLinkService (concept):
+- GetConnection(robotId) -> { connected, lastSeenAt }
+- GetLatestState(robotId) -> { identity, status, telemetry, faults, capabilities }
+- SendCommand(robotId, command, opts) -> correlationId
+- AwaitAck(correlationId, timeout) -> { ok, error? }
+
+--------------------------------------------------------
+How Other Modules Communicate With Robot Link (I/O)
+--------------------------------------------------------
+Rule:
+- Other modules never publish/subscribe robot NATS subjects directly.
+- Other modules call RobotLinkService and subscribe to RobotEvents.
+
+Inputs to Robot Link (from robot runtime via NATS JetStream):
+- robots.identity.<robotId>                  -> identity/capabilities
+- robots.status.<robotId>                    -> consolidated robot status + safety flags
+- robots.telemetry.<robotId>                 -> pose (x,y,heading) + velocity + UI telemetry
+- robots.alarm.<robotId>                     -> faults/alarms (warning/error)
+- robots.task.<robotId>                      -> task progress/delay/fail/done (robot-reported)
+- robots.teach.state.<robotId>               -> teach mode + actuator states
+- robots.teach.snapshot.<robotId>            -> snapshot response for teach points (if enabled)
+- robots.traffic.state.<robotId>             -> closed-loop traffic feedback
+- robots.settings.report.<robotId>           -> reported motor/IO settings (effective)
+- robots.settings.ack.<robotId>              -> ack/nack for settings apply/reset
+- robots.cmd.ack.<robotId>                   -> ack/nack for generic commands
+
+Inputs to Robot Link (from backend modules, in-process):
+- Task:
+  - request: assign/cancel a task to a robot
+  - request: read robot availability (online/status/capabilities) for selection
+- Teach:
+  - request: enter/exit teach mode, jog, go-to pose, request snapshot
+  - request: read robot capabilities/settings for publish validation
+- Route Planner:
+  - request: publish route plan/steps to robot (or respond to robot route requests)
+  - request: read current pose + kinematic limits for ETA calculations
+- Traffic Control:
+  - request: send traffic constraints (hold/release, speed caps, reservation windows)
+  - request: read live traffic state feedback for closed-loop control
+- Task Manager:
+  - request: read robot availability/capabilities to select a robot (auto mode)
+  - request: dispatch a mission task via Task module (Task Manager itself should not command robots directly)
+
+Outputs from Robot Link (to backend modules, in-process):
+- State query outputs:
+  - current connection state (ONLINE/OFFLINE, lastSeenAt)
+  - current identity/capabilities
+  - current status + safety flags + faults
+  - current telemetry (pose with heading)
+  - current settings (desired/reported)
+- Event outputs (RobotEvents):
+  - RobotConnectionChanged
+  - RobotIdentityUpdated
+  - RobotStatusUpdated
+  - RobotTelemetryUpdated
+  - RobotFaultUpdated
+  - RobotTaskStateUpdated
+  - RobotTeachStateUpdated
+  - RobotTeachSnapshotReceived
+  - RobotTrafficStateUpdated
+  - RobotSettingsReported / RobotSettingsAcked
+  - RobotCommandAcked
+
+Outputs from Robot Link (to robot runtime via NATS JetStream):
+- robots.task.<robotId>                      (assign/cancel)
+- robots.route.response.<robotId>            (route plan/steps)
+- robots.traffic.control.<robotId>           (holds/speed caps/reservation windows)
+- robots.teach.control.<robotId>             (teach controls + snapshot requests)
+- robots.settings.apply.<robotId>            (motor properties edits)
+- robots.settings.reset.<robotId>            (reset to defaults/last safe)
+- robots.cmd.<robotId>                       (reset motor fault, request settings, etc.)
+
+Endpoint readiness (for both input and output):
+- NATS subjects:
+  - Ready as an interface specification in this concept (subjects listed and stable).
+  - Implementation readiness is not guaranteed by this document; it requires backend Workers + contracts and a running JetStream stream/consumer setup.
+- In-process API (RobotLinkService/RobotEvents):
+  - Ready as an interface specification in this concept.
+  - Implementation readiness depends on the backend codebase adopting the file structure and services described here.
+
+Task module usage:
+- AssignTask(robotId, taskPayload) via RobotLinkService (publishes robots.task.<robotId>)
+- Subscribe to robot task progress events from Robot Link (robot->backend)
+
+Traffic module usage:
+- SendTrafficControl(robotId, constraints) via RobotLinkService
+- Consume robots.traffic.state.<robotId> via Robot Link internal events
+
+Teach module usage:
+- SetTeachMode / Jog / GoToPose / RequestSnapshot via RobotLinkService
+- Consume teach.state / snapshot via Robot Link internal events
+
+Robot settings usage:
+- ApplyMotorSettings(robotId, desiredLimitsJson) via RobotLinkService
+- ResetMotorFault(robotId, motorKey) via RobotLinkService
+
+
+--------------------------------------------------------
+Data Model (minimal, for sharing across modules)
+--------------------------------------------------------
+Recommended approach:
+- Robot Link maintains a small canonical cache (DB or in-memory + DB persistence) that other modules can query.
+
+Minimal entities (concept):
+- RobotConnectionState:
+  - robotId
+  - connected (bool)
+  - lastSeenAt (timestamptz)
+  - connectionInstanceId? (optional)
+
+- RobotRuntimeSnapshot:
+  - robotId
+  - identityJson
+  - statusJson
+  - telemetryJson (includes poseX/poseY/headingRad)
+  - faultsJson
+  - updatedAt
+
+- RobotSettingsState:
+  - robotId
+  - desiredSettingsJson
+  - reportedSettingsJson
+  - lastAppliedAt?
+  - lastReportedAt?
+  - lastApplyError?
+
+
+--------------------------------------------------------
+EF Core Model (robots schema)
+--------------------------------------------------------
+Schema:
+- robots
+
+RobotConnectionState (robots.robot_connection_states):
+- robotId (text, PK)
+- connected (bool)
+- lastSeenAt (timestamptz)
+- connectionInstanceId (text?)
+- natsClientId (text?)
+- updatedAt (timestamptz)
+
+RobotRuntimeSnapshot (robots.robot_runtime_snapshots):
+- robotId (text, PK)
+- identityJson (jsonb)
+- statusJson (jsonb)
+- telemetryJson (jsonb)                       // includes poseX/poseY/headingRad
+- faultsJson (jsonb)
+- updatedAt (timestamptz)
+
+RobotSettingsState (robots.robot_settings_states):
+- robotId (text, PK)
+- desiredSettingsJson (jsonb?)
+- reportedSettingsJson (jsonb?)
+- lastAppliedAt (timestamptz?)
+- lastReportedAt (timestamptz?)
+- lastApplyError (text?)
+- updatedAt (timestamptz)
+
+RobotPendingAck (robots.robot_pending_acks) (optional for audit/ops):
+- correlationId (uuid, PK)
+- robotId (text)
+- subject (text)
+- createdAt (timestamptz)
+- deadlineAt (timestamptz)
+- resolvedAt (timestamptz?)
+- ok (bool?)
+- error (text?)
+
+Indexes / constraints (recommended):
+- robot_connection_states(lastSeenAt)
+- robot_runtime_snapshots(updatedAt)
+- robot_settings_states(updatedAt)
+- robot_pending_acks(robotId, createdAt)
+- robot_pending_acks(deadlineAt)              // for cleanup/monitoring
+
+
+--------------------------------------------------------
+EF Core Mapping Notes (robots schema)
+--------------------------------------------------------
+Schema constant:
+- Modules/RobotLink/Persistence/RobotsDbSchema.cs -> "robots"
+
+EntityConfig rules (concept):
+- All entities map to schema "robots".
+- robotId is stable and used as PK for snapshot tables.
+- jsonb columns store envelopes or normalized payload fragments.
+
+Example mapping outline (concept):
+- RobotConnectionStateEntityConfig:
+  - ToTable("robot_connection_states", "robots")
+  - HasKey(x => x.RobotId)
+  - Property(x => x.UpdatedAt).HasColumnType("timestamptz")
+  - HasIndex(x => x.LastSeenAt)
+
+- RobotRuntimeSnapshotEntityConfig:
+  - ToTable("robot_runtime_snapshots", "robots")
+  - HasKey(x => x.RobotId)
+  - Property(x => x.IdentityJson).HasColumnType("jsonb")
+  - Property(x => x.TelemetryJson).HasColumnType("jsonb")
+  - HasIndex(x => x.UpdatedAt)
+
+- RobotSettingsStateEntityConfig:
+  - ToTable("robot_settings_states", "robots")
+  - HasKey(x => x.RobotId)
+  - Property(x => x.DesiredSettingsJson).HasColumnType("jsonb")
+  - Property(x => x.ReportedSettingsJson).HasColumnType("jsonb")
+  - HasIndex(x => x.UpdatedAt)
+
+- RobotPendingAckEntityConfig (optional):
+  - ToTable("robot_pending_acks", "robots")
+  - HasKey(x => x.CorrelationId)
+  - HasIndex(x => new { x.RobotId, x.CreatedAt })
+  - HasIndex(x => x.DeadlineAt)
+
+
+--------------------------------------------------------
+File Structure (backend module template)
+--------------------------------------------------------
+backend/Modules/RobotLink/
+  Model/
+    RobotConnectionState.cs
+    RobotRuntimeSnapshot.cs
+    RobotSettingsState.cs
+
+  Dto/
+    RobotConnectionDto.cs
+    RobotRuntimeDto.cs
+    RobotSettingsDto.cs
+    RobotCommandRequestDto.cs
+    RobotCommandAckDto.cs
+
+  Messaging/
+    RobotLinkContracts.V1.cs                 (envelope + payload DTOs)
+
+  Data/
+    RobotLinkRepository.cs                   (persistence for snapshots/settings)
+
+  Service/
+    RobotLinkService.cs                      (main API for other modules)
+    RobotAckTracker.cs                       (pending correlationId tracking)
+    RobotOnlineMonitor.cs                    (lastSeenAt -> ONLINE/OFFLINE)
+    RobotSettingsApplyService.cs             (desired->apply->reported convergence)
+
+  Worker/
+    RobotInboundWorker.cs                    (consumes robot->backend subjects)
+    RobotOutboundWorker.cs                   (publishes buffered outbound commands)
+
+  Api/
+    RobotLinkController.cs                   (optional: operator endpoints)
+
+  Realtime/
+    RobotLinkHubPublisher.cs                 (optional: SignalR bridge)
+
+  Persistence/
+    RobotsDbSchema.cs                        (schema constants)
+    *EntityConfig.cs
+
+
+--------------------------------------------------------
+Pseudocode: Inbound Worker (robot -> backend)
+--------------------------------------------------------
+OnMessage(subject, rawBytes):
+  msg = DeserializeEnvelope(rawBytes)
+  ValidateSchemaVersion(msg.schemaVersion)
+  ValidateRobotId(msg.robotId)
+  DeduplicateByMessageId(msg.robotId, msg.messageId)
+
+  UpdateLastSeenAt(msg.robotId, msg.ts)
+
+  switch subject kind:
+    identity:
+      SaveIdentity(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotIdentityUpdated(msg.robotId))
+
+    status:
+      SaveStatus(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotStatusUpdated(msg.robotId))
+
+    telemetry:
+      SaveTelemetry(msg.robotId, msg.payload)   // includes poseX/poseY/heading
+      PublishInternalEvent(RobotTelemetryUpdated(msg.robotId))
+
+    alarm:
+      SaveFaultEvent(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotFaultUpdated(msg.robotId))
+
+    settings.report:
+      SaveReportedSettings(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotSettingsReported(msg.robotId))
+
+    settings.ack:
+      AckTracker.Resolve(msg.correlationId, msg.payload)
+      PublishInternalEvent(RobotSettingsAcked(msg.robotId, msg.correlationId))
+
+    cmd.ack:
+      AckTracker.Resolve(msg.correlationId, msg.payload)
+      PublishInternalEvent(RobotCommandAcked(msg.robotId, msg.correlationId))
+
+    teach.state:
+      SaveTeachState(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotTeachStateUpdated(msg.robotId))
+
+    teach.snapshot:
+      SaveTeachSnapshot(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotTeachSnapshotReceived(msg.robotId, msg.correlationId))
+
+    traffic.state:
+      SaveTrafficState(msg.robotId, msg.payload)
+      PublishInternalEvent(RobotTrafficStateUpdated(msg.robotId))
+
+
+--------------------------------------------------------
+Pseudocode: Online Monitor (ONLINE/OFFLINE)
+--------------------------------------------------------
+Every interval (e.g., 1s):
+  for each robotId in known robots:
+    lastSeen = GetLastSeenAt(robotId)
+    connectedNow = (Now - lastSeen) <= OfflineTimeout
+    if connectedNow != CachedConnected(robotId):
+      SetConnected(robotId, connectedNow)
+      PublishInternalEvent(RobotConnectionChanged(robotId, connectedNow))
+
+
+--------------------------------------------------------
+Pseudocode: Outbound Commands + Acks (backend -> robot)
+--------------------------------------------------------
+SendCommand(robotId, subject, payload, requiresAck):
+  correlationId = NewUuid()
+  envelope = BuildEnvelope(robotId, payload, correlationId)
+  if requiresAck:
+    AckTracker.Register(correlationId, timeout)
+  PublishToJetStream(subject(robotId), envelope)
+  return correlationId
+
+AwaitAck(correlationId, timeout):
+  return AckTracker.Wait(correlationId, timeout)
+
+
+--------------------------------------------------------
+Pseudocode: Settings Apply (motor properties editing)
+--------------------------------------------------------
+ApplySettings(robotId, desiredSettings):
+  SaveDesiredSettings(robotId, desiredSettings)
+
+  if RobotIsOffline(robotId):
+    return Rejected("robot offline")
+
+  if RobotStatusIsError(robotId):
+    return Rejected("robot in ERROR")
+
+  correlationId = SendCommand(
+    robotId,
+    subject = robots.settings.apply.<robotId>,
+    payload = desiredSettings,
+    requiresAck = true
+  )
+
+  ack = AwaitAck(correlationId, SettingsApplyTimeout)
+  if ack.ok == false:
+    SaveLastApplyError(robotId, ack.error)
+    return Rejected(ack.error)
+
+  WaitForReportedSettingsConvergence(robotId, desiredSettings, ConvergenceTimeout)
+  return Accepted()
+
+
+--------------------------------------------------------
+How Other Modules Consume Robot Link
+--------------------------------------------------------
+Rule:
+- Task/Traffic/Teach/Route modules never publish robot subjects directly.
+- They call RobotLinkService and subscribe to internal events.
+
+Example usage (concept):
+- Task module:
+  - RobotLinkService.SendCommand(robotId, robots.task.<robotId>, taskAssignPayload, requiresAck=false)
+  - On RobotTaskProgress events: update task state, drive ETA and UI
+
+- Teach module:
+  - RobotLinkService.SendCommand(robotId, robots.teach.control.<robotId>, teachControlPayload, requiresAck=true)
+  - On RobotTeachSnapshotReceived: store teach point state in DB
+
+- Traffic module:
+  - RobotLinkService.SendCommand(robotId, robots.traffic.control.<robotId>, constraints, requiresAck=false)
+  - On RobotTrafficStateUpdated: update closed-loop traffic control

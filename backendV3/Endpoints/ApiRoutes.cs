@@ -31,6 +31,7 @@ public static class ApiRoutes
         public const string VersionById = Versions + "/{mapVersionId:guid}";
         public const string Clone = VersionById + "/clone";
         public const string Publish = VersionById + "/publish";
+        public const string Activate = VersionById + "/activate";
         public const string Snapshot = VersionById + "/snapshot";
 
         public const string Nodes = VersionById + "/nodes";
@@ -47,5 +48,16 @@ public static class ApiRoutes
 
         public const string Qrs = VersionById + "/qrs";
         public const string QrById = Qrs + "/{qrId:guid}";
+    }
+
+    public static class Robots
+    {
+        public const string Base = ApiV1 + "/robots";
+        public const string ById = Base + "/{robotId}";
+        public const string Identity = ById + "/identity";
+        public const string Capability = ById + "/capability";
+        public const string SettingsReported = ById + "/settings/reported";
+        public const string SettingsDesired = ById + "/settings/desired";
+        public const string Commands = ById + "/commands";
     }
 }

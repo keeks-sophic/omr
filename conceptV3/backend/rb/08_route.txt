@@ -1,0 +1,269 @@
+========================================================
+MODULE 08: ROUTE (PLANNING + ETA)
+========================================================
+
+Goal:
+- Compute safe routes with realistic ETA for:
+  - robot runtime execution (robot requests route)
+  - frontend preview (operator checks before dispatch)
+- Keep routing consistent with Traffic and Mission action timing.
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read/preview endpoints:
+- Require policy: Viewer (viewer/operator/admin)
+
+Compute-for-execution endpoints:
+- Require policy: Operator (operator/admin)
+
+Robot-to-backend routing:
+- Authorized by robot identity (Robot module + NATS credentials).
+
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Route computation (A*)
+- Compute a path through the map graph.
+- Enforce hard constraints:
+  - maintenance blocks
+  - Traffic blocked edges (offline/estop/locks/closures)
+
+2) ETA and cost model
+- Compute travel time using:
+  - path lengths
+  - speed limits (path and junction)
+  - optional robot max speed/turn limits when provided
+- Include Mission action time at stop points:
+  - actionsAtDestinationSeconds is added once to total ETA/cost for that route request
+
+3) Route packaging for robot and UI
+- Produce:
+  - segments (pathId sequence)
+  - geometry preview for UI
+  - steps (MOVE/TURN/ARRIVE)
+  - etaSecondsTotal
+
+4) Integration output
+- Publish route responses to robots.
+- Provide ETA updates to Task module.
+
+
+--------------------------------------------------------
+Good To Have Adviser (recommended early decisions)
+--------------------------------------------------------
+1) Deterministic planning
+- Same inputs produce same route:
+  - stable tie-breakers and neighbor ordering
+
+2) Cache map graph snapshots
+- Cache by mapVersionId for low-latency compute.
+
+3) Strong validation and errors
+- Validate graph integrity and return stable error codes for:
+  - no path available
+  - blocked by constraints
+  - invalid map
+
+4) Observability
+- Track route compute latency and failure reasons for tuning.
+
+
+--------------------------------------------------------
+Routing Model (blocked vs penalized)
+--------------------------------------------------------
+Hard blocks:
+- never traversable:
+  - maintenance blocks
+  - Traffic blocked edges (traffic.blocked.<mapVersionId>)
+
+Soft penalties:
+- traversable but avoided if slower:
+  - Traffic penalties (traffic.cost.<mapVersionId>)
+
+Selection rule:
+- Choose the path with lowest total ETA:
+  - travel time + Traffic penalties + action time (when provided)
+
+
+--------------------------------------------------------
+Data Inputs (what route planner needs)
+--------------------------------------------------------
+Map graph (Map module / DB):
+- mapId, mapVersionId
+- Nodes: maintenance flags, junction speed limits
+- Paths: direction ONE_WAY/TWO_WAY, maintenance flags, speed limits, length/geometry
+
+Robot state (optional):
+- robotId
+- current pose {x,y,heading}
+- optional: maxSpeedMps, turnRate limits
+
+Destination:
+- nodeId | pointId | (x,y)
+
+Action time at destination (optional):
+- actionsAtDestinationSeconds:
+  - sum of requiredTimeSeconds for mission actions executed at the destination point
+
+Traffic inputs (dynamic):
+- traffic.blocked.<mapVersionId> (hard)
+- traffic.cost.<mapVersionId> (soft)
+
+
+--------------------------------------------------------
+Route Output (RoutePlan)
+--------------------------------------------------------
+RoutePlan (concept):
+- routeId (uuid)
+- robotId
+- taskId (uuid?)
+- mapId, mapVersionId
+- createdAt
+- etaSecondsTotal
+- segments[]:
+  - pathId, fromNodeId, toNodeId
+  - lengthMeters
+  - speedLimitMpsEffective
+  - etaSeconds
+  - cost
+- nodeSequence[]
+- geometryPreview[]
+- steps[]:
+  - type: MOVE | TURN | ARRIVE
+  - distanceMeters?
+  - turnAngleDeg?
+  - note?
+  - requiredTimeSeconds?                   // used at ARRIVE when action time is included
+
+
+--------------------------------------------------------
+NATS (robot runtime route requests)
+--------------------------------------------------------
+Robot -> Backend:
+- robots.route.request.<robotId>
+
+Backend -> Robot:
+- robots.route.response.<robotId>
+
+Route request payload (concept):
+{
+  "schemaVersion": 1,
+  "type": "routeRequest",
+  "robotId": "RBT-001",
+  "taskId": "uuid",
+  "mapId": "uuid",
+  "mapVersionId": "uuid",
+  "start": { "x": 1.23, "y": 4.56, "headingDeg": 90 },
+  "destination": { "nodeId": "uuid" },
+  "actionsAtDestinationSeconds": 5,
+  "constraints": { "avoidMaintenance": true }
+}
+
+
+--------------------------------------------------------
+Integration for ETA (Task + Traffic + Teach)
+--------------------------------------------------------
+Task (Module 07):
+- Stores etaSecondsTotal and emits task.eta.updated.
+
+Teach (Module 10):
+- Provides requiredTimeSeconds on mission actions.
+- Mission stop points map to actionsAtDestinationSeconds for route requests.
+
+Traffic (Module 09):
+- Provides dynamic blocked edges and penalties:
+  - blocked edges force reroute
+  - penalties encourage faster alternatives
+
+
+--------------------------------------------------------
+REST Endpoints (frontend preview + control)
+--------------------------------------------------------
+Base:
+- /api/v1/routes
+
+Preview:
+- POST /api/v1/routes/preview
+  - body: { mapId, mapVersionId, start, destination, robotId?, actionsAtDestinationSeconds? }
+
+Compute for task:
+- POST /api/v1/tasks/{taskId}/route
+  - body: { robotId, mapId, mapVersionId, destination, actionsAtDestinationSeconds? }
+
+Get:
+- GET /api/v1/routes/{routeId}
+
+
+--------------------------------------------------------
+SignalR Events (frontend live)
+--------------------------------------------------------
+Hub:
+- /hubs/realtime
+
+Events:
+- route.preview.ready
+- route.assigned
+- task.eta.updated
+
+
+--------------------------------------------------------
+Use cases supported
+--------------------------------------------------------
+See:
+- conceptV3/backend/12_use_cases_robot_task_route_traffic_teach.txt
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (module template)
+--------------------------------------------------------
+backend/Modules/Routes/
+  Model/
+    RoutePlan.cs
+    RouteSegment.cs
+    RouteStep.cs
+    RouteRequestLog.cs
+
+  Dto/
+    RoutePlanDto.cs
+    RoutePreviewRequest.cs
+    RoutePreviewResponse.cs
+    RouteComputeForTaskRequest.cs
+    RouteConstraintsDto.cs
+    RouteSegmentDto.cs
+    RouteStepDto.cs
+
+  Messaging/
+    RouteContracts.V1.cs                   // NATS envelopes/payloads
+
+  Data/
+    RoutePlanRepository.cs
+    RouteRequestLogRepository.cs
+
+  Service/
+    RoutePlannerService.cs                 // A* + packaging
+    RouteCostModelService.cs               // speed limits + traffic penalties + action time
+    RouteGraphCache.cs                     // mapVersionId graph snapshots
+    RouteValidationService.cs              // input + integrity checks
+
+  Api/
+    RoutesController.cs                    // preview + get route
+    TaskRoutesController.cs                // compute route for a task
+
+  Realtime/
+    RouteHubPublisher.cs
+
+  Worker/
+    RobotRouteRequestWorker.cs             // consumes robots.route.request.*
+    RobotRouteResponsePublisherWorker.cs   // publishes robots.route.response.*
+    TrafficFeedbackIngestWorker.cs         // consumes traffic.blocked.* and traffic.cost.*
+
+  Persistence/
+    RoutesDbSchema.cs
+    *EntityConfig.cs
+

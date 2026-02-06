@@ -1,0 +1,233 @@
+========================================================
+USE CASES: ROBOT + TASK + ROUTE + TRAFFIC + TEACH
+========================================================
+
+Goal:
+- Describe practical end-to-end use cases where Modules 06/07/08/09/10 work together.
+- Show what each module is responsible for and what data is exchanged.
+
+
+--------------------------------------------------------
+Module Quick Map (what each module provides)
+--------------------------------------------------------
+Robot (06):
+- Robot identity, status, telemetry, settings, and capability booleans.
+- Robot-facing NATS subjects:
+  - robots.task.<robotId>
+  - robots.route.request.<robotId> / robots.route.response.<robotId>
+  - robots.traffic.state.<robotId> / robots.traffic.control.<robotId>
+  - robots.teach.control.<robotId> / robots.teach.state.<robotId>
+
+Task (07):
+- Creates tasks, selects robots, dispatches MOVE_TO_POINT or MISSION tasks.
+- Tracks task lifecycle, ETA, progress, delay, error.
+
+Route (08):
+- Computes route + steps + ETA from start to destination.
+- Includes action time at stop points via actionsAtDestinationSeconds.
+
+Traffic (09):
+- Time-window reservations and speed/hold constraints for multi-robot safety.
+- Accounts for action dwell time at stop points (mission actions).
+- Publishes dynamic penalties/blocks for routing.
+
+Teach (10):
+- Authors Missions from teach sessions.
+- Stores mission required abilities (requiredHasTelescope/requiredHasRotate/requiredHasGrip/requiredHasHoist).
+- Supports nested missionRef.
+
+
+--------------------------------------------------------
+Use Case 01: User Sends Robot to a Point (MOVE_TO_POINT)
+--------------------------------------------------------
+Scenario:
+- User selects a robot and a destination point and sends a simple navigation task.
+
+Flow:
+1) Frontend -> Task:
+  - create task type MOVE_TO_POINT
+2) Task -> Robot:
+  - robots.task.<robotId> type=taskAssign, payload.moveToPoint
+3) Robot -> Route:
+  - robots.route.request.<robotId> with destination
+  - actionsAtDestinationSeconds = 0
+4) Route -> Robot:
+  - robots.route.response.<robotId> with travel steps + etaSecondsTotal
+5) Robot -> Traffic:
+  - robots.traffic.state.<robotId> pose + progress
+6) Traffic -> Robot:
+  - robots.traffic.control.<robotId> speed caps + reservation windows
+7) Robot -> Task:
+  - robots.task.<robotId> progress and done
+
+Result:
+- Task state updates to RUNNING then DONE with route ETA and traffic-safe execution.
+
+
+--------------------------------------------------------
+Use Case 02: Execute Mission at a Point (MISSION)
+--------------------------------------------------------
+Scenario:
+- User selects a mission "Pick item" which includes:
+  - moveToPoint to shelf
+  - telescope + grip actions
+
+Key requirement:
+- Mission must declare required abilities so Task can pick a compatible robot.
+
+Flow:
+1) Teach provides mission metadata:
+  - requiredHasTelescope=true, requiredHasGrip=true
+2) Frontend -> Task:
+  - create task type MISSION with missionId
+3) Task selects robot:
+  - filters robots where:
+    - robot.hasTelescope=true and robot.hasGrip=true
+4) Task -> Robot:
+  - robots.task.<robotId> payload.mission.missionId (and optional inline mission steps)
+5) Robot plans first moveToPoint:
+  - actionsAtDestinationSeconds = sum(requiredTimeSeconds of telescope+grip at that stop)
+  - robot -> route request includes actionsAtDestinationSeconds
+6) Route returns ETA including action time:
+  - etaSecondsTotal = travelSeconds + actionsAtDestinationSeconds
+7) Traffic reserves node window including dwell:
+  - reservation endTs is extended to cover actionTimeSeconds
+8) Robot performs actions and reports progress:
+  - robots.task.<robotId> step updates (nav -> telescope -> grip -> done)
+
+Result:
+- Robot completes mission smoothly without collisions or unnecessary stops.
+
+
+--------------------------------------------------------
+Use Case 03: Teach a Mission (Mission Authoring)
+--------------------------------------------------------
+Scenario:
+- Operator teaches a robot a new mission:
+  - moveToPoint, rotate, hoist, grip
+  - each non-move step records requiredTimeSeconds
+
+Flow:
+1) Operator starts teach session:
+  - Teach acquires exclusive teach lock via Traffic
+2) Teach controls robot:
+  - robots.teach.control.<robotId> teachStart/teachStop
+3) Teach collects:
+  - operator intent (UI)
+  - robots.teach.state.<robotId> actuator states
+4) Teach builds a Mission and derives required abilities:
+  - rotate step => requiredHasRotate=true
+  - hoist step => requiredHasHoist=true
+  - grip step => requiredHasGrip=true
+5) Publish mission:
+  - mission is saved as PUBLISHED and can be used by Task module
+
+Result:
+- Mission is reusable and capability-aware for future assignment.
+
+
+--------------------------------------------------------
+Use Case 04: Nested Missions (missionRef)
+--------------------------------------------------------
+Scenario:
+- Mission "Load pallet" calls:
+  - missionRef "Approach pallet"
+  - missionRef "Grip pallet"
+  - missionRef "Lift pallet"
+
+Rules:
+- Teach must merge required abilities from referenced missions.
+- Teach must reject cycles during publish.
+
+Result:
+- Task module can still quickly filter robots using requiredHas* booleans.
+
+
+--------------------------------------------------------
+Use Case 05: Multi-Robot Traffic with Action Dwell Time
+--------------------------------------------------------
+Scenario:
+- Robot A reaches a node and must rotate for 6 seconds.
+- Robot B plans to pass the same node soon.
+
+Traffic behavior:
+- Node is exclusive (1 robot at a time).
+- Traffic reserves the node window for Robot A including action dwell time.
+- Robot B is not forced to hard stop if it can arrive later:
+  - traffic issues speed caps so Robot B reaches the node at the start of its reserved window.
+
+Result:
+- Both robots move smoothly; dwell time is respected; deadlocks/collisions avoided.
+
+
+--------------------------------------------------------
+Use Case 06: Route Preview Before Dispatch (UI)
+--------------------------------------------------------
+Scenario:
+- User previews a mission route before sending it.
+
+Route preview requirement:
+- Preview must include action time at the planned stop point.
+
+Flow:
+- Frontend calls route preview with:
+  - start pose
+  - destination
+  - actionsAtDestinationSeconds (from mission action steps at destination)
+
+Result:
+- UI shows realistic ETA that matches execution behavior.
+
+
+--------------------------------------------------------
+Use Case 07: Task Auto-Dispatch Based on Ability
+--------------------------------------------------------
+Scenario:
+- Two robots are online:
+  - R1 hasTelescope=false
+  - R2 hasTelescope=true
+- Mission requires telescope.
+
+Task behavior:
+- Task filters by mission requiredHasTelescope=true.
+- Only R2 is eligible; task is assigned to R2.
+
+Result:
+- No invalid assignments; task execution matches mission requirements.
+
+
+--------------------------------------------------------
+Use Case 08: Robot Settings Update Changes Traffic Control
+--------------------------------------------------------
+Scenario:
+- Operator reduces robot move speed limit and acceleration.
+
+Flow:
+- Frontend updates Robot settings:
+  - limitsJson.move.speedLimitMps / accelLimitMps2 / decelLimitMps2
+- Traffic uses updated limits:
+  - updates speed profiles and braking distances
+- Route ETA becomes more accurate:
+  - route effectiveSpeed can use robot max speed if provided
+
+Result:
+- System remains safe and ETA remains realistic after configuration changes.
+
+
+--------------------------------------------------------
+Use Case 09: Robot Delay/Error Propagation
+--------------------------------------------------------
+Scenario:
+- Robot is delayed (blocked) or fails during mission execution.
+
+Flow:
+- Robot reports:
+  - robots.task.<robotId> type=taskDelayed with etaSeconds
+  - or type=taskFailed with errorCode/message
+- Task updates state:
+  - DELAYED or FAILED
+- Frontend receives SignalR task updates.
+
+Result:
+- Operators and UI see accurate state without guessing.
+

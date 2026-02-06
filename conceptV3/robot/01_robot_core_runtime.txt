@@ -1,0 +1,574 @@
+========================================================
+ROBOT CORE 01: ROBOT-SIDE PROGRAM (CONFIGURABLE, REAL+MOCK, NATS JETSTREAM ONLY)
+========================================================
+
+Goal:
+- Define the robot-side program that runs on the robot (REAL mode) or on a PC (MOCK mode)
+- Control motors directly (REAL) and read IO/sensors to produce authoritative robot feedback
+- Communicate with backend Robots module (backend MODULE 06) through NATS JetStream only
+- Keep robot configuration (model, name, dimensions, motors, IO, capability) in 1 extensible config file
+- Share robot identity/capability/state to backend; receive commands/settings from backend to execute/apply
+
+Non-goals:
+- This robot core does not implement cross-module behaviors (tasks/traffic/teach/etc.)
+- Robot localization/map navigation is not implemented here; it will be added later as a separate robot module
+- Robot core does not expose HTTP endpoints; frontend edits happen via backend and are delivered by NATS
+
+
+--------------------------------------------------------
+System Boundary + Ownership
+--------------------------------------------------------
+
+Robot is authoritative for:
+- motor control and motor feedback (position/velocity/errors)
+- IO readings and safety state (E-Stop, limits, lidar safety stop, etc.)
+- “reported settings” (what is actually applied on the robot)
+
+Backend is authoritative for:
+- desired settings requested by users (frontend -> backend API/SignalR -> backend MODULE 06)
+- high-level intents from other backend modules (sent via backend MODULE 06 as robot commands)
+
+Rule:
+- Backend never edits robot-internal state directly
+- Robot validates and applies changes, then publishes updated reported settings and state back to backend
+
+
+--------------------------------------------------------
+Robot Local Configuration (one file, easy to extend)
+--------------------------------------------------------
+
+Purpose:
+- Allow the same program to run on different robot models by swapping config
+- Make it easy to add new IO types, sensors, and motor drivers over time
+
+Recommended file:
+- robot_config.json
+
+Config rules:
+- schemaVersioned and additive:
+  - new fields and new device types can be added without breaking existing robots
+- self-describing:
+  - runtime enumerates configured motors/io/devices at boot
+- validated at boot:
+  - fail fast for required safety devices (e-stop chain, motor enable, drive motors)
+  - allow optional devices (barcode scanner, lidar) to be missing but mark capability accordingly
+
+Config identity rule:
+- robotId is the stable identifier used in NATS subjects
+- robot name/model/vendor can change, but robotId should not change once deployed
+
+Suggested config layout (high-level example):
+{
+  "schemaVersion": 1,
+  "identity": {
+    "robotId": "RB-001",
+    "name": "Robot A",
+    "vendor": "VendorX",
+    "model": "ModelY",
+    "firmwareVersion": "1.2.3"
+  },
+  "runtime": {
+    "mode": "REAL | MOCK",
+    "tickHz": 100,
+    "settingsApplyMode": "LIVE | RESTART_REQUIRED"
+  },
+  "nats": {
+    "servers": [ "nats://10.0.0.10:4222" ],
+    "credsFilePath": "/etc/robot/nats.creds",
+    "clientName": "RB-001"
+  },
+  "dimensions": {
+    "lengthMm": 900,
+    "widthMm": 650,
+    "heightMm": 350,
+    "wheelBaseMm": 520,
+    "trackWidthMm": 480
+  },
+  "capabilities": {
+    "supportedCommands": [ "STOP", "SET_VELOCITY", "RESET_MOTOR", "SET_IO" ],
+    "hasBarcodeScanner": true,
+    "hasLidarSafety": true,
+    "hasEstopChain": true
+  },
+  "motors": [
+    {
+      "motorId": "drive_left",
+      "role": "DRIVE",
+      "driver": { "type": "PLC | CANOPEN | SERIAL | MOCK", "config": { } },
+      "limits": {
+        "maxSpeed": { "unit": "mps", "value": 1.2 },
+        "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+        "maxDeceleration": { "unit": "mps2", "value": 1.0 }
+      },
+      "resetPolicy": { "supportsReset": true }
+    }
+  ],
+  "io": {
+    "digitalInputs": [
+      { "ioId": "estop", "type": "ESTOP_CHAIN", "driver": { "type": "PLC | GPIO | MOCK", "config": { } } },
+      { "ioId": "limit_front", "type": "LIMIT_SENSOR", "driver": { "type": "PLC | GPIO | MOCK", "config": { } } }
+    ],
+    "devices": [
+      { "deviceId": "lidar0", "type": "LIDAR", "driver": { "type": "ETHERNET | SERIAL | MOCK", "config": { } } },
+      { "deviceId": "scanner0", "type": "BARCODE_SCANNER", "driver": { "type": "USB | SERIAL | MOCK", "config": { } } }
+    ]
+  }
+}
+
+Extension strategy:
+- Add new IO/motor/device types by introducing a new "type" value plus its driver config schema
+- Keep driver "config" as an open object so new vendors and protocols can be integrated without renaming fields
+
+
+--------------------------------------------------------
+robot_config.json Format (detailed)
+--------------------------------------------------------
+
+Top-level fields:
+- schemaVersion (int)
+- identity (object)
+- runtime (object)
+- nats (object)
+- dimensions (object)
+- capabilities (object)
+- motors (array)
+- io (object)
+- mock (object, optional)
+
+identity (required):
+{
+  "robotId": "RB-001",
+  "robotCode": "RB-001",
+  "name": "Robot A",
+  "vendor": "VendorX",
+  "model": "ModelY",
+  "firmwareVersion": "1.2.3"
+}
+
+runtime (required):
+{
+  "mode": "REAL | MOCK",
+  "tickHz": 100,
+  "settingsApplyMode": "LIVE | RESTART_REQUIRED"
+}
+
+nats (required):
+{
+  "servers": [ "nats://10.0.0.10:4222" ],
+  "credsFilePath": "/etc/robot/nats.creds",
+  "clientName": "RB-001"
+}
+
+dimensions (required for fleet UX and later map modules):
+{
+  "lengthMm": 900,
+  "widthMm": 650,
+  "heightMm": 350,
+  "wheelBaseMm": 520,
+  "trackWidthMm": 480,
+  "payloadMaxKg": 60
+}
+
+capabilities (required; used for command validation and backend UX):
+{
+  "supportedCommands": [ "STOP", "SET_VELOCITY", "RESET_MOTOR", "SET_IO" ],
+  "hasEstopChain": true,
+  "hasLidarSafety": true,
+  "hasBarcodeScanner": true,
+  "features": {
+    "supportsTurnInPlace": true,
+    "supportsManualDrive": true
+  }
+}
+
+
+--------------------------------------------------------
+Motors[] Format (how to add motors easily)
+--------------------------------------------------------
+
+Design goal:
+- Motors are data-driven; adding a motor is adding a new entry in motors[]
+- Drivers are pluggable; swap driver.type + driver.config to fit a new robot model
+
+Motor object (recommended):
+{
+  "motorId": "drive_left",
+  "role": "DRIVE | STEER | LIFT | AUX",
+  "functionKey": "optional string for AUX meaning",
+  "required": true,
+  "driver": {
+    "type": "PLC | CANOPEN | SERIAL | MOCK",
+    "config": { }
+  },
+  "limits": {
+    "maxSpeed": { "unit": "mps", "value": 1.2 },
+    "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+    "maxDeceleration": { "unit": "mps2", "value": 1.0 },
+    "positionMin": null,
+    "positionMax": null
+  },
+  "feedback": {
+    "hasPosition": true,
+    "hasVelocity": true,
+    "hasCurrent": false
+  },
+  "resetPolicy": {
+    "supportsReset": true,
+    "resetCommand": "optional string, driver-specific"
+  }
+}
+
+motorId rules:
+- stable string identifier (do not rename lightly)
+- used by command payloads and internal status maps
+
+limits rules:
+- runtime clamps commands to limits in both REAL and MOCK mode
+- positionMin/positionMax are used for actuators and limit-switch simulation in MOCK mode
+
+Example A: differential drive (2 motors)
+{
+  "motors": [
+    {
+      "motorId": "drive_left",
+      "role": "DRIVE",
+      "required": true,
+      "driver": { "type": "PLC", "config": { "plcTagPrefix": "MOTOR_L" } },
+      "limits": {
+        "maxSpeed": { "unit": "mps", "value": 1.2 },
+        "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+        "maxDeceleration": { "unit": "mps2", "value": 1.0 }
+      },
+      "feedback": { "hasPosition": false, "hasVelocity": true, "hasCurrent": true },
+      "resetPolicy": { "supportsReset": true }
+    },
+    {
+      "motorId": "drive_right",
+      "role": "DRIVE",
+      "required": true,
+      "driver": { "type": "PLC", "config": { "plcTagPrefix": "MOTOR_R" } },
+      "limits": {
+        "maxSpeed": { "unit": "mps", "value": 1.2 },
+        "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+        "maxDeceleration": { "unit": "mps2", "value": 1.0 }
+      },
+      "feedback": { "hasPosition": false, "hasVelocity": true, "hasCurrent": true },
+      "resetPolicy": { "supportsReset": true }
+    }
+  ]
+}
+
+Example B: add a lift motor (AUX actuator with travel limits)
+{
+  "motors": [
+    {
+      "motorId": "lift_axis",
+      "role": "AUX",
+      "functionKey": "LIFT",
+      "required": false,
+      "driver": { "type": "CANOPEN", "config": { "nodeId": 7 } },
+      "limits": {
+        "maxSpeed": { "unit": "unit-per-sec", "value": 0.6 },
+        "maxAcceleration": { "unit": "unit-per-sec2", "value": 0.8 },
+        "maxDeceleration": { "unit": "unit-per-sec2", "value": 1.0 },
+        "positionMin": { "unit": "unit", "value": 0 },
+        "positionMax": { "unit": "unit", "value": 1000 }
+      },
+      "feedback": { "hasPosition": true, "hasVelocity": true, "hasCurrent": false },
+      "resetPolicy": { "supportsReset": true }
+    }
+  ]
+}
+
+How to add a new motor:
+1) Choose a new motorId (stable name)
+2) Pick role (DRIVE/STEER/LIFT/AUX) and set required
+3) Set driver.type and driver.config for the hardware
+4) Fill limits for safety and consistent mock simulation
+5) If new command types are needed, add them to capabilities.supportedCommands
+
+
+--------------------------------------------------------
+IO Format (how to add IO easily)
+--------------------------------------------------------
+
+Design goal:
+- IO points are data-driven; add new IO by adding entries under digitalInputs/outputs/devices
+- IO type is a semantic meaning (ESTOP_CHAIN, LIMIT_SENSOR, etc.)
+- Driver describes how to read/write it (PLC, GPIO, serial device, or MOCK)
+
+io object (recommended):
+{
+  "digitalInputs": [ { ... } ],
+  "digitalOutputs": [ { ... } ],
+  "analogInputs": [ { ... } ],
+  "analogOutputs": [ { ... } ],
+  "devices": [ { ... } ]
+}
+
+Digital input/output point (recommended):
+{
+  "ioId": "estop",
+  "type": "ESTOP_CHAIN | LIMIT_SENSOR | HOME_SENSOR | DOOR_SWITCH | ...",
+  "required": true,
+  "driver": {
+    "type": "PLC | GPIO | MOCK",
+    "config": { }
+  },
+  "mock": {
+    "defaultValue": false,
+    "script": null
+  }
+}
+
+Device entry (recommended):
+{
+  "deviceId": "scanner0",
+  "type": "BARCODE_SCANNER | LIDAR | IMU | CAMERA | ...",
+  "required": false,
+  "driver": {
+    "type": "USB | SERIAL | ETHERNET | MOCK",
+    "config": { }
+  },
+  "mock": {
+    "mode": "SCRIPT | GENERATE",
+    "script": null
+  }
+}
+
+Examples:
+
+1) E-Stop + limit sensors (digital inputs)
+{
+  "io": {
+    "digitalInputs": [
+      { "ioId": "estop", "type": "ESTOP_CHAIN", "required": true, "driver": { "type": "PLC", "config": { "tag": "DI_ESTOP" } } },
+      { "ioId": "limit_front", "type": "LIMIT_SENSOR", "required": false, "driver": { "type": "GPIO", "config": { "pin": 17 } } }
+    ]
+  }
+}
+
+2) Motor enable output (digital output)
+{
+  "io": {
+    "digitalOutputs": [
+      { "ioId": "motor_enable", "type": "MOTOR_ENABLE", "required": true, "driver": { "type": "PLC", "config": { "tag": "DO_MOTOR_EN" } } }
+    ]
+  }
+}
+
+3) Barcode scanner (device)
+{
+  "io": {
+    "devices": [
+      { "deviceId": "scanner0", "type": "BARCODE_SCANNER", "required": false, "driver": { "type": "SERIAL", "config": { "port": "COM3", "baud": 115200 } } }
+    ]
+  }
+}
+
+4) Lidar safety (device)
+{
+  "io": {
+    "devices": [
+      { "deviceId": "lidar0", "type": "LIDAR", "required": false, "driver": { "type": "ETHERNET", "config": { "host": "10.0.0.50", "port": 2112 } } }
+    ]
+  }
+}
+
+How to add a new IO point/device:
+1) Choose ioId/deviceId (stable name)
+2) Set semantic type (what it means) and required
+3) Set driver.type and driver.config for the hardware (or MOCK)
+4) Update capabilities flags if the presence/absence affects available behaviors
+
+
+--------------------------------------------------------
+Mock and Real as a Runtime State (in this module)
+--------------------------------------------------------
+
+State model:
+- runtime.mode is a first-class state of the robot core:
+  - REAL: driver factory instantiates REAL drivers (PLC/CANOpen/Serial/etc.)
+  - MOCK: driver factory instantiates MOCK drivers for all motors/IO/devices
+
+MOCK rules:
+- Simulated motor feedback is computed from commanded targets and per-motor limits
+- Simulated IO feedback is computed from:
+  - per-point defaults and scripts
+  - derived rules (limit switches from simulated positions, safety stop injection)
+
+REAL rules:
+- Feedback is read from actual IO/motor drivers only
+- Safety stop rules override motion regardless of command source
+
+Transition rule:
+- Mode selection is applied at startup (restart required to change mode)
+- The runtime keeps mode as an explicit state so later it can support controlled mode switching if needed
+
+
+--------------------------------------------------------
+REAL vs MOCK Runtime Modes
+--------------------------------------------------------
+
+REAL mode:
+- Motor drivers connect to real hardware (PLC/CANOpen/Serial/etc.)
+- IO drivers read real digital inputs (E-Stop, limit sensors) and device telemetry (lidar/scanner)
+- Feedback is produced from real IO and motor feedback
+
+MOCK mode:
+- Motor and IO drivers are simulated
+- Feedback is generated using calculation rules:
+  - motor response follows limits (max speed, max acceleration/deceleration)
+  - motor position/velocity is integrated over time from commanded values
+  - IO events can be scripted or derived (e.g., limit sensor triggers if simulated position exceeds bounds)
+  - safety stop can be injected to test behaviors (E-Stop pressed, obstacle detected, motor fault)
+
+Rule:
+- Both modes must publish the same message shapes to backend so backend is not mode-aware
+
+
+--------------------------------------------------------
+Motor Control Requirements
+--------------------------------------------------------
+
+Each motor must support:
+- enable/disable (if applicable)
+- set target (velocity/position depending on role)
+- report status (mode, error/fault, current position/velocity if available)
+- reset behavior (when supported)
+
+Limits per motor (enforced by runtime):
+- maxSpeed
+- maxAcceleration
+- maxDeceleration
+- optional travel limits (positionMin/positionMax) for actuators
+
+Safety interaction:
+- If safety stop is active, commanded motion is overridden to STOP and motors enter a safe state
+
+
+--------------------------------------------------------
+IO / Sensors Requirements
+--------------------------------------------------------
+
+Example IO/sensor types:
+- ESTOP_CHAIN (digital input)
+- LIMIT_SENSOR (digital input)
+- MOTOR_ENABLE (digital output)
+- BARCODE_SCANNER (device)
+- LIDAR (device)
+
+Core requirements:
+- IO sampling runs at a stable tick (tickHz)
+- IO health status is tracked (connected/disconnected/fault)
+- IO changes can produce events (e-stop pressed, obstacle stop, barcode scan event)
+
+
+--------------------------------------------------------
+NATS JetStream Communication (robot <-> backend MODULE 06)
+--------------------------------------------------------
+
+Rule:
+- Robot core communicates with backend Robots module using NATS JetStream only
+- Other backend modules do not connect to robot directly; they publish via backend MODULE 06
+
+Subject naming (align to backend MODULE 06):
+Robot -> Backend:
+- robots.identity.{robotId}
+- robots.capability.{robotId}
+- robots.status.{robotId}
+- robots.telemetry.{robotId}
+- robots.settings.reported.{robotId}
+- robots.cmd.ack.{robotId}
+
+Backend -> Robot:
+- robots.settings.desired.{robotId}
+- robots.cmd.{robotId}
+
+Recommended envelope (for every message):
+{
+  "payloadVersion": 1,
+  "messageId": "uuid",
+  "robotId": "RB-001",
+  "sentAt": "timestamptz",
+  "correlationId": "uuid-or-null",
+  "type": "identity | capability | status | telemetry | settings.reported | settings.desired | cmd | cmd.ack",
+  "payload": { }
+}
+
+Publishing rules:
+- Identity + capability are published on boot and whenever changed
+- Status/telemetry are published at configured rates
+- Reported settings are published after applying any desired settings
+
+Receiving rules:
+- Desired settings:
+  - validate + apply according to settingsApplyMode
+  - publish settings.reported as the source of truth
+- Commands:
+  - validate command against capabilities and current safety state
+  - execute (or reject) and publish cmd.ack with progress/results
+
+
+--------------------------------------------------------
+Frontend-Editable Settings (via backend)
+--------------------------------------------------------
+
+Flow:
+- Frontend edits robot settings (UI)
+- Backend Robots module enforces RBAC and publishes robots.settings.desired.{robotId}
+- Robot core validates/applies and then publishes robots.settings.reported.{robotId}
+- Backend streams updated reported settings back to frontend
+
+Rule:
+- Frontend never talks to robot directly
+- Backend never “forces” robot state; it requests changes and relies on robot reported settings
+
+
+--------------------------------------------------------
+Program Structure (robot-side)
+--------------------------------------------------------
+
+Suggested internal modules:
+- Config:
+  - load and validate robot_config.json
+  - produce RobotSpec (identity/dimensions/capabilities/motors/io)
+
+- Drivers:
+  - Motor drivers (REAL implementations + MOCK implementation)
+  - IO drivers (REAL implementations + MOCK implementation)
+
+- Core runtime:
+  - deterministic tick loop (tickHz)
+  - reads IO + motor feedback
+  - updates RobotRuntimeState
+  - enforces safety and motor limits
+
+- Messaging:
+  - NATS JetStream client
+  - publish identity/capability/status/telemetry/settings.reported
+  - subscribe to settings.desired and cmd
+
+- Settings:
+  - desired settings cache (last received)
+  - apply pipeline (validate -> apply -> report)
+
+- Command execution:
+  - command validation (capability check, safety check)
+  - command state machine (REQUESTED -> RUNNING -> COMPLETED/FAILED)
+  - cmd.ack publisher
+
+
+--------------------------------------------------------
+Roadmap Hooks (intentionally deferred)
+--------------------------------------------------------
+
+Later robot modules (not in this core):
+- Map/localization module (pose, map alignment, QR/lidar fusion)
+- Navigation planner/executor
+- Task execution module
+
+Robot core responsibilities remain stable:
+- hardware control + feedback
+- configuration and capability reporting
+- NATS JetStream communication with backend

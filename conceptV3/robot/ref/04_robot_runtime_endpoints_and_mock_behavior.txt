@@ -1,0 +1,307 @@
+========================================================
+ROBOT RUNTIME: FINAL CONCEPT (BACKEND + PLC + STATE + MOCK)
+========================================================
+
+This document defines the finalized concept for the Robot program:
+- Runtime responsibilities
+- One consolidated robot status used by all backend modules
+- Communication endpoints to backend (NATS JetStream subjects) and PLC (I/O contract)
+- Behavior when backend is missing, PLC is missing, or mock mode is active
+- Safety and critical motor rules (including turning motor behavior)
+
+
+--------------------------------------------------------
+Core Principles
+--------------------------------------------------------
+- Robot enforces safety locally and can always stop itself (estop/obstacle stop).
+- Robot publishes one consolidated status that Task/Route/Traffic/Teach consume.
+- PLC is the authoritative source of motor and safety I/O when connected.
+- Mock mode is explicit and must never drive real motion outputs.
+
+
+--------------------------------------------------------
+Definitions
+--------------------------------------------------------
+Robot program:
+- The on-robot application that talks to PLC and backend.
+
+Backend:
+- NATS JetStream connected services (Task/Route/Traffic/Teach/Robot module).
+
+PLC:
+- Motor and I/O controller accessed via a vendor protocol.
+
+Motor types (MotorType):
+- MOVE: linear travel motor(s) for forward/back motion
+- TURN: turning motor that lifts a cam to steer (turn-left/turn-right)
+- HOIST: lift
+- TELESCOPE: extend/retract
+- ROTATE: rotation axis
+- GRIP: gripper
+
+Critical motors:
+- MOVE and TURN are critical for navigation. If either is faulty, robot cannot move safely.
+
+
+--------------------------------------------------------
+Robot Config (robot_config.json concept)
+--------------------------------------------------------
+Identity:
+- robotId
+- displayName
+- vendor/model/firmwareVersion
+
+PLC:
+- plc.enabled (bool)
+- plc.endpoint (string?)                      // tcp/ip or vendor uri
+- plc.connectTimeoutMs (int?)
+- plc.pollHz (number?)                        // recommended 10..50
+- plc.useMockWhenDisconnected (bool)
+
+Backend (NATS):
+- nats.servers (string[])
+- nats.credsFilePath (string)
+- nats.clientName (string?)
+
+Capabilities:
+- hasHoist/hasTelescope/hasRotate/hasGrip
+
+Settings:
+- settings.schemaVersion (int)
+- settings.limitsJson (object)
+- settings.ioConfigJson (object?)
+- motors tuning:
+  - per motor accel/decel max (move/turn/hoist/telescope/rotate/grip)
+
+Publish rates:
+- startupPolicy.trafficStateHz (number)       // recommended 5..10
+- startupPolicy.statusReportHz (number)       // recommended 1
+
+
+--------------------------------------------------------
+Consolidated Robot Status (single status for all modules)
+--------------------------------------------------------
+Status enum:
+- RUNNING: robot can move and accept traffic constraints
+- WARNING: robot can move, but a non-critical motor has a fault
+- PAUSED: robot is online but motion is blocked (safety stop / hold)
+- ERROR: robot is online but cannot move due to critical fault
+- OFFLINE: robot cannot be controlled (no PLC + no mock, or intentionally offline)
+
+Critical fault rule:
+- MOVE motor fault => status=ERROR
+- TURN motor fault or TURN motor disconnected => status=ERROR
+
+Turning motor rule (mechanical intent):
+- TURN motor triggers turn-left/turn-right by lifting a cam to steer.
+- If TURN is not functioning, robot cannot steer, so the application must treat it like MOVE.
+
+Status derivation precedence (robot-side):
+1) OFFLINE:
+   - plc.enabled=true AND plc.connection.connected=false AND plc.useMockWhenDisconnected=false
+2) ERROR:
+   - plc.motors[MOVE].connected=false OR plc.motors[MOVE].state=ERROR
+   - plc.motors[TURN].connected=false OR plc.motors[TURN].state=ERROR
+3) PAUSED:
+   - plc.estop.pressed=true
+   - plc.safety.obstacleStopActive=true
+   - plc.safety.safetyStopReason in {ESTOP, OBSTACLE, INTERNAL_FAULT, TRAFFIC_HOLD}
+4) WARNING:
+   - any non-critical motor (HOIST/TELESCOPE/ROTATE/GRIP) has connected=false OR state=ERROR
+5) RUNNING:
+   - otherwise
+
+Publishing rules:
+- Publish robots.status at startup.
+- Publish robots.status at statusReportHz.
+- Publish robots.status immediately on any change of:
+  - status
+  - critical motor transitions (MOVE/TURN) to/from ERROR or connected=false/true
+  - estop / obstacle stop / safetyStopReason
+
+Consumption intent:
+- Task: eligibility and failure policy.
+- Route: execution allowed/denied.
+- Traffic: conservative occupancy and movement permission.
+- Teach: permit/deny replay.
+
+
+--------------------------------------------------------
+Backend Communication Endpoints (NATS JetStream subjects)
+--------------------------------------------------------
+Robot -> Backend:
+- robots.identity.<robotId>
+- robots.settings.report.<robotId>
+- robots.status.<robotId>
+- robots.telemetry.<robotId>
+- robots.alarm.<robotId>
+- robots.cmd.ack.<robotId>
+- robots.settings.ack.<robotId>
+- robots.task.<robotId>                       // progress/delayed/failed/done
+- robots.route.request.<robotId>
+- robots.traffic.state.<robotId>
+- robots.teach.state.<robotId>
+
+Backend -> Robot:
+- robots.cmd.<robotId>                        // generic commands (including resetMotorError)
+- robots.settings.apply.<robotId>
+- robots.settings.reset.<robotId>
+- robots.task.<robotId>                       // assign/cancel
+- robots.route.response.<robotId>
+- robots.traffic.control.<robotId>
+- robots.teach.control.<robotId>
+
+Streams (recommended concept):
+- ROBOTS_STATE: identity/status/task/alarm/ack/settings
+- ROBOTS_TELEMETRY: telemetry subjects
+- ROBOTS_COMMANDS: cmd/task/route/traffic/teach/settings control subjects
+
+
+--------------------------------------------------------
+PLC Communication Contract (logical endpoints)
+--------------------------------------------------------
+PLC endpoints are vendor-specific. This section defines the required logical fields.
+
+PLC Read Endpoints (inputs):
+- plc.connection:
+  - connected (bool)
+  - lastSeenAt (ts)
+  - lastError (string?)
+
+- plc.motors[MotorType]:
+  - connected (bool)                          // per motor health/connection
+  - state: OFF | RUNNING | ERROR
+  - errorCode (string?) / errorMessage (string?)
+
+- plc.estop:
+  - pressed (bool)
+
+- plc.safety:
+  - obstacleStopActive (bool)
+  - safetyStopReason (string?)                // ESTOP | OBSTACLE | INTERNAL_FAULT | TRAFFIC_HOLD
+
+- plc.scanner (optional):
+  - qrScanEvent (code, ts)
+
+- plc.outputs.feedback (optional):
+  - stopOutputActive (bool)
+
+PLC Write Endpoints (outputs):
+- plc.motors[MotorType].command:
+  - set speed/target/enable (implementation-defined)
+
+- plc.stop.immediate:
+  - activate stop output (fast path)
+
+- plc.motors[MotorType].resetError:
+  - reset motor fault/error (edge-triggered or level-triggered)
+
+Polling:
+- poll at plc.pollHz.
+- if polls exceed a timeout => plc.connection.connected=false.
+
+
+--------------------------------------------------------
+Runtime Loops (robot internal)
+--------------------------------------------------------
+1) PLC sampling loop:
+- Read a PLC snapshot at pollHz.
+- Update:
+  - plc.connection
+  - motor states and motor connected flags
+  - estop and safety fields
+- Derive consolidated robot status.
+
+2) Safety enforcement loop:
+- If estop pressed => enforce stop output immediately.
+- If obstacle stop active => enforce stop output immediately.
+- If safety stop clears => keep stopped until control loop allows movement.
+
+3) Backend loop (when backend reachable):
+- Publish identity/settings on boot and on reconnect.
+- Publish status periodically and on-change.
+- Publish telemetry at UI rate.
+- Publish traffic.state at trafficStateHz.
+- Consume backend commands and apply policy based on consolidated status.
+
+
+--------------------------------------------------------
+Behavior When Backend Is Missing
+--------------------------------------------------------
+Backend missing means NATS unreachable or not authenticated.
+
+Required behavior:
+- Enforce safety locally continuously.
+- Do not accept new remote tasks/route/traffic/teach commands (none can arrive).
+- Stop and hold:
+  - set status=PAUSED and keep motors stopped.
+- When backend returns:
+  - publish identity/settings/status immediately
+  - require re-dispatch of tasks and re-issue traffic control
+
+
+--------------------------------------------------------
+Behavior When PLC Is Missing
+--------------------------------------------------------
+PLC missing means plc.enabled=true but plc.connection.connected=false.
+
+If plc.useMockWhenDisconnected=false:
+- status=OFFLINE
+- do not move
+- if backend exists: publish robots.status with OFFLINE and an alarm event for PLC missing
+
+If plc.useMockWhenDisconnected=true:
+- Enter mock mode (simulation):
+  - robot must not command any real motion outputs
+  - robot may publish simulated telemetry/status for integration testing
+
+
+--------------------------------------------------------
+Mock Mode (explicit behavior)
+--------------------------------------------------------
+Mock mode is allowed only when configured (useMockWhenDisconnected=true).
+
+Mock provider responsibilities:
+- Provide a synthetic PLC snapshot with:
+  - plc.connection.connected=true (simulation-local)
+  - plc.motors[MotorType].connected/state
+  - plc.estop and plc.safety behavior consistent with real rules
+- Simulate safety:
+  - estop or obstacle stop must force status=PAUSED
+  - MOVE or TURN fault/disconnect must force status=ERROR
+
+Mock restrictions:
+- No real PLC write calls.
+- resetMotorError must be rejected or acknowledged as simulated.
+
+
+--------------------------------------------------------
+Good To Have (not fully captured elsewhere)
+--------------------------------------------------------
+Status and contracts:
+- Include backendConnected and backendLastSeenAt in robots.status.
+- Include isSimulation=true when mock provider is active.
+- Include explicit reason codes for OFFLINE, ERROR, and PAUSED.
+
+Traffic safety:
+- Control lease: if traffic.control keepalive missing for N seconds while moving, decelerate and stop.
+- Deterministic precedence between traffic hold, task command, safety stop, and motor fault.
+
+PLC robustness:
+- Read/write timeouts and retries with backoff.
+- Separate stop channel that bypasses normal PLC command flow.
+- Sequence numbers and monotonic timestamps on PLC snapshots.
+- Per-motor health flags, especially for TURN and MOVE.
+
+Observability:
+- Per-subject publish counters and drop detection.
+- PLC poll latency and jitter metrics.
+- Local ring-buffer event log with export.
+
+Command correctness:
+- Idempotent command handling with commandId de-duplication.
+- Acks for every command type with a consistent status enum.
+
+Security:
+- NATS credential rotation plan and expiry monitoring.
+- Allowlist of backend-controlled settings keys.

@@ -1,0 +1,398 @@
+========================================================
+MODULE 10: TRAFFIC CONTROL (MULTI-ROBOT SAFETY + FLOW)
+========================================================
+
+Goal:
+- Keep all robots moving on the same map safely and smoothly:
+  - prevent collisions
+  - prevent head-to-head entry on TWO_WAY paths (no opposite direction overlap)
+  - handle congestion, robot errors, offline robots, and stalled robots
+- Use robot plans (route timelines) plus live robot telemetry to control traffic.
+- When a conflict cannot be resolved locally:
+  - request reroute from Route Planner
+  - if no reroute exists, notify operators and update robot state as blocked/held
+
+References:
+- Route planning + ETA + time-scaled plans: conceptV3/backend/09_route_planner.txt
+- Robot communication boundary: conceptV3/backend/06_robot_link.txt
+- Robot runtime semantics: conceptV3/robot/robot_module_concept.txt
+
+Non-goals:
+- Owning mission authoring (Teach).
+- Owning task lifecycle (Task).
+- Implementing low-level motor control (robot runtime).
+
+
+--------------------------------------------------------
+Module Boundary (Traffic Control owns)
+--------------------------------------------------------
+Traffic Control owns:
+- Real-time monitoring:
+  - track each robot’s actual position and health
+  - compare actual progress vs planned timeline
+- Conflict detection and prevention:
+  - node exclusivity (junction safety)
+  - two-way path direction exclusivity (no opposite direction overlap)
+  - safe following distance policy (same direction)
+- Control output:
+  - issue holds and speed constraints to robots through Robot Link
+  - allocate and maintain time-window reservations for nodes/paths
+- Recovery actions:
+  - request reroute when blocked or congested
+  - escalate to operator when no reroute is possible
+
+Traffic Control does not own:
+- Computing routes (Route Planner owns A* and timelines).
+- Dispatching tasks (Task module).
+- Changing robot intrinsic status (robot is authoritative), but can:
+  - command a HOLD/STOP behavior via traffic.control
+  - record and broadcast traffic incidents for UI and planning
+
+
+--------------------------------------------------------
+Inputs (what Traffic Control needs)
+--------------------------------------------------------
+Robot live telemetry and status (via Robot Link ingestion):
+- pose: x, y, heading
+- velocity
+- robot status: RUNNING/WARNING/PAUSED/ERROR/OFFLINE
+- connectivity: lastSeenAt
+- traffic feedback: robot progress along route (optional but recommended)
+
+Planned routes (from Route Planner):
+- per robot:
+  - routePlanId
+  - timeline windows (enterAt/exitAt per node/path)
+  - robot executable steps (MOVE / TURN_CAM / WAIT / ARRIVE_ACTIONS)
+
+Map semantics (Map module / DB):
+- node ids and junction characteristics
+- path direction (ONE_WAY/TWO_WAY), speed limits, maintenance
+
+
+--------------------------------------------------------
+Outputs (what Traffic Control produces)
+--------------------------------------------------------
+Robot control constraints (via Robot Link -> robots.traffic.control.<robotId>):
+- hold / release
+- maxSpeedMps and targetSpeedMps
+- permission to enter next node/path reservation window
+- updated reservation window hints (startTs/endTs)
+
+Planning feedback (consumed by Route Planner):
+- traffic.blocked.<mapVersionId> (hard blocks)
+- traffic.cost.<mapVersionId> (soft penalties)
+
+Operator visibility (frontend):
+- traffic incidents (congestion, deadlock, blocked, no-reroute, robot error impact)
+- current reservations and holds
+
+
+--------------------------------------------------------
+Core Safety Rules
+--------------------------------------------------------
+1) Node exclusivity (hard):
+- Only one robot may occupy a junction node at a time (with safety buffer).
+
+2) Two-way path direction exclusivity (hard):
+- For TWO_WAY paths:
+  - robots cannot occupy the same path in opposite directions during overlapping time windows.
+- For ONE_WAY paths:
+  - only allow occupancy consistent with path direction.
+
+3) Same-direction following (soft -> hard):
+- For robots in same direction on the same path:
+  - enforce headway by speed caps
+  - if headway cannot be maintained, issue HOLD at next safe node
+
+4) Fault/offline safety (hard):
+- If a robot becomes OFFLINE/ERROR/ESTOP:
+  - treat its last known occupied node/path as blocked with buffer
+  - stop granting conflicting reservations until cleared
+
+
+--------------------------------------------------------
+Time-Window Reservations (flow control)
+--------------------------------------------------------
+Concept:
+- Traffic Control allocates non-overlapping time windows for shared resources:
+  - NODE reservation (junction)
+  - PATH reservation (edge traversal)
+
+Rule:
+- Robots should be controlled to arrive near the window startTs:
+  - prefer speed shaping over full stops when possible
+
+Reservation lifecycle:
+- HELD: granted for future
+- ACTIVE: robot currently within the window/resource
+- RELEASED: robot exited early or completed
+- EXPIRED: robot missed its window, must replan or be regranted
+
+
+--------------------------------------------------------
+Congestion Handling
+--------------------------------------------------------
+Congestion signals:
+- many overlapping reservation requests for the same corridor
+- repeated window misses (robot slower than expected)
+- stalled robots (no progress timeout)
+
+Actions:
+- lower targetSpeedMps to smooth merges
+- increase penalties in traffic.cost to encourage detours
+- request reroute for one or more robots when local scheduling cannot resolve
+
+
+--------------------------------------------------------
+Reroute Policy (when conflicts persist)
+--------------------------------------------------------
+Traffic Control requests reroute from Route Planner when:
+- a hard block appears on the current planned path (offline/error/maintenance/lock)
+- a deadlock cycle is detected in wait-for relationships
+- congestion exceeds a threshold and detours exist
+
+If reroute exists:
+- request a new route plan for the affected robot(s)
+- update blocked/cost feedback so planning is consistent
+
+If no reroute exists:
+- issue HOLD for affected robots at safe nodes
+- raise a TrafficIncident with reasonCode=NO_REROUTE
+- ensure UI is updated and operators are notified
+
+
+--------------------------------------------------------
+Robot Control Contract (traffic.control)
+--------------------------------------------------------
+Traffic Control communicates with robot through Robot Link only.
+
+robots.traffic.control.<robotId> payload (concept):
+{
+  "schemaVersion": 1,
+  "type": "trafficControl",
+  "robotId": "RBT-001",
+  "correlationId": "uuid",
+  "ts": "...",
+  "payload": {
+    "holdAtNodeId": "uuid?",
+    "releaseHold": false,
+    "maxSpeedMps": 0.8,
+    "targetSpeedMps": 0.6,
+    "allowEnter": {
+      "segmentType": "NODE|EDGE",
+      "segmentId": "uuid",
+      "startTs": "...",
+      "endTs": "..."
+    }
+  }
+}
+
+Robot-side rule:
+- Robot must remain safe locally even if traffic control is delayed.
+
+
+--------------------------------------------------------
+EF Core Data Model (traffic schema)
+--------------------------------------------------------
+Schema:
+- traffic
+
+TrafficRobotState (traffic.traffic_robot_states):
+- robotId (text, PK)
+- mapId (uuid?)
+- mapVersionId (uuid?)
+- status (text)                              // RUNNING | WARNING | PAUSED | OFFLINE | ERROR
+- lastSeenAt (timestamptz)
+- poseX, poseY, headingRad (double?)
+- velocityMps (double?)
+- currentNodeId (uuid?)
+- currentPathId (uuid?)
+- activeRoutePlanId (uuid?)
+- etaSecondsRemaining (double?)
+- updatedAt (timestamptz)
+
+TrafficReservation (traffic.traffic_reservations):
+- reservationId (uuid, PK)
+- robotId (text)
+- mapVersionId (uuid)
+- segmentType (text)                         // NODE | EDGE
+- segmentId (uuid)                           // nodeId or pathId
+- direction (text?)                          // FORWARD | REVERSE (required for EDGE on TWO_WAY)
+- startTs (timestamptz)
+- endTs (timestamptz)
+- status (text)                              // HELD | ACTIVE | RELEASED | EXPIRED
+- priority (int)
+- createdAt (timestamptz)
+- updatedAt (timestamptz)
+
+TrafficCorridorToken (traffic.traffic_corridor_tokens) (optional but recommended):
+- tokenId (uuid, PK)
+- mapVersionId (uuid)
+- corridorKey (text)                         // derived identifier for a corridor / two-way narrow region
+- heldByRobotId (text?)
+- direction (text?)                          // FORWARD | REVERSE
+- expiresAt (timestamptz)
+- updatedAt (timestamptz)
+
+TrafficEdgeFeedback (traffic.traffic_edge_feedback):
+- mapVersionId (uuid)
+- pathId (uuid)
+- blocked (bool)
+- costPenaltySeconds (double)
+- reasonCode (text?)
+- updatedAt (timestamptz)
+
+TrafficIncident (traffic.traffic_incidents):
+- incidentId (uuid, PK)
+- mapVersionId (uuid?)
+- severity (text)                            // info|warn|error
+- type (text)                                // congestion|deadlock|no_reroute|robot_error|offline_block
+- robotId (text?)
+- ts (timestamptz)
+- message (text)
+- payloadJson (jsonb?)
+
+TrafficEventLog (optional):
+- eventId (uuid, PK)
+- ts (timestamptz)
+- type (text)                                // reserve|release|hold|speed|reroute|incident
+- robotId (text?)
+- payloadJson (jsonb?)
+
+
+--------------------------------------------------------
+EF Core Mapping Notes (traffic schema)
+--------------------------------------------------------
+Schema constant:
+- Modules/Traffic/Persistence/TrafficDbSchema.cs -> "traffic"
+
+Indexes / constraints (recommended):
+- traffic_robot_states(mapVersionId, updatedAt)
+- traffic_robot_states(lastSeenAt)
+- traffic_reservations(mapVersionId, segmentType, segmentId, startTs, endTs)
+- traffic_reservations(robotId, status)
+- traffic_corridor_tokens(mapVersionId, corridorKey)
+- traffic_edge_feedback(mapVersionId, pathId) unique
+- traffic_incidents(ts)
+
+Conflict query (concept):
+- Overlap check for a segment:
+  - WHERE mapVersionId=? AND segmentType=? AND segmentId=? AND startTs < newEnd AND endTs > newStart AND status IN (HELD, ACTIVE)
+- Two-way opposite direction rule:
+  - treat opposite-direction overlap as hard conflict
+
+
+--------------------------------------------------------
+File Structure (backend module template)
+--------------------------------------------------------
+backend/Modules/Traffic/
+  Model/
+    TrafficRobotState.cs
+    TrafficReservation.cs
+    TrafficCorridorToken.cs
+    TrafficEdgeFeedback.cs
+    TrafficIncident.cs
+    TrafficEventLog.cs
+
+  Dto/
+    TrafficRobotStateDto.cs
+    TrafficReservationDto.cs
+    TrafficControlDto.cs
+    TrafficIncidentDto.cs
+
+  Data/
+    TrafficStateRepository.cs
+    TrafficReservationRepository.cs
+    TrafficIncidentRepository.cs
+
+  Service/
+    TrafficControllerService.cs              // conflict detection + control output
+    ReservationPlannerService.cs             // window allocation
+    ConflictDetectorService.cs               // node/path conflicts + two-way opposite checks
+    DeadlockDetectorService.cs               // wait-for graph cycle detection
+    RerouteCoordinatorService.cs             // asks Route Planner for reroute
+
+  Worker/
+    RobotTrafficStateWorker.cs               // consumes robots.traffic.state.*
+    TrafficControlPublisherWorker.cs         // publishes robots.traffic.control.*
+    TrafficFeedbackPublisherWorker.cs        // publishes traffic.blocked.* and traffic.cost.*
+
+  Api/
+    TrafficControllerApi.cs                  // operator tools: hold/release/block/unblock
+
+  Realtime/
+    TrafficHubPublisher.cs
+
+  Persistence/
+    TrafficDbSchema.cs
+    *EntityConfig.cs
+
+
+--------------------------------------------------------
+Pseudocode: Main Control Loop
+--------------------------------------------------------
+Every tick (e.g., 5-10 Hz):
+  states = LoadLatestTrafficRobotStates(mapVersionId)
+  routes = LoadActiveRouteTimelines(mapVersionId)            // from Route Planner outputs
+  reservations = LoadActiveReservations(mapVersionId)
+
+  incidents = []
+
+  for each robot in states:
+    if RobotOfflineOrError(robot):
+      ApplyConservativeBlock(robot, reservations)            // block last known segment
+      continue
+
+    planned = routes[robot.robotId]
+    deviation = CompareActualVsPlanned(robot, planned)
+    if deviation is large:
+      incidents.Add(incident(type="deviation", robotId=robot.robotId))
+
+  conflicts = ConflictDetectorService.Detect(reservations, states, routes)
+  for each conflict in conflicts:
+    ResolveConflict(conflict)                                // holds, speed caps, reorder windows
+
+  deadlocks = DeadlockDetectorService.DetectWaitForCycles(reservations)
+  for each deadlock in deadlocks:
+    HandleDeadlock(deadlock)                                 // reroute one robot or force hold/backoff
+
+  PublishControlCommands(states)                              // robots.traffic.control.<robotId>
+  PublishRouteFeedback(mapVersionId)                          // traffic.blocked.* and traffic.cost.*
+  PersistIncidents(incidents)
+
+
+--------------------------------------------------------
+Pseudocode: Two-Way Opposite Direction Prevention
+--------------------------------------------------------
+IsTwoWayOppositeConflict(edgeId, newWindow, newDirection):
+  existing = QueryReservations(edgeId, overlap with newWindow, status HELD/ACTIVE)
+  for r in existing:
+    if r.direction != null and newDirection != null and r.direction != newDirection:
+      return true
+  return false
+
+GrantEdgeReservation(robotId, edgeId, window, direction):
+  if PathIsTwoWay(edgeId) and IsTwoWayOppositeConflict(edgeId, window, direction):
+    return Deny("TWO_WAY_OPPOSITE_CONFLICT")
+  SaveReservation(robotId, EDGE, edgeId, window, direction, status=HELD)
+  return Granted()
+
+
+--------------------------------------------------------
+Pseudocode: Reroute On Block / No-Reroute Escalation
+--------------------------------------------------------
+HandleBlockedRobot(robotId, reason):
+  ok = RoutePlannerService.TryReroute(robotId)
+  if ok:
+    return
+
+  IssueHoldAtNextSafeNode(robotId)
+  CreateIncident(
+    type="no_reroute",
+    severity="error",
+    robotId=robotId,
+    message="No reroute available; robot held. Operator action required."
+  )
+  PublishRealtime(traffic.incident.created)
+

@@ -1,0 +1,378 @@
+========================================================
+MODULE 09: TRAFFIC (SAFETY + TIME-WINDOW CONTROL + ROUTE FEEDBACK)
+========================================================
+
+Goal:
+- Control multiple robots moving on the same map safely and efficiently.
+- Enforce hard safety rules and provide smooth motion via closed-loop constraints:
+  - reservations (node/path) as time windows
+  - speed targets to avoid unnecessary stops
+- Publish dynamic route feedback so Route selects fastest safe paths:
+  - blocked edges (hard) and cost penalties (soft)
+- Account for mission action dwell time at stop points so ETA and scheduling remain realistic.
+
+Non-goals (for now):
+- Replace robot low-level controllers (traffic sets constraints, robot executes).
+- Global optimal scheduling across all tasks (task module remains the dispatcher).
+
+
+--------------------------------------------------------
+Access Control (RBAC)
+--------------------------------------------------------
+Default:
+- All endpoints require authentication (global fallback policy)
+
+Read endpoints (traffic visualization, monitoring):
+- Require policy: Viewer (viewer/operator/admin)
+
+Write endpoints (operator interventions):
+- Require policy: Operator (operator/admin)
+
+Robot-to-backend traffic control:
+- Auth model uses robot identity (Robot module) and NATS credentials.
+
+
+--------------------------------------------------------
+Responsibilities (what this module owns)
+--------------------------------------------------------
+1) Reservation and right-of-way
+- Decide who may enter nodes and path segments.
+- Allocate non-overlapping reservation windows (space/time).
+
+2) Collision and conflict prevention (hard safety)
+- Node exclusivity:
+  - only 1 robot in a node at a time
+- Two-way conflict prevention:
+  - prevent head-to-head overlap on TWO_WAY paths
+- Maintenance enforcement:
+  - deny reservations into maintenance nodes/paths
+
+3) Smooth motion constraints (efficiency)
+- Prefer speed shaping over hard stop when safe:
+  - targetSpeedMps and maxSpeedMps constraints
+  - early slow-down so robots arrive at window startTs
+
+4) Offline/estop/error safety handling (hard)
+- Treat the last known occupied region as blocked with conservative buffer.
+- Deny conflicting reservations and publish blocked edges until cleared.
+
+5) Dynamic route feedback (blocked vs penalized)
+- Publish:
+  - traffic.blocked.<mapVersionId> (hard blocked edges)
+  - traffic.cost.<mapVersionId> (soft penalties in seconds)
+
+6) Mission action dwell time accounting
+- When a robot must perform actions at a stop point:
+  - extend node reservation endTs by actionTimeSeconds
+  - publish penalties around dwell-heavy areas when detours are preferable
+
+
+--------------------------------------------------------
+Core Concepts (map semantics)
+--------------------------------------------------------
+Path:
+- The only valid travel corridor between nodes.
+- direction: ONE_WAY or TWO_WAY
+- speed limits and maintenance flags apply.
+
+Node (junction):
+- Transfer/turn point between paths.
+- Node exclusivity is a hard rule.
+
+
+--------------------------------------------------------
+Inputs (what traffic needs)
+--------------------------------------------------------
+Map graph (Map module):
+- nodes, paths, directions, speed limits, maintenance flags, geometry/length
+
+Robot state (Robot module and robot reports):
+- robots.traffic.state.<robotId>:
+  - pose + velocity + progress
+- connectivity and mode/status:
+  - connected/lastSeenAt freshness
+  - status and safety flags (from robot status)
+
+Route plan and stop actions:
+- active route segments/steps for the robot
+- planned stop action time:
+  - action dwell time at the next stop point
+
+
+--------------------------------------------------------
+Data Model (traffic state)
+--------------------------------------------------------
+Schema:
+- traffic
+
+TrafficRobotState:
+- robotId (text, PK)
+- mapId (uuid?)
+- mapVersionId (uuid?)
+- status (text)                             // RUNNING | REST | PAUSED | OFFLINE | ERROR
+- lastSeenAt (timestamptz)
+- poseX, poseY, headingRad (double?)
+- velocityMps (double?)
+- currentNodeId (uuid?)
+- currentPathId (uuid?)
+- routeId (uuid?)
+- etaSecondsRemaining (double?)
+- brakingDistanceMeters (double?)
+- actionTimeSecondsRemaining (double?)
+
+TrafficReservation:
+- reservationId (uuid, PK)
+- robotId
+- type (text)                               // NODE | PATH_SEGMENT
+- nodeId (uuid?)
+- pathId (uuid?)
+- direction (text?)                         // FORWARD | REVERSE
+- startTs (timestamptz)
+- endTs (timestamptz)
+- status (text)                             // HELD | ACTIVE | RELEASED | EXPIRED
+- priority (int)
+
+TrafficEdgeCost:
+- mapVersionId
+- pathId
+- costPenaltySeconds (double)
+- blocked (bool)
+- updatedAt (timestamptz)
+- reasonCode (text?)
+
+TrafficEventLog (optional):
+- eventId (uuid, PK)
+- ts
+- robotId?
+- type (text)                               // reserve|release|block|deadlock|speedCmd|offline|estop|error
+- payloadJson (jsonb)
+
+
+--------------------------------------------------------
+Time-Window Rule (core efficiency)
+--------------------------------------------------------
+Rule:
+- Reservations are time intervals, not only occupancy-now.
+- Two robots can use the same resource at different times without stopping if windows do not overlap (plus safety buffer).
+
+Example:
+- Robot A reserves PATH_SEGMENT(pathId=4) for [t=3s, t=5s]
+- Robot B reserves PATH_SEGMENT(pathId=4) for [t=6s, t=8s]
+- Robot B should not stop; traffic should issue speed targets to arrive near t=6s.
+
+
+--------------------------------------------------------
+Control Rules (safety + liveness)
+--------------------------------------------------------
+1) Node capacity (hard)
+- Only 1 robot may hold/enter a node at a time.
+- Robot must obtain a node reservation before entering.
+
+2) Two-way path conflict prevention (hard)
+- For TWO_WAY paths:
+  - directional reservations prevent head-to-head overlap
+
+3) Following distance (soft -> hard when needed)
+- Same direction robots maintain safe headway via speed caps.
+
+4) Mission action dwell time (efficiency + correctness)
+- If a robot must perform actions at a stop point:
+  - extend the node reservation endTs by actionTimeSeconds
+
+5) Offline / disconnected (hard safety)
+- OFFLINE robots occupy their last known node/path with buffer.
+- Deny conflicting reservations.
+- Publish:
+  - traffic.blocked.<mapVersionId> when safety requires
+  - traffic.cost.<mapVersionId> when detours are preferable but not strictly required
+
+6) Estop / ERROR (hard safety)
+- Treat position as occupied with conservative buffer.
+- Deny conflicts immediately and publish blocked edges until cleared.
+
+7) External locks (hard)
+- Teach locks block a set of nodes/paths for other robots.
+- Publish blocked edges so routing avoids locked regions.
+
+8) Deadlock avoidance (liveness)
+- Reserve ahead before entering constrained regions.
+- Use one or more:
+  - look-ahead reservations (K-step)
+  - wait-for graph cycle detection
+  - corridor token model for two-way corridors
+
+
+--------------------------------------------------------
+NATS JetStream (traffic subjects)
+--------------------------------------------------------
+Robot -> Backend:
+- robots.traffic.state.<robotId>
+
+Backend -> Robot:
+- robots.traffic.control.<robotId>
+
+Traffic -> Route (dynamic feedback):
+- traffic.blocked.<mapVersionId>
+- traffic.cost.<mapVersionId>
+
+Teach -> Traffic (exclusive lock):
+- traffic.lock.acquire
+- traffic.lock.heartbeat
+- traffic.lock.release
+
+
+--------------------------------------------------------
+Traffic Control Output (robot constraints)
+--------------------------------------------------------
+robots.traffic.control.<robotId> (concept):
+- permission:
+  - allowEnterNodeId / allowEnterPathId
+- speed:
+  - maxSpeedMps
+  - targetSpeedMps
+- reservationWindow:
+  - { segmentType, nodeId/pathId, startTs, endTs }
+- actionWindow:
+  - { nodeId, actionTimeSeconds }
+- holdAtNodeId (optional)
+
+--------------------------------------------------------
+Route Feedback Policy (blocked vs penalized)
+--------------------------------------------------------
+traffic.blocked.<mapVersionId>:
+- Used when traversal must be prevented:
+  - teach locks
+  - maintenance (if mirrored)
+  - offline/estop/error occupied region
+  - operator hard blocks
+
+traffic.cost.<mapVersionId>:
+- Used when traversal is allowed but slower:
+  - queues and time-window pressure
+  - dwell-heavy stop points
+  - corridor contention
+
+
+--------------------------------------------------------
+REST Endpoints (monitoring + operator tools)
+--------------------------------------------------------
+Base:
+- /api/v1/traffic
+
+Read (Viewer):
+- GET /api/v1/traffic/robots?mapId=
+  - returns TrafficRobotState[]
+- GET /api/v1/traffic/costs?mapVersionId=
+  - returns dynamic cost penalties
+- GET /api/v1/traffic/reservations?mapVersionId=
+  - returns current reservations
+
+Write (Operator):
+- POST /api/v1/traffic/robots/{robotId}/hold
+  - force hold at next safe node
+- POST /api/v1/traffic/robots/{robotId}/release
+  - release a forced hold
+- POST /api/v1/traffic/paths/{pathId}/block
+- POST /api/v1/traffic/paths/{pathId}/unblock
+
+
+--------------------------------------------------------
+SignalR Events (frontend live monitoring)
+--------------------------------------------------------
+Hub:
+- /hubs/realtime
+
+Event names (recommended):
+- traffic.robot.updated
+- traffic.reservation.updated
+- traffic.cost.updated
+- traffic.deadlock.detected
+
+Payload intent:
+- robot updates: { robotId, pose, status, routeId, etaRemaining, lastSeenAt }
+- reservation updates: { reservationId, robotId, type, nodeId/pathId, status, startTs, endTs }
+- cost updates: { mapVersionId, pathId, costPenaltySeconds, blocked, updatedAt }
+
+
+--------------------------------------------------------
+Good To Have Adviser (recommended early decisions)
+--------------------------------------------------------
+1) Start with simple rules, then add sophistication
+- Begin with:
+  - node exclusivity
+  - two-way corridor token
+  - basic following distance speed cap
+- Add:
+  - wait-for graph deadlock detection
+  - time-window reservations
+  - predictive collision checks
+
+2) Keep everything versioned and observable
+- Version traffic message contracts (schemaVersion).
+- Log:
+  - reservation grants/denials
+  - deadlock detection/resolution
+  - speed control commands
+
+3) Treat offline robots conservatively
+- Use lastSeenAt + timeout to mark OFFLINE.
+- Require manual operator clearance or automatic timeout policy before releasing occupancy.
+
+4) Avoid over-controlling
+- Traffic provides constraints (permissions/speed caps).
+- Robot maintains smooth trajectory tracking internally.
+
+5) Expose costs for route preview
+- Use the same cost penalties for:
+  - runtime routing
+  - frontend preview
+- This prevents “preview route” from differing from “execution route”.
+
+
+--------------------------------------------------------
+Use cases supported
+--------------------------------------------------------
+See:
+- conceptV3/backend/12_use_cases_robot_task_route_traffic_teach.txt
+
+
+--------------------------------------------------------
+Recommended Backend File Structure (module template)
+--------------------------------------------------------
+backend/Modules/Traffic/
+  Model/
+    TrafficRobotState.cs
+    TrafficReservation.cs
+    TrafficEdgeCost.cs
+    TrafficEventLog.cs
+
+  Dto/
+    TrafficRobotDto.cs
+    TrafficReservationDto.cs
+    TrafficCostDto.cs
+
+  Messaging/
+    TrafficContracts.V1.cs                  // NATS envelopes/payloads
+
+  Data/
+    TrafficRepository.cs
+
+  Service/
+    TrafficCoordinatorService.cs            // reservation + policies
+    DeadlockDetector.cs                     // wait-for graph + resolution
+    SpeedProfileService.cs                  // accel/decel shaping outputs
+    CongestionCostService.cs                // cost penalties for Route module
+
+  Api/
+    TrafficController.cs
+
+  Realtime/
+    TrafficHubPublisher.cs
+
+  Worker/
+    TrafficRobotStateWorker.cs              // consumes robots.traffic.state.*
+    TrafficControlPublisherWorker.cs        // publishes robots.traffic.control.*
+
+  Persistence/
+    TrafficDbSchema.cs
+    *EntityConfig.cs

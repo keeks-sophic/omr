@@ -7,5 +7,8 @@ public static class DatabaseInitSql
         "CREATE EXTENSION IF NOT EXISTS postgis;"
     };
 
-    public static readonly string[] Optional = Array.Empty<string>();
+    public static readonly string[] Optional = new[]
+    {
+        "CREATE SCHEMA IF NOT EXISTS robots;"
+    };
 }

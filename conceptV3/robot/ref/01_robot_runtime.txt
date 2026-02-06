@@ -1,0 +1,651 @@
+========================================================
+ROBOT RUNTIME 01: ROBOT-SIDE PROGRAM (NATS JETSTREAM ONLY)
+========================================================
+
+Goal:
+- Define the robot-side runtime that runs on the robot (or in mock mode on a PC).
+- Control motors directly and read IO/sensors to produce authoritative robot state.
+- Communicate with backend Robot module (MODULE 06) via NATS JetStream only.
+- Support multiple robot models by making dimensions/motors/IO/capabilities fully configurable.
+
+Non-goals:
+- Robot runtime does not expose HTTP endpoints for backend integration.
+- Robot runtime does not write to backend databases.
+- Backend cannot directly edit robot state; robot applies changes and streams results back.
+
+
+--------------------------------------------------------
+Concept (Ownership + Boundary)
+--------------------------------------------------------
+
+Source of truth:
+- Robot runtime is authoritative for:
+  - motor feedback (position/velocity/errors), IO readings, safety stop state
+  - computed pose/localization state (odometry/QR/lidar fusion if present)
+  - reported settings (actual applied configuration)
+- Backend is authoritative for:
+  - desired settings (what operators request)
+  - task/traffic intents (what system wants robot to do)
+
+Boundary rule:
+- All communication with backend is via NATS JetStream subjects.
+- Other backend modules talk to backend Robot module, never directly to the robot runtime.
+
+Desired vs Reported convergence:
+- Backend publishes settings.desired and command.request.
+- Robot validates, applies, then publishes:
+  - settings.reported (actual)
+  - command.ack (accepted/rejected/progress)
+  - state/telemetry streams
+
+
+--------------------------------------------------------
+Robot Local Configuration (one file, easy to extend)
+--------------------------------------------------------
+
+Recommended file:
+- robot_config.json
+
+Design requirements:
+- Dimensions, motors, IO, and capabilities must be:
+  - additive (new device types can be introduced without breaking old configs)
+  - discoverable (runtime enumerates configured devices)
+  - validated at boot (fail fast if required devices missing or invalid)
+
+Config structure (recommended high-level):
+{
+  "schemaVersion": 1,
+  "identity": {
+    "robotId": "uuid-or-stable-string",
+    "robotCode": "RB-001",
+    "name": "Robot A",
+    "vendor": "VendorX",
+    "model": "ModelY",
+    "firmwareVersion": "1.2.3"
+  },
+  "runtime": {
+    "mode": "REAL | MOCK",
+    "tickHz": 100,
+    "startupPolicy": {
+      "settingsBootstrapMode": "ROBOT_WINS | BACKEND_WINS"
+    }
+  },
+  "nats": {
+    "servers": [ "nats://10.0.0.10:4222" ],
+    "credsFilePath": "/etc/robot/nats.creds",
+    "clientName": "RB-001"
+  },
+  "dimensions": {
+    "lengthMm": 900,
+    "widthMm": 650,
+    "heightMm": 350,
+    "wheelBaseMm": 520,
+    "trackWidthMm": 480,
+    "payloadMaxKg": 60
+  },
+  "capabilities": {
+    "supportsAutoNavigation": true,
+    "supportsTurnInPlace": true,
+    "hasBarcodeScanner": true,
+    "hasLidarSafety": true,
+    "hasHoist": false
+  },
+  "motors": [
+    {
+      "motorId": "drive_left",
+      "role": "DRIVE",
+      "driver": { "type": "PLC | CANOPEN | SERIAL | MOCK", "config": { } },
+      "limits": {
+        "maxSpeed": { "unit": "mps", "value": 1.2 },
+        "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+        "maxDeceleration": { "unit": "mps2", "value": 1.0 },
+        "positionMin": null,
+        "positionMax": null
+      },
+      "resetPolicy": { "supportsReset": true }
+    },
+    {
+      "motorId": "drive_right",
+      "role": "DRIVE",
+      "driver": { "type": "PLC | CANOPEN | SERIAL | MOCK", "config": { } },
+      "limits": {
+        "maxSpeed": { "unit": "mps", "value": 1.2 },
+        "maxAcceleration": { "unit": "mps2", "value": 0.8 },
+        "maxDeceleration": { "unit": "mps2", "value": 1.0 }
+      },
+      "resetPolicy": { "supportsReset": true }
+    },
+    {
+      "motorId": "aux_axis_1",
+      "role": "AUX",
+      "functionKey": "ACTUATOR_TYPE_1",
+      "driver": { "type": "PLC | CANOPEN | SERIAL | MOCK", "config": { } },
+      "limits": {
+        "maxSpeed": { "unit": "unit-per-sec", "value": 1.0 },
+        "maxAcceleration": { "unit": "unit-per-sec2", "value": 1.0 },
+        "maxDeceleration": { "unit": "unit-per-sec2", "value": 1.0 },
+        "positionMin": { "unit": "unit", "value": 0 },
+        "positionMax": { "unit": "unit", "value": 1000 }
+      },
+      "resetPolicy": { "supportsReset": true }
+    }
+  ],
+  "io": {
+    "digitalInputs": [
+      { "ioId": "estop", "type": "ESTOP_CHAIN", "driver": { "type": "PLC | GPIO | MOCK", "config": { } } },
+      { "ioId": "limit_front", "type": "LIMIT_SENSOR", "driver": { "type": "PLC | GPIO | MOCK", "config": { } } }
+    ],
+    "digitalOutputs": [
+      { "ioId": "motor_enable", "type": "MOTOR_ENABLE", "driver": { "type": "PLC | GPIO | MOCK", "config": { } } }
+    ],
+    "devices": [
+      { "deviceId": "lidar0", "type": "LIDAR", "driver": { "type": "ETHERNET | SERIAL | MOCK", "config": { } } },
+      { "deviceId": "scanner0", "type": "BARCODE_SCANNER", "driver": { "type": "USB | SERIAL | MOCK", "config": { } } }
+    ]
+  },
+  "streams": {
+    "heartbeatHz": 1,
+    "stateHz": 10,
+    "telemetryHz": 2,
+    "trafficHz": 10
+  },
+  "safety": {
+    "stopOnEstop": true,
+    "stopOnObstacle": true,
+    "obstacleStopDistanceMeters": 0.6,
+    "obstacleWarnDistanceMeters": 1.2
+  }
+}
+
+Extension rule:
+- Add a new IO/motor/device type by adding a new "type" value and its driver config.
+- Runtime treats unknown types as unsupported and fails boot (for required devices) or disables (for optional devices).
+- Motors are data-driven:
+  - add/edit entries in motors[] to support new robot models over time
+  - apply changes at boot (restart required)
+
+
+--------------------------------------------------------
+Core Data Structures (robot internal)
+--------------------------------------------------------
+
+RobotSpec (static after boot):
+- identity: robotId/robotCode/name/vendor/model/firmwareVersion
+- dimensions: physical dimensions + kinematics
+- capabilities: feature flags and supported command types
+- device manifests:
+  - motors: MotorSpec[]
+  - io points: IoPointSpec[]
+  - sensor devices: DeviceSpec[]
+
+RobotRuntimeState (dynamic):
+- time:
+  - now
+  - monotonicNow
+- connectivity:
+  - natsConnected
+- safety:
+  - estopPressed
+  - safetyStopActive
+  - safetyStopReason: ESTOP | OBSTACLE | INTERNAL_FAULT | TRAFFIC_HOLD | MANUAL_HOLD
+- motion:
+  - commandedVelocity (optional)
+  - odometry: pose (x,y,yaw), velocity (linear, angular)
+- motors:
+  - MotorStatus map by motorId:
+    - connected
+    - mode: IDLE | MOVING | HOMING | STOPPED | ERROR
+    - position/velocity/current (optional)
+    - faultCode/faultMessage
+- io:
+  - last sampled values for each ioId
+  - device health per deviceId (lidar connected, scanner connected, etc.)
+- task execution:
+  - activeCommand: commandId/correlationId/type/state/progress
+- settings:
+  - desiredSettings (last received, with correlationId)
+  - reportedSettings (actual applied)
+
+
+--------------------------------------------------------
+Robot Status Semantics (degraded operation)
+--------------------------------------------------------
+
+Robot status values:
+- RUNNING: drive motors healthy; robot can navigate and accept motion commands
+- WARNING: drive motors healthy, but one or more non-drive functional motors are not available
+- PAUSED: motion blocked by safety stop / hold; robot must not move
+- ERROR: critical fault; robot must not move automatically
+- OFFLINE: cannot be controlled (no safe actuation or not connected by policy)
+
+Functional motor rule (non-drive):
+- If any AUX motor is disconnected or in ERROR:
+  - robot remains operational for driving/navigation
+  - robot status becomes WARNING
+  - only commands that require the failed functional motor are rejected
+  - commands that do not require the failed motor continue to run
+
+Critical motor rule (drive):
+- If any DRIVE motor is disconnected or in ERROR:
+  - stop motion immediately
+  - robot status becomes ERROR
+  - reject new commands except STOP and fault-reset commands
+
+
+--------------------------------------------------------
+NATS JetStream Contract (robot <-> backend Robot module)
+--------------------------------------------------------
+
+Rule:
+- Robot runtime uses only JetStream subjects to interact with backend Robot module.
+- All messages use an envelope for versioning, tracing, and deduplication.
+
+Subject naming (align to backend MODULE 06):
+Robot -> Backend (ROBOT_IN):
+- robot.{robotId}.heartbeat
+- robot.{robotId}.state
+- robot.{robotId}.telemetry
+- robot.{robotId}.events
+- robot.{robotId}.settings.reported
+- robot.{robotId}.command.ack
+
+Backend -> Robot (ROBOT_OUT):
+- robot.{robotId}.command.request
+- robot.{robotId}.settings.desired
+
+Envelope (recommended):
+{
+  "payloadVersion": 1,
+  "messageId": "uuid",
+  "robotId": "uuid-or-stable-string",
+  "robotCode": "RB-001",
+  "ts": "2026-01-31T00:00:00Z",
+  "correlationId": "string?",
+  "payload": { }
+}
+
+Command/request payload examples:
+- command.request payload:
+  - commandType: "MOVE_VELOCITY | MOVE_TO_POSE | STOP | RESET_MOTOR | SET_SPEED_LIMIT | EXECUTE_ACTION"
+  - parameters: object
+- settings.desired payload:
+  - motors: { [motorId]: { maxSpeed?, maxAcceleration?, resetRequested? } }
+  - io: { optional overrides allowed by policy }
+  - safety: { optional policy overrides allowed by robot }
+
+Ack payload:
+- command.ack payload:
+  - commandType
+  - status: ACKED | REJECTED | RUNNING | DONE | FAILED
+  - reason?
+  - progress? (0..1)
+
+Reported settings payload:
+- settings.reported payload:
+  - appliedFromCorrelationId?
+  - effectiveMotors: { [motorId]: { maxSpeed, maxAcceleration, maxDeceleration } }
+  - effectiveIo: { present devices + health summary }
+
+
+--------------------------------------------------------
+Mock vs Real (same runtime, different drivers)
+--------------------------------------------------------
+
+Goal:
+- The same robot runtime can run in:
+  - REAL: uses real motor drivers and real IO drivers
+  - MOCK: uses simulated motor + IO for development/testing
+
+Design rule:
+- All hardware access is behind interfaces:
+  - IMotorDriver, IIoDriver, ISensorDriver
+- Runtime logic (task execution, safety aggregation, message publishing) is identical in both modes.
+
+Mock feedback rule:
+- In MOCK mode, feedback is computed locally using configured limits and kinematics:
+  - motor position/velocity integrate over time
+  - pose updates are derived from simulated drive motor outputs
+  - IO sensors can be scripted or derived:
+    - limit switches based on simulated position bounds
+    - lidar obstacle based on injected test scenario
+    - barcode events based on scripted map markers
+
+Real feedback rule:
+- In REAL mode, feedback is read from real sources:
+  - motor controllers (PLC/CAN/etc.)
+  - IO (GPIO/PLC)
+  - sensors (lidar/scanner)
+
+
+--------------------------------------------------------
+Execution Scenario (startup -> run -> shutdown)
+--------------------------------------------------------
+
+Scenario A: Normal startup (REAL)
+1) Boot
+  - load robot_config.json
+  - validate config schemaVersion and required devices
+  - create drivers for each motor/io/device
+2) Initialize safety
+  - read estop state
+  - if estop active: enter PAUSED immediately and publish state
+3) Connect to NATS JetStream
+  - connect using creds
+  - subscribe to:
+    - robot.{robotId}.command.request
+    - robot.{robotId}.settings.desired
+4) Settings bootstrap
+  - apply local configured limits to controllers (safe defaults)
+  - publish:
+    - settings.reported (effective settings)
+    - state (initial status + motors + safety)
+5) Start loops
+  - heartbeat loop at heartbeatHz
+  - state loop at stateHz
+  - telemetry loop at telemetryHz
+  - traffic loop at trafficHz (if supported)
+
+Scenario B: Normal startup (MOCK)
+- Same as REAL, but drivers are mock drivers.
+- If NATS is unavailable, runtime can continue locally but marks itself OFFLINE and does not accept new commands.
+
+Scenario C: Connection drop / reconnect
+- When NATS disconnected:
+  - keep safety loop running
+  - stop accepting new commands
+  - optionally continue current motion only if policy allows and safety ok; default is stop and enter PAUSED
+  - continue publishing is skipped until reconnected
+- On reconnect:
+  - re-subscribe
+  - publish identity + settings.reported + current state immediately
+
+Scenario D: Estop pressed or obstacle detected
+- Must stop motors locally immediately (do not wait for backend).
+- Update runtime safetyStopActive and status to PAUSED (or ERROR if internal fault).
+- Publish state immediately and send an event on robot.{robotId}.events.
+- Reject new motion commands until cleared and readiness checks pass.
+
+Scenario E: Motor fault occurs during execution
+- If any DRIVE motor enters ERROR:
+  - stop motion immediately
+  - status becomes ERROR
+  - publish state immediately
+  - require operator reset via command.request RESET_MOTOR (per motor) or resetAll
+- If non-drive motor enters ERROR:
+  - status becomes WARNING (if safe to continue driving)
+  - functional features are disabled until the motor recovers or is reset
+  - reject commands that require the failed motor
+
+
+--------------------------------------------------------
+Robot Main Loop (pseudocode)
+--------------------------------------------------------
+
+main():
+  config = loadConfig("robot_config.json")
+  spec = buildRobotSpec(config)
+  drivers = createDrivers(spec, config.runtime.mode)
+  state = initRuntimeState(spec)
+
+  safetyInit(state, drivers.io)
+  nats = connectNats(config.nats)
+  subscriptions = subscribe(nats, [
+    subjectCommandRequest(spec.robotId),
+    subjectSettingsDesired(spec.robotId)
+  ])
+
+  applyBootSettings(drivers, config)                 // safe defaults
+  publishBootReports(nats, spec, state, drivers)     // settings.reported + state + heartbeat
+
+  startScheduler(config.runtime.tickHz)
+  while not shutdownRequested:
+    tick()
+
+tick():
+  now = clock.now()
+
+  sampleFastSafetyIo(now)
+  if safetyTriggered():
+    stopMotorsImmediately()
+    publishImmediateStateAndEvent()
+
+  sampleMotorsAndIo(now)
+  updateOdometry(now)
+  updateFaultsAndStatus(now)
+
+  handleInboundMessages(now)         // command.request + settings.desired
+  advanceCommandExecution(now)       // task/motion state machine
+
+  publishPeriodicStreams(now)        // heartbeat/state/telemetry/traffic at configured Hz
+
+
+--------------------------------------------------------
+Inbound Handling (commands and settings)
+--------------------------------------------------------
+
+handleInboundMessages(now):
+  for msg in nats.drainInbox():
+    if msg.subject == robot.{robotId}.settings.desired:
+      handleDesiredSettings(msg)
+    if msg.subject == robot.{robotId}.command.request:
+      handleCommandRequest(msg)
+
+handleDesiredSettings(msg):
+  env = parseEnvelope(msg)
+  if not validateEnvelope(env): ackAndDrop(msg); return
+
+  desired = env.payload
+  result = validateDesiredSettings(desired, spec, currentState)
+  if result.rejected:
+    publishCommandAckLikeEvent("settings", status="REJECTED", reason=result.reason, correlationId=env.correlationId)
+    ack(msg)
+    return
+
+  applyDesiredSettingsToDrivers(desired)                 // may be partial based on policy
+  reported = readEffectiveSettingsFromDrivers()
+  publishSettingsReported(reported, appliedFromCorrelationId=env.correlationId)
+  ack(msg)
+
+handleCommandRequest(msg):
+  env = parseEnvelope(msg)
+  if not validateEnvelope(env): ackAndDrop(msg); return
+
+  cmd = env.payload
+  if not commandSupported(cmd.commandType, spec.capabilities):
+    publishCommandAck(env, status="REJECTED", reason="CAPABILITY_NOT_SUPPORTED")
+    ack(msg)
+    return
+
+  if currentState.status in { ERROR, OFFLINE }:
+    publishCommandAck(env, status="REJECTED", reason="ROBOT_NOT_READY")
+    ack(msg)
+    return
+
+  requiredMotors = motorsRequiredByCommand(cmd)
+  if any requiredMotors not healthy:
+    publishCommandAck(env, status="REJECTED", reason="REQUIRED_MOTOR_UNAVAILABLE")
+    ack(msg)
+    return
+
+  if currentState.safetyStopActive and cmd.commandType not in { STOP }:
+    publishCommandAck(env, status="REJECTED", reason="SAFETY_STOP_ACTIVE")
+    ack(msg)
+    return
+
+  enqueueCommandForExecution(env)                         // state machine will run it
+  publishCommandAck(env, status="ACKED")
+  ack(msg)
+
+
+--------------------------------------------------------
+Command Execution Model (state machine)
+--------------------------------------------------------
+
+Command states:
+- QUEUED -> RUNNING -> DONE | FAILED | CANCELED
+
+advanceCommandExecution(now):
+  if no activeCommand:
+    activeCommand = dequeueNext()
+    if activeCommand: transition RUNNING
+
+  if activeCommand.commandType == STOP:
+    stopMotorsImmediately()
+    activeCommand -> DONE
+    publishAck(DONE)
+    return
+
+  if safetyStopActive:
+    stopMotorsImmediately()
+    activeCommand -> FAILED
+    publishAck(FAILED, reason="SAFETY_STOP")
+    return
+
+  switch activeCommand.commandType:
+    case MOVE_VELOCITY:
+      drive.setVelocity(clampedByLimits(activeCommand.parameters))
+      publishProgress()
+    case MOVE_TO_POSE:
+      planner = localController.computeStep(targetPose)
+      drive.setVelocity(clampedByLimits(planner.velocity))
+      if withinTolerance(targetPose): activeCommand -> DONE
+    case RESET_MOTOR:
+      motor = findMotor(activeCommand.parameters.motorId)
+      motor.reset()
+      if motor.ok(): activeCommand -> DONE else -> FAILED
+    case EXECUTE_ACTION:
+      runCapabilityDrivenAction(activeCommand.parameters)
+
+  if activeCommand reached DONE/FAILED:
+    publishAck(final)
+    clear activeCommand
+
+
+--------------------------------------------------------
+Streaming Model (different frequencies)
+--------------------------------------------------------
+
+Streams to backend Robot module:
+- heartbeat (low rate, always):
+  - includes last boot id/version and a minimal status marker
+- state (medium/high rate):
+  - pose + safety + faults + motor summaries
+- telemetry (low/medium rate):
+  - battery, temperatures, currents, diagnostics
+- traffic (high rate, closed loop when enabled):
+  - pose + velocity + local safety state for traffic control
+- events (event-driven):
+  - estop pressed/cleared, obstacle detected/cleared, motor fault transitions, command lifecycle edges
+
+Publish rule:
+- Always publish immediately on critical changes:
+  - status transitions (RUNNING/WARNING/PAUSED/ERROR/OFFLINE)
+  - estop / obstacle / safetyStopActive changes
+  - drive motor fault transitions
+  - command lifecycle transitions (ACKED -> RUNNING -> DONE/FAILED)
+
+
+--------------------------------------------------------
+Safety Handling (local-first)
+--------------------------------------------------------
+
+Hard rules:
+- Estop and obstacle stop are enforced locally.
+- STOP command is always accepted and executed immediately.
+- Any PAUSED/ERROR/OFFLINE state clamps motion outputs to zero.
+- WARNING does not clamp drive motion; it only disables affected functional motor actions.
+
+Traffic hold (from backend):
+- Backend may request a hold via a command or settings (policy-specific).
+- Robot treats it as safetyStopReason=TRAFFIC_HOLD and pauses motion without entering ERROR.
+
+
+--------------------------------------------------------
+Complete Robot Program File Structure (recommended)
+--------------------------------------------------------
+
+robot/
+  robot_config.json
+  robot_config.schema.json (optional)
+
+  src/
+    Program.cs
+    Bootstrap/
+      ConfigLoader.cs
+      ConfigValidator.cs
+      DependencyGraph.cs
+
+    Messaging/
+      Nats/
+        NatsConnection.cs
+        JetStreamPublisher.cs
+        JetStreamSubscriber.cs
+        Subjects.cs
+        Envelope.cs
+        EnvelopeValidator.cs
+
+    Domain/
+      Spec/
+        RobotSpec.cs
+        DimensionSpec.cs
+        CapabilitySpec.cs
+        MotorSpec.cs
+        IoSpec.cs
+        DeviceSpec.cs
+      State/
+        RuntimeState.cs
+        Fault.cs
+        StatusCalculator.cs
+      Commands/
+        CommandTypes.cs
+        CommandQueue.cs
+        CommandExecutor.cs
+
+    Hardware/
+      Motors/
+        IMotorDriver.cs
+        MotorManager.cs
+        Drivers/
+          PlcMotorDriver.cs
+          CanOpenMotorDriver.cs
+          MockMotorDriver.cs
+      Io/
+        IIoDriver.cs
+        IoManager.cs
+        Drivers/
+          PlcIoDriver.cs
+          GpioIoDriver.cs
+          MockIoDriver.cs
+      Sensors/
+        ISensorDriver.cs
+        SensorManager.cs
+        Drivers/
+          LidarDriver.cs
+          BarcodeScannerDriver.cs
+          MockSensorDriver.cs
+
+    Control/
+      Kinematics/
+        DifferentialDrive.cs
+        OdometryIntegrator.cs
+      Safety/
+        SafetyManager.cs
+        ObstacleDetector.cs
+      Settings/
+        DesiredSettingsApplier.cs
+        ReportedSettingsBuilder.cs
+
+    Runtime/
+      Scheduler.cs
+      StreamPublisher.cs
+      InboundRouter.cs
+      HealthMonitor.cs
+
+
+--------------------------------------------------------
+Compatibility Note (existing robot ref vs backend MODULE 06)
+--------------------------------------------------------
+
+If older subjects exist (example: robots.status.<robotId>), provide a subject mapping layer:
+- Publish both for a transition period, or
+- Configure Subjects.cs to generate the canonical subject names expected by backend MODULE 06.

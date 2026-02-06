@@ -155,8 +155,10 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("BackendV3.Modules.Maps.Model.MapNode", b =>
                 {
+                    b.Property<Guid>("MapVersionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("NodeId")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<bool>("IsActive")
@@ -176,13 +178,10 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("geometry(Point, 0)");
 
-                    b.Property<Guid>("MapVersionId")
-                        .HasColumnType("uuid");
-
                     b.Property<string>("MetadataJson")
                         .HasColumnType("text");
 
-                    b.HasKey("NodeId");
+                    b.HasKey("MapVersionId", "NodeId");
 
                     b.HasIndex("Location");
 
@@ -195,8 +194,10 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("BackendV3.Modules.Maps.Model.MapPath", b =>
                 {
+                    b.Property<Guid>("MapVersionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("PathId")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<string>("Direction")
@@ -222,9 +223,6 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("geometry(LineString, 0)");
 
-                    b.Property<Guid>("MapVersionId")
-                        .HasColumnType("uuid");
-
                     b.Property<string>("MetadataJson")
                         .HasColumnType("text");
 
@@ -240,7 +238,7 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("ToNodeId")
                         .HasColumnType("uuid");
 
-                    b.HasKey("PathId");
+                    b.HasKey("MapVersionId", "PathId");
 
                     b.HasIndex("Location");
 
@@ -253,8 +251,10 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("BackendV3.Modules.Maps.Model.MapPoint", b =>
                 {
+                    b.Property<Guid>("MapVersionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("PointId")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<Guid?>("AttachedNodeId")
@@ -268,9 +268,6 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("geometry(Point, 0)");
 
-                    b.Property<Guid>("MapVersionId")
-                        .HasColumnType("uuid");
-
                     b.Property<string>("MetadataJson")
                         .HasColumnType("text");
 
@@ -278,7 +275,7 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.HasKey("PointId");
+                    b.HasKey("MapVersionId", "PointId");
 
                     b.HasIndex("Location");
 
@@ -333,7 +330,6 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                     b.HasIndex("DerivedFromMapVersionId");
 
                     b.HasIndex("MapId")
-                        .IsUnique()
                         .HasFilter("\"Status\" = 'PUBLISHED'");
 
                     b.HasIndex("PublishedAt");
@@ -350,8 +346,10 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("BackendV3.Modules.Maps.Model.QrAnchor", b =>
                 {
+                    b.Property<Guid>("MapVersionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("QrId")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<double>("DistanceAlongPath")
@@ -359,9 +357,6 @@ namespace backendV3.Infrastructure.Persistence.Migrations
 
                     b.Property<Point>("Location")
                         .HasColumnType("geometry(Point, 0)");
-
-                    b.Property<Guid>("MapVersionId")
-                        .HasColumnType("uuid");
 
                     b.Property<string>("MetadataJson")
                         .HasColumnType("text");
@@ -373,7 +368,7 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.HasKey("QrId");
+                    b.HasKey("MapVersionId", "QrId");
 
                     b.HasIndex("Location");
 
@@ -384,6 +379,163 @@ namespace backendV3.Infrastructure.Persistence.Migrations
                     b.HasIndex("PathId");
 
                     b.ToTable("qr_anchors", "maps");
+                });
+
+            modelBuilder.Entity("BackendV3.Modules.Robots.Model.Robot", b =>
+                {
+                    b.Property<string>("RobotId")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("text");
+
+                    b.Property<string>("TagsJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("RobotId");
+
+                    b.HasIndex("RobotId")
+                        .IsUnique();
+
+                    b.ToTable("robots", "robots");
+                });
+
+            modelBuilder.Entity("BackendV3.Modules.Robots.Model.RobotCapabilitySnapshot", b =>
+                {
+                    b.Property<Guid>("SnapshotId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RobotId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("SnapshotId");
+
+                    b.HasIndex("RobotId", "ReceivedAt");
+
+                    b.ToTable("robot_capability_snapshots", "robots");
+                });
+
+            modelBuilder.Entity("BackendV3.Modules.Robots.Model.RobotCommandLog", b =>
+                {
+                    b.Property<Guid>("CommandId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CommandType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("LastAckAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("RequestedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RobotId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("CommandId");
+
+                    b.HasIndex("RobotId", "RequestedAt");
+
+                    b.ToTable("robot_command_logs", "robots");
+                });
+
+            modelBuilder.Entity("BackendV3.Modules.Robots.Model.RobotIdentitySnapshot", b =>
+                {
+                    b.Property<Guid>("SnapshotId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("FirmwareVersion")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Model")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RobotId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SerialNumber")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Vendor")
+                        .HasColumnType("text");
+
+                    b.HasKey("SnapshotId");
+
+                    b.HasIndex("RobotId", "ReceivedAt");
+
+                    b.ToTable("robot_identity_snapshots", "robots");
+                });
+
+            modelBuilder.Entity("BackendV3.Modules.Robots.Model.RobotSettingsReportedSnapshot", b =>
+                {
+                    b.Property<Guid>("SnapshotId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RobotId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("SnapshotId");
+
+                    b.HasIndex("RobotId", "ReceivedAt");
+
+                    b.ToTable("robot_settings_reported_snapshots", "robots");
                 });
 #pragma warning restore 612, 618
         }

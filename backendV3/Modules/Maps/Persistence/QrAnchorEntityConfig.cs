@@ -9,7 +9,7 @@ public sealed class QrAnchorEntityConfig : IEntityTypeConfiguration<QrAnchor>
     public void Configure(EntityTypeBuilder<QrAnchor> builder)
     {
         builder.ToTable("qr_anchors", MapsDbSchema.Name);
-        builder.HasKey(x => x.QrId);
+        builder.HasKey(x => new { x.MapVersionId, x.QrId });
         builder.Property(x => x.QrCode).IsRequired();
         builder.Property(x => x.Location).HasColumnType("geometry(Point, 0)");
         builder.HasIndex(x => x.MapVersionId);

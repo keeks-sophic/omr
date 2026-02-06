@@ -1,0 +1,327 @@
+========================================================
+MODULE FLOW: ROBOT + TASK + ROUTE + TRAFFIC + TEACH
+========================================================
+
+Goal:
+- Describe how Modules 06/07/08/09/10 work together end-to-end.
+- Make the message interfaces consistent (NATS subjects + event names).
+- Provide one reference flow for:
+  - normal task execution
+  - delays/errors
+  - teach record and replay
+
+
+--------------------------------------------------------
+Modules (responsibility summary)
+--------------------------------------------------------
+Module 06: Robot
+- Owns robot connectivity and canonical robot state in DB (status/telemetry/task state).
+- Provides a stable NATS boundary to robots:
+  - ingest robot -> backend streams
+  - publish backend -> robot control streams
+
+Module 07: Task
+- Owns task lifecycle (source of truth).
+- Assigns tasks to a specific robot or selects a free robot.
+- Tracks progress/delay/error and pushes updates to frontend.
+
+Module 08: Route
+- Computes routes using Map module data (graph) and Traffic penalties/blocks.
+- Provides:
+  - route plan + steps + ETA
+  - route preview for frontend
+- Responds to robot route requests and/or task-triggered route compute.
+
+Module 09: Traffic
+- Owns collision avoidance + deadlock avoidance + smooth motion constraints.
+- Maintains time-window reservations for nodes and path segments.
+- Publishes dynamic penalties/blocked edges for routing.
+- Uses closed-loop robot feedback to adjust reservations and speed caps.
+
+Module 10: Teach
+- Controls robot in teach mode and authors Missions (capability-aware).
+- Saves taught actions as Missions with nested missions allowed.
+- Requires an exclusive teach lock so other robots cannot enter teaching paths.
+
+
+--------------------------------------------------------
+Shared Data Channels
+--------------------------------------------------------
+Database:
+- Robot module persists robot identity/status/telemetry/task state.
+- Task module persists task state/schedules/history.
+- Route module may persist computed routes (optional).
+- Traffic module persists reservations/costs/events.
+- Teach module persists missions, sessions/samples, and execution history.
+
+NATS JetStream (robot-facing boundary):
+Robot -> Backend:
+- robots.identity.<robotId>
+- robots.status.<robotId>
+- robots.telemetry.<robotId>
+- robots.task.<robotId>
+- robots.cmd.ack.<robotId>
+- robots.route.request.<robotId>
+- robots.traffic.state.<robotId>
+- robots.teach.state.<robotId>
+- robots.settings.report.<robotId>
+- robots.settings.ack.<robotId>
+
+Backend -> Robot:
+- robots.cmd.<robotId>
+- robots.task.<robotId>
+- robots.route.response.<robotId>
+- robots.traffic.control.<robotId>
+- robots.teach.control.<robotId>
+- robots.settings.apply.<robotId>
+- robots.settings.reset.<robotId>
+
+NATS JetStream (internal cross-module events, optional):
+- traffic.cost.<mapVersionId>
+- traffic.blocked.<mapVersionId>
+- traffic.lock.acquire / traffic.lock.heartbeat / traffic.lock.release
+- tasks.eta.<taskId> (optional if not using internal service calls)
+
+REST API (frontend):
+- /api/v1/robots (Module 06)
+- /api/v1/tasks (Module 07)
+- /api/v1/routes/preview (Module 08)
+- /api/v1/traffic/* (Module 09)
+- /api/v1/teach/* (Module 10)
+
+SignalR (frontend live view):
+- robot.* (Module 06)
+- task.* and task.eta.updated (Module 07/08)
+- route.* (Module 08)
+- traffic.* (Module 09)
+- teach.* (Module 10)
+
+
+--------------------------------------------------------
+Flow A: User Sends a Task to a Specific Robot
+--------------------------------------------------------
+1) Frontend -> Task API
+- POST /api/v1/tasks
+  - requestedRobotId = RBT-001
+  - type:
+    - MOVE_TO_POINT
+    - MISSION
+  - payload includes:
+    - moveToPoint destination OR missionId/steps
+
+2) Task module validates and creates task
+- Task status:
+  - PENDING if scheduledAt in the future
+  - QUEUED otherwise
+
+3) Task module assigns robot and dispatches
+- Task state -> ASSIGNED
+- Publish to robot:
+  - robots.task.RBT-001
+  - payload.type = taskAssign
+  - includes taskId + correlationId
+
+4) Robot acknowledges and starts executing
+- Robot -> Backend:
+  - robots.cmd.ack.RBT-001 and/or robots.task.RBT-001 (type=taskProgress)
+- Task state -> RUNNING when progress starts
+
+
+--------------------------------------------------------
+Flow B: Task Module Auto-Selects a Free Robot
+--------------------------------------------------------
+1) Frontend -> Task API
+- POST /api/v1/tasks
+  - requestedRobotId omitted
+
+2) Task module selects a robot
+- Reads Robot module canonical state:
+  - connected + lastSeenAt freshness
+  - idle/ready state, no active task
+  - capability match + battery thresholds
+- Chooses best robot (scoring policy)
+
+3) Task module dispatches as in Flow A
+
+
+--------------------------------------------------------
+Flow C: Route Planning + ETA Update
+--------------------------------------------------------
+Route planning can be triggered in two compatible ways:
+
+Option 1 (robot asks for route after assignment):
+1) Robot -> Route
+- robots.route.request.<robotId>
+  - includes taskId, start pose, destination, mapVersionId
+  - includes actionsAtDestinationSeconds when a Mission step requires an action at the stop point
+
+2) Route module computes path
+- Reads map graph (Map module, DB) using mapVersionId
+- Applies hard blocks:
+  - maintenance flags
+  - traffic.blocked.<mapVersionId> (includes teach locks)
+- Applies penalties:
+  - traffic.cost.<mapVersionId> costPenaltySeconds
+- Runs A* and produces:
+  - segments + steps + etaSecondsTotal
+  - etaSecondsTotal includes travel time plus actionsAtDestinationSeconds (if provided)
+
+3) Route -> Robot
+- robots.route.response.<robotId>
+  - includes routeId, steps, etaSecondsTotal
+
+4) Route -> Task
+- Route updates Task ETA:
+  - preferred: internal call to Task module
+  - optional: tasks.eta.<taskId>
+- Task emits to frontend:
+  - task.eta.updated
+
+Option 2 (task asks route before robot executes):
+1) Task/Route computes route as part of dispatch
+- POST /api/v1/tasks/{taskId}/route (Operator) or internal call
+- Route sends robots.route.response.<robotId>
+- Task persists ETA and emits task.eta.updated
+
+
+--------------------------------------------------------
+Flow D: Traffic Closed-Loop Control (Time Windows)
+--------------------------------------------------------
+1) Robot -> Traffic (continuous feedback)
+- robots.traffic.state.<robotId>
+  - pose + velocity
+  - currentPathId/currentNodeId
+  - route progress (segment index)
+
+2) Traffic maintains reservations
+- Nodes (junctions) are exclusive:
+  - only 1 robot at a node at a time
+- Two-way paths use directional reservations:
+  - prevent head-to-head overlap
+- Reservations are time windows:
+  - [startTs, endTs] with safety margins
+ - If the robot must perform actions at a stop point:
+   - traffic reserves the node/stop window long enough to include required action time
+
+Example (no unnecessary stops):
+- Robot A reserves PATH_SEGMENT(pathId=4) for [t=3s, t=5s]
+- Robot B reserves PATH_SEGMENT(pathId=4) for [t=6s, t=8s]
+- Since windows do not overlap, Robot B should not stop.
+- Traffic can issue a speed target so Robot B arrives near t=6s smoothly.
+
+3) Traffic -> Robot (constraints)
+- robots.traffic.control.<robotId>
+  - permission to enter next node/path
+  - maxSpeedMps + targetSpeedMps
+  - reservationWindow for the next node/path
+  - actionWindow for stop points (planned dwell time)
+  - holdAtNodeId only when required
+
+4) Traffic -> Route (dynamic penalties)
+- traffic.cost.<mapVersionId>
+  - costPenaltySeconds per pathId (congestion/time-window pressure)
+- traffic.blocked.<mapVersionId>
+  - blocked pathIds/nodeIds (maintenance, deadlock resolution, teach locks)
+
+
+--------------------------------------------------------
+Flow E: Delay / Error / Offline Handling
+--------------------------------------------------------
+Robot delay:
+- Robot -> Task:
+  - robots.task.<robotId> type=taskDelayed (reasonCode + etaSeconds)
+- Traffic may also imply delay:
+  - repeated holds, shifting reservation windows
+- Task state -> DELAYED and frontend gets task.updated/task.delayed
+
+Robot error:
+- Robot -> Task:
+  - robots.task.<robotId> type=taskFailed (errorCode + message)
+- Task state -> FAILED and frontend gets task.failed
+
+Robot offline:
+- Robot module marks robot OFFLINE when lastSeenAt is stale.
+- Traffic treats last seen occupancy conservatively:
+  - denies reservations that would collide with last known position
+  - increases penalties or blocks edges until cleared
+- Task manager:
+  - marks DELAYED or FAILED based on timeout policy
+
+
+--------------------------------------------------------
+Flow F: Teach Recording (exclusive path)
+--------------------------------------------------------
+1) Operator starts teach session
+- POST /api/v1/teach/sessions
+- POST /api/v1/teach/sessions/{teachSessionId}/start
+
+2) Teach acquires exclusive lock
+- traffic.lock.acquire (scope: nodeIds/pathIds, robotId, ttl)
+- Traffic enforces lock:
+  - denies reservations for other robots that enter scope
+  - publishes traffic.blocked.<mapVersionId> updates so routing avoids scope
+
+3) Teach starts teach mode on robot
+- robots.teach.control.<robotId> type=teachStart
+
+4) Robot streams teach state
+- robots.teach.state.<robotId> at sampling rate
+- Teach persists TeachSample (optional) and builds a draft Mission (steps + requiredTimeSeconds)
+
+5) Operator stops teach
+- robots.teach.control.<robotId> type=teachStop
+- traffic.lock.release
+- Teach publishes the Mission for reuse:
+  - missionId becomes the stable reference used by Task module
+
+
+--------------------------------------------------------
+Flow G: Mission Execution (as a task)
+--------------------------------------------------------
+1) Task created with type=MISSION
+- payload includes missionId (created by Teach module)
+
+2) Task acquires lock if the mission requires exclusivity
+- mission may contain a lock scope (paths/nodes) for safe execution
+- traffic.lock.acquire (scope, robotId, ttl)
+
+3) Task dispatches mission to robot
+- robots.task.<robotId> type=taskAssign
+  - payload.taskType = MISSION
+  - payload.mission.missionId = missionId
+  - payload.mission.steps may be inlined for fast execution
+
+4) Robot executes mission and reports progress
+- robots.task.<robotId> type=taskProgress/taskDone/taskFailed/taskDelayed
+- For moveToPoint steps:
+  - robot requests route with actionsAtDestinationSeconds for that stop point
+  - traffic reserves time windows including action time
+  - route/traffic update ETA back to task state as needed
+
+5) Release lock at end
+- traffic.lock.release
+
+
+--------------------------------------------------------
+Consistency Rules (alignment checklist)
+--------------------------------------------------------
+Subjects:
+- Use robots.<domain>.<direction?>.<robotId> consistently:
+  - robots.route.request.<robotId> / robots.route.response.<robotId>
+  - robots.traffic.state.<robotId> / robots.traffic.control.<robotId>
+  - robots.teach.state.<robotId> / robots.teach.control.<robotId>
+  - robots.task.<robotId> (assign/progress/delay/fail/cancel by payload.type)
+
+Correlation:
+- Propagate one correlationId from:
+  - frontend API request -> taskId -> robot command -> progress -> traffic/route updates -> SignalR
+
+Idempotency:
+- Use messageId/commandId/taskId/missionId/executionId to safely handle JetStream redeliveries.
+
+Safety:
+- Hard constraints must always apply (especially for traffic):
+  - node capacity
+  - two-way conflict prevention
+  - maintenance blocks
+  - teach locks

@@ -1,0 +1,407 @@
+========================================================
+ROBOT CONFIG: CONNECTION + COMMUNICATION + CONTROL (BACKEND MODULE GATEWAY + NATS JETSTREAM)
+========================================================
+
+Concept Summary
+- Backend is split into modules (Task, Route, Traffic, Robot).
+- All other backend modules communicate with the Robot module only.
+- The Robot module is the single gateway that:
+  - consumes robot_config + robot state streams from robots
+  - exposes stable services/APIs to Task/Route/Traffic modules
+  - publishes commands/sync messages to robots via NATS JetStream
+- Robot runtime executes hardware control locally (motors via CAN/RS232) and publishes state back.
+
+Primary Goals
+1) Standardize a fast, safe, and scalable communication model:
+   - high-rate state signals for traffic/safety logic
+   - lower-rate diagnostics and status
+   - on-change config/identity
+2) Keep the backend architecture clean:
+   - Task/Route/Traffic never talk to robots directly
+   - all robot interaction goes through Robot module contracts
+3) Ensure reliability and clarity:
+   - idempotent messages
+   - command acks/results with correlation IDs
+   - configurable publish frequencies (configured on the robot)
+
+
+--------------------------------------------------------
+Actors
+--------------------------------------------------------
+
+Robot Runtime (on robot)
+- Owns robot_config file on disk (authoritative hardware topology + publish rates)
+- Connects to NATS with robot-scoped credentials
+- Publishes (robot -> backend):
+  - config snapshot (on boot + on change)
+  - identity (on boot + on change)
+  - fast state (position/velocity/safety state) at configured Hz
+  - status (mode, warnings, errors) at configured Hz or on change
+  - telemetry (diagnostics) at configured Hz
+  - command ack/result for every command_id
+- Subscribes (backend -> robot):
+  - command stream (task sync / route sync / motion / IO)
+- Executes locally:
+  - motors via CAN or RS232 (from io.motors.<id>.connection)
+  - sensors/estop/lidar/barcode scanner (from io.* sections)
+
+Backend Robot Module (Gateway)
+- The only backend module that touches NATS JetStream for robots
+- Responsibilities:
+  - ingest config/identity/state/status/telemetry streams
+  - persist snapshots and recent state for fast reads (traffic/route/task)
+  - expose in-process services/contracts to other backend modules:
+    - query robot capabilities/limits/topology
+    - query latest robot state for traffic logic
+    - send tasks/routes/motion commands (as requests with correlation IDs)
+  - publish commands to robot and consume ack/result
+  - push robot updates to frontend via SignalR (optional)
+
+Backend Task Module
+- Owns task lifecycle in backend (create/assign/cancel/complete)
+- Calls Robot module to:
+  - assign/sync a task to a robot
+  - cancel/pause/resume a task
+
+Backend Route Module
+- Owns route planning in backend (map graph, path planning, replans)
+- Calls Robot module to:
+  - send route plans/waypoints to a robot
+  - request route-follow actions (start/stop)
+
+Backend Traffic Module
+- Owns traffic coordination in backend (reservation, spacing, intersections)
+- Consumes latest robot state from Robot module (not directly from NATS)
+- Calls Robot module to:
+  - apply traffic constraints (slowdown/stop/hold)
+  - request motion-state transitions when needed
+
+Frontend
+- Reads robot identity/capabilities/status
+- Requests actions (commands) through backend REST
+
+
+--------------------------------------------------------
+Config Handling Rules
+--------------------------------------------------------
+
+1) Config file format on robot
+- Authoring can be JSONC (with comments) for readability.
+- Transmission to backend should be strict JSON (comments removed) using the same keys/structure.
+
+2) Versioning and hash
+- Each config includes:
+  - schema.name, schema.schema_version, schema.config_version
+- Robot runtime calculates:
+  - config_hash_sha256 over canonical JSON (stable ordering, no whitespace/comments)
+- Backend stores last seen (robot_id, schema_version, config_version, config_hash_sha256).
+
+3) Trust boundary
+- Robot config is robot-owned and published by the robot.
+- Backend never edits it; backend stores and uses it to validate/control.
+- Backend must reject config envelopes where:
+  - subject robotId != payload.robot.robot_id
+  - schema.name mismatches
+
+
+--------------------------------------------------------
+JetStream Resources (recommended)
+--------------------------------------------------------
+
+Subjects (per robot)
+- robots.config.{robotId}
+- robots.identity.{robotId}
+- robots.status.{robotId}
+- robots.state.{robotId}
+- robots.telemetry.{robotId}
+- robots.cmd.{robotId}
+- robots.cmd.ack.{robotId}
+- robots.cmd.result.{robotId}
+
+Streams
+- ROBOTS_CONFIG        (subjects: robots.config.*)
+- ROBOTS_IDENTITY      (subjects: robots.identity.*)
+- ROBOTS_STATUS        (subjects: robots.status.*)
+- ROBOTS_STATE_FAST    (subjects: robots.state.*)
+- ROBOTS_TELEMETRY     (subjects: robots.telemetry.*)
+- ROBOTS_COMMANDS      (subjects: robots.cmd.*)
+- ROBOTS_COMMAND_ACKS  (subjects: robots.cmd.ack.*)
+- ROBOTS_COMMAND_RES   (subjects: robots.cmd.result.*)
+
+Consumers (backend examples)
+- config_ingest
+- identity_ingest
+- status_ingest
+- state_fast_ingest
+- telemetry_ingest
+- cmd_ack_ingest
+- cmd_result_ingest
+
+Delivery semantics:
+- Use at-least-once for all robot->backend streams.
+- Make robot->backend messages idempotent by including:
+  - robot_id
+  - message_id (uuid)
+  - emitted_at (timestamp)
+  - optional monotonic seq per topic
+
+
+--------------------------------------------------------
+Message Envelopes (recommended)
+--------------------------------------------------------
+
+Common envelope fields (robot -> backend topics)
+{
+  "schema": { "name": "skylink.robot_message", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "message_id": "0a9d4a9b-3a3c-4ee0-9d7c-0a9a7a7f4d3b",
+  "emitted_at": "2026-02-06T12:34:56.789Z",
+  "payload": { }
+}
+
+Config snapshot payload (robots.config.{robotId})
+{
+  "schema": { "name": "skylink.robot_message", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "message_id": "...",
+  "emitted_at": "...",
+  "payload": {
+    "config_schema": { "name": "skylink.robot_config", "schema_version": "1.0.0", "config_version": "2026-02-06" },
+    "config_hash_sha256": "HEX_OR_BASE64",
+    "config": { ... robot_config_standard ... }
+  }
+}
+
+Fast state payload (robot -> backend) (robots.state.{robotId})
+- Use only for high-rate signals needed by traffic/safety logic (position/velocity/safety state).
+- Frequency is configured on the robot via robot_config.runtime.comms.publish_rates_hz.state_fast.
+- Backend should treat this as "latest state", not a history database.
+{
+  "schema": { "name": "skylink.robot_state_fast", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "emitted_at": "2026-02-06T12:34:56.020Z",
+  "seq": 123456,
+  "payload": {
+    "pose": { "x_m": 12.345, "y_m": 6.789, "yaw_deg": 90.0 },
+    "twist": { "vx_mps": 0.80, "vy_mps": 0.00, "wz_dps": 0.0 },
+    "motion_state": "MOVING",
+    "safety_state": { "estop_active": false, "protective_stop": false }
+  }
+}
+
+Command request (backend -> robot) (robots.cmd.{robotId})
+- The Robot module is the only publisher of robots.cmd.* from the backend.
+- Other backend modules request actions by calling Robot module services.
+{
+  "schema": { "name": "skylink.robot_command", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "command_id": "e2fdc6f0-6be2-4bf5-a6fe-7d4caa6a915d",
+  "requested_at": "2026-02-06T12:35:10.000Z",
+  "requested_by": { "type": "user", "user_id": "..." },
+  "type": "motor.set_velocity",
+  "targets": {
+    "motor_id": "M_DRIVE_L",
+    "application": "drive"
+  },
+  "params": {
+    "velocity_mps": 1.0,
+    "accel_mps2": 0.8
+  }
+}
+
+Command ack/progress (robot -> backend) (robots.cmd.ack.{robotId})
+{
+  "schema": { "name": "skylink.robot_command_ack", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "command_id": "e2fdc6f0-6be2-4bf5-a6fe-7d4caa6a915d",
+  "emitted_at": "2026-02-06T12:35:10.050Z",
+  "status": "ACCEPTED",
+  "details": { "estimated_ms": 2000 }
+}
+
+Command result (robot -> backend) (robots.cmd.result.{robotId})
+{
+  "schema": { "name": "skylink.robot_command_result", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "command_id": "e2fdc6f0-6be2-4bf5-a6fe-7d4caa6a915d",
+  "emitted_at": "2026-02-06T12:35:12.200Z",
+  "status": "COMPLETED",
+  "result": { "final_velocity_mps": 1.0 }
+}
+
+
+--------------------------------------------------------
+Connection + Handshake Flow
+--------------------------------------------------------
+
+Robot boot:
+1) Robot runtime loads local robot_config (JSON/JSONC -> internal model).
+2) Robot runtime connects to NATS using robot-scoped credentials.
+3) Robot runtime publishes:
+   - robots.identity.{robotId} (basic identity + versions)
+   - robots.config.{robotId} (full config snapshot + hash)
+   - robots.status.{robotId} (initial state: idle/ready/faulted)
+4) Robot runtime starts periodic publishing:
+   - robots.state.{robotId} (fast state signals; frequency from robot_config)
+   - robots.telemetry.{robotId} (slower diagnostics; frequency from robot_config)
+   - robots.status.{robotId} (state changes or periodic heartbeat; frequency from robot_config)
+
+Backend startup:
+1) Backend ensures JetStream streams + durable consumers exist.
+2) Backend consumers ingest identity/config/status/telemetry and store snapshots.
+3) Robot module builds per-robot derived models from config:
+   - capability snapshot (what the robot can do)
+   - IO topology (motors/sensors present)
+   - limits (speed/accel caps per motor/application)
+   - state mapping rules (motor application domains)
+4) Robot module exposes derived models + latest state to Task/Route/Traffic modules.
+5) Robot module can push updates to frontend via SignalR groups (optional):
+   - fleet group for list overview
+   - robot:{robotId} group for detail views
+
+Config update:
+- When robot_config changes on robot:
+  - robot increments schema.config_version (or writes a new version stamp)
+  - robot re-computes config_hash_sha256
+  - robot publishes a new robots.config.{robotId} snapshot
+- Backend compares hashes; if changed:
+  - persist new snapshot
+  - invalidate cached derived models for that robot
+
+
+--------------------------------------------------------
+Robot Module Gateway: How Backend Controls Robots
+--------------------------------------------------------
+
+Core rule
+- Task/Route/Traffic modules must never publish to NATS robot subjects.
+- They call Robot module functions; Robot module publishes to robots.cmd.* and consumes ack/result.
+
+Robot module: read path (robot -> backend)
+- Ingest:
+  - robots.config (topology + publish rates)
+  - robots.state (fast state for traffic/safety)
+  - robots.status (state, warnings, errors)
+  - robots.telemetry (diagnostics)
+- Store:
+  - config/identity snapshots (versioned)
+  - latest state/status per robot (fast in-memory cache + optional DB snapshot)
+- Serve:
+  - GetRobotConfig(robotId)
+  - GetRobotCapabilities(robotId)
+  - GetRobotLatestState(robotId)   (traffic uses this)
+  - GetRobotLatestStatus(robotId)
+
+Robot module: write path (backend -> robot)
+- Provide services used by other backend modules:
+  - Task module -> Robot module:
+    - AssignTask(robotId, taskEnvelope)
+    - CancelTask(robotId, taskId)
+    - PauseTask(robotId, taskId) / ResumeTask(robotId, taskId)
+  - Route module -> Robot module:
+    - SyncRoute(robotId, routeEnvelope)
+    - StartRoute(robotId, routeId) / StopRoute(robotId, routeId)
+  - Traffic module -> Robot module:
+    - ApplyTrafficConstraint(robotId, constraintEnvelope) (slow/stop/hold)
+    - ClearTrafficConstraint(robotId, constraintId)
+  - Low-level motion/IO (when required):
+    - SetVelocity(robotId, vx, wz, accel)
+    - MotorCommand(robotId, motorId, application, params)
+
+Robot module command validation (before publish)
+Given robot_config for RB-0001:
+1) Validate robot is enabled for control (backend-owned metadata).
+2) Validate required capability is enabled (capabilities.*.enabled).
+3) Validate targets exist:
+   - motor_id exists in io.motors (if applicable)
+   - application matches io.motors[motor_id].application (if provided)
+4) Validate parameter limits using config:
+   - velocity <= io.motors[motor_id].limits.max_speed_mps (or derived per application)
+   - accel <= io.motors[motor_id].limits.max_accel_mps2
+5) Publish robots.cmd.{robotId} with command_id, type, targets, params.
+6) Await ack/result from robots.cmd.ack / robots.cmd.result.
+
+Robot command execution (after receive)
+1) Robot runtime receives robots.cmd.{robotId} from JetStream.
+2) Robot runtime validates again against local config (defense in depth).
+3) Robot runtime emits robots.cmd.ack.{robotId}:
+   - ACCEPTED or REJECTED with reason codes (invalid target, out of range, estop active)
+4) Robot runtime executes by controlling hardware:
+   - For CAN motor:
+     - look up io.motors[motor_id].connection: { type:"can", bus, node_id }
+     - use io.interfaces.can.buses[bus] defaults (bitrate, protocol)
+     - send command frames to motor controller
+   - For RS232 motor:
+     - look up io.motors[motor_id].connection: { type:"rs232", port }
+     - use io.interfaces.rs232.ports[port] defaults (baud/parity/etc)
+     - write serial command bytes
+5) Robot runtime emits robots.cmd.result.{robotId} when complete or failed.
+
+
+--------------------------------------------------------
+State + Fault Mapping (why motor.application matters)
+--------------------------------------------------------
+
+Robot publishes faults with explicit source references:
+{
+  "schema": { "name": "skylink.robot_status", "version": "1.0.0" },
+  "robot_id": "RB-0001",
+  "emitted_at": "...",
+  "payload": {
+    "health": "WARNING",
+    "faults": [
+      {
+        "code": "over_current",
+        "severity": "ERROR",
+        "source": { "type": "motor", "motor_id": "M_HOIST", "application": "hoist" }
+      }
+    ]
+  }
+}
+
+Backend derives robot state domains using config.state_model.motor_application_to_state_domain:
+- hoist motor fault -> hoist domain warning/error
+- drive motor fault -> mobility domain warning/error
+
+This keeps UI behavior consistent across different robot models even when motor IDs differ.
+
+
+--------------------------------------------------------
+Operational Notes
+--------------------------------------------------------
+
+Tiered frequencies (recommended)
+- Configure per-topic publish rates on the robot (robot_config.runtime.comms.publish_rates_hz).
+- Typical pattern:
+  - robots.state.{robotId}: 20–100 Hz (position/velocity/motion/safety state)
+  - robots.status.{robotId}: 1–5 Hz (discrete state, errors, warnings, mode)
+  - robots.telemetry.{robotId}: 1–20 Hz (battery, temps, motor feedback, sensor health)
+  - robots.identity / robots.config: on boot + on change (or very low rate)
+
+JetStream retention for high-rate state
+- Keep ROBOTS_STATE_FAST retention short to avoid unbounded storage:
+  - max_age in seconds/minutes
+  - max_msgs_per_subject small (keep only recent history)
+- Backend and traffic modules should operate on latest state, not on full history.
+
+Command timeouts:
+- Backend marks command TIMEOUT if no ack within N ms or no result within T ms.
+- Robot should still publish a late result; backend can reconcile by command_id.
+
+Idempotency:
+- If robot receives the same command_id again, it should not execute twice.
+- Store recently seen command_ids in robot runtime (bounded cache).
+
+Connectivity:
+- Backend uses status heartbeats to mark lastSeenAt and online/offline.
+- Robot should publish status periodically even if telemetry is stopped.
+
+Security (minimum):
+- Robot NATS credentials restricted to its own subjects:
+  - publish: robots.config.{robotId}, robots.identity.{robotId}, robots.status.{robotId}, robots.telemetry.{robotId}, robots.cmd.ack.{robotId}, robots.cmd.result.{robotId}
+  - subscribe: robots.cmd.{robotId}
+
+Backend NATS access rule:
+- Only the Robot module holds NATS publish permissions for:
+  - robots.cmd.*
+- Other backend modules have no NATS capability and must call Robot module APIs.

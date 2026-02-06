@@ -103,6 +103,18 @@ public sealed class MapsController : ControllerBase
         return ok ? Ok(new { ok = true }) : NotFound();
     }
 
+    [Authorize(Policy = AuthorizationPolicies.Operator)]
+    [HttpPost(ApiRoutes.Maps.Activate)]
+    public async Task<IActionResult> ActivatePublishedVersion(
+        Guid mapId,
+        Guid mapVersionId,
+        [FromServices] MapManagementService maps,
+        CancellationToken ct)
+    {
+        var ok = await maps.SetActivePublishedVersionAsync(mapId, mapVersionId, ct);
+        return ok ? Ok(new { ok = true }) : NotFound();
+    }
+
     [HttpGet(ApiRoutes.Maps.Nodes)]
     public async Task<IActionResult> ListNodes(
         Guid mapId,

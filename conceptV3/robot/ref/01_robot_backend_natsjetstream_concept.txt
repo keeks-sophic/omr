@@ -1,0 +1,238 @@
+========================================================
+ROBOT CONCEPT: NATS JETSTREAM COMMUNICATION WITH BACKEND
+========================================================
+
+Goal:
+- Define how a robot communicates with ConceptV3 backend modules using NATS JetStream.
+- Allow robot-side self-configuration before start, then initialize backend state by reporting settings.
+- Keep robot settings in one local file for easy setup and consistent reporting.
+
+
+--------------------------------------------------------
+Robot Local Settings (single file)
+--------------------------------------------------------
+Recommended file:
+- robot_config.json
+
+Intent:
+- Robot reads robot_config.json before connecting to NATS.
+- Robot applies the configuration to its own controllers (limits, IO mapping).
+- Robot publishes the same configuration to backend so backend can initialize Robot and Settings records.
+
+Recommended fields (concept):
+- robotId (string)
+- displayName (string)
+- vendor (string?)
+- model (string?)
+- firmwareVersion (string?)
+- plc:
+  - enabled (bool)
+  - endpoint (string?)                      // tcp/ip or vendor uri
+  - connectTimeoutMs (int?)
+  - pollHz (number?)                        // recommended 10..50
+  - useMockWhenDisconnected (bool)          // true => generate mock data
+- capabilities:
+  - hasHoist (bool)
+  - hasTelescope (bool)
+  - hasRotate (bool)
+  - hasGrip (bool)
+- settings:
+  - schemaVersion (int)
+  - limitsJson (object)                      // includes per-motor accel/decel limits
+  - ioConfigJson (object?)                   // optional
+- motors:
+  - move:
+    - accelLimitMps2 (number)
+    - decelLimitMps2 (number)
+  - hoist:
+    - accelLimitMps2 (number)
+    - decelLimitMps2 (number)
+  - telescope:
+    - accelLimitMps2 (number)
+    - decelLimitMps2 (number)
+  - rotate:
+    - accelLimitDegPerSec2 (number)
+    - decelLimitDegPerSec2 (number)
+  - grip:
+    - accelLimitMmPerSec2 (number)
+    - decelLimitMmPerSec2 (number)
+- startupPolicy:
+  - settingsBootstrapMode (string)           // ROBOT_WINS | BACKEND_WINS
+  - trafficStateHz (number)                 // recommended 5..10
+  - statusReportHz (number)                 // recommended 1
+
+NATS connection (do not embed secrets into the file):
+- nats:
+  - servers (string[])
+  - credsFilePath (string)                  // or hardware-secure store reference
+  - clientName (string?)
+
+
+--------------------------------------------------------
+Message Envelope (shared pattern)
+--------------------------------------------------------
+Rule:
+- Robot publishes and consumes versioned messages.
+
+Recommended envelope (concept):
+{
+  "schemaVersion": 1,
+  "type": "string",
+  "robotId": "RBT-001",
+  "messageId": "uuid",
+  "ts": "2026-01-21T00:00:00Z",
+  "correlationId": "uuid?",
+  "payload": { }
+}
+
+
+--------------------------------------------------------
+Startup / Init Flow (robot initializes backend)
+--------------------------------------------------------
+1) Robot boot
+- Load robot_config.json.
+- Apply limitsJson and ioConfigJson locally.
+- Start PLC connection:
+  - if plc.enabled=true and PLC is connected: use PLC data
+  - else: use mock data (if useMockWhenDisconnected=true)
+- Connect to NATS JetStream using robot credentials.
+
+2) Initialize backend Robot record (Module 06)
+- Publish robots.identity.<robotId>:
+  - includes vendor/model/firmwareVersion and capability booleans.
+- Publish robots.settings.report.<robotId>:
+  - includes settings.schemaVersion, limitsJson, ioConfigJson (if any).
+- Publish robots.status.<robotId>:
+  - initial mode/status/estop/error/battery and map association if known.
+  - initial motor states summary if available.
+
+3) Bootstrap policy (settingsBootstrapMode)
+- ROBOT_WINS:
+  - backend stores reported settings as both reported and desired for this boot session.
+  - backend does not override unless operator explicitly changes settings later.
+- BACKEND_WINS:
+  - backend may publish robots.settings.apply.<robotId> with desired settings.
+  - robot applies and then reports again to converge.
+
+4) Begin runtime loops
+- Start publishing traffic state at configured Hz.
+- Publish telemetry/status on-change and at minimum heartbeat rates.
+- Subscribe to module control subjects (task/traffic/teach/settings apply).
+- Poll PLC at plc.pollHz (when enabled) and update:
+  - motor states
+  - estop state
+  - scanner events (if PLC provides them)
+
+
+--------------------------------------------------------
+Module-by-Module Communication (NATS JetStream)
+--------------------------------------------------------
+Module 06: ROBOT (connectivity + canonical state + settings)
+Robot -> Backend:
+- robots.identity.<robotId>                 // boot + on-change
+- robots.status.<robotId>                   // ~1 Hz and on-change
+- robots.telemetry.<robotId>                // UI-throttled, typically 1..2 Hz
+- robots.alarm.<robotId>                    // on events
+- robots.cmd.ack.<robotId>                  // ack for commandId-based controls
+- robots.settings.report.<robotId>          // on boot and after apply
+- robots.settings.ack.<robotId>             // ack for settings apply/reset
+Backend -> Robot:
+- robots.cmd.<robotId>                      // optional generic commands
+- robots.settings.apply.<robotId>           // when backend wants robot to change settings
+- robots.settings.reset.<robotId>           // motor-reset/io-reset
+
+Robot status and motor state rule (concept):
+- Each motor has state:
+  - OFF | RUNNING | ERROR
+- Robot computes one consolidated robot status for all modules:
+  - status:
+    - RUNNING: robot can move and accept traffic constraints
+    - WARNING: robot can move, but one or more non-move motors are in ERROR
+    - PAUSED: robot is online but motion is blocked (safety stop / hold)
+    - ERROR: robot is online but cannot move due to critical fault (move motor ERROR)
+    - OFFLINE: robot cannot be controlled (no PLC + no mock, or robot intentionally offline)
+  - Mapping rule (robot-side):
+    - if plc.enabled=true and PLC not connected and useMockWhenDisconnected=false => status=OFFLINE
+    - else if move motor state=ERROR => status=ERROR
+    - else if estop=true OR safetyStopActive=true => status=PAUSED
+    - else if any non-move motor state=ERROR => status=WARNING
+    - else => status=RUNNING
+- Safety event rule:
+  - When estop is pressed OR lidar detects obstacle (safety stop):
+    - robot must stop locally immediately (PLC stop output)
+    - robot must update its state fields and publish robots.status.<robotId> immediately (do not wait for 1 Hz)
+    - recommended status fields:
+      - estop=true when physical estop pressed
+      - safetyStopActive=true and safetyStopReason=ESTOP|OBSTACLE
+      - obstacleDetected=true when lidar stop is active
+      - status=PAUSED
+  - When safety stop clears:
+    - publish robots.status.<robotId> immediately with updated flags
+- Motor errors can be reset:
+  - backend -> robot: robots.cmd.<robotId> { type: "resetMotorError", motor: "move|hoist|telescope|rotate|grip" }
+  - robot -> backend: robots.cmd.ack.<robotId> for the reset commandId
+
+Module 07: TASK (dispatch + lifecycle + ETA)
+Robot <- Backend:
+- robots.task.<robotId>
+  - taskAssign                             // MOVE_TO_POINT or MISSION
+  - taskCancel
+Robot -> Backend:
+- robots.task.<robotId>
+  - taskProgress
+  - taskDelayed
+  - taskFailed
+  - taskDone
+
+Module 08: ROUTE (planning + ETA)
+Robot -> Backend:
+- robots.route.request.<robotId>            // per route need, reroute, or preview request
+Backend -> Robot:
+- robots.route.response.<robotId>           // computed route segments + etaSecondsTotal
+
+Module 09: TRAFFIC (safety + time-window control + route feedback)
+Robot -> Backend:
+- robots.traffic.state.<robotId>            // closed-loop feedback, recommended 5..10 Hz
+Backend -> Robot:
+- robots.traffic.control.<robotId>          // constraints, recommended 5..10 Hz or publish-on-change + keepalive
+
+Module 10: TEACH (mission authoring + reusable execution)
+Robot <- Backend:
+- robots.teach.control.<robotId>
+  - teachStart / teachStop / teachSetMode
+  - teachReplayMission / teachPause / teachResume / teachCancel
+Robot -> Backend:
+- robots.teach.state.<robotId>              // teach mode + actuator states + replay progress
+
+
+--------------------------------------------------------
+Recommended Frequencies (robot-side defaults)
+--------------------------------------------------------
+Traffic closed loop:
+- robots.traffic.state.<robotId>: 5..10 Hz
+- robots.traffic.control.<robotId>: 5..10 Hz or publish-on-change + 1 Hz keepalive
+
+Robot status/telemetry:
+- robots.status.<robotId>: 1 Hz and on-change
+- robots.telemetry.<robotId>: 1..2 Hz for UI (high-rate sensors remain local)
+- robots.alarm.<robotId>: event-driven
+
+Task progress:
+- robots.task.<robotId> progress: 2..5 Hz while moving or executing steps, and on state transitions
+
+Settings:
+- robots.settings.report.<robotId>: once on boot, and after any successful apply/reset
+
+
+--------------------------------------------------------
+Safety and Reliability Rules
+--------------------------------------------------------
+Idempotency:
+- Include messageId and correlationId/commandId so backend can deduplicate.
+
+Freshness:
+- Include ts in each message; backend uses lastSeenAt and timeouts to mark OFFLINE.
+
+Backpressure:
+- Prefer fixed publish rates and lightweight payloads for high-frequency subjects (traffic.state).
+- Use event-driven updates for alarms and settings.

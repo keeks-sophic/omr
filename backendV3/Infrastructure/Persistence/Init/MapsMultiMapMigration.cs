@@ -197,7 +197,9 @@ WHERE mv."MapVersionId" = r."MapVersionId";
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_MapId_Status" ON maps.map_versions ("MapId", "Status");""", ct);
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_CreatedAt" ON maps.map_versions ("CreatedAt");""", ct);
         await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_PublishedAt" ON maps.map_versions ("PublishedAt");""", ct);
-        await ExecuteAsync(conn, """CREATE UNIQUE INDEX IF NOT EXISTS "IX_map_versions_MapId_PublishedUnique" ON maps.map_versions ("MapId") WHERE "Status" = 'PUBLISHED';""", ct);
+        await ExecuteAsync(conn, """DROP INDEX IF EXISTS maps."IX_map_versions_MapId_PublishedUnique";""", ct);
+        await ExecuteAsync(conn, """DROP INDEX IF EXISTS maps."IX_map_versions_MapId";""", ct);
+        await ExecuteAsync(conn, """CREATE INDEX IF NOT EXISTS "IX_map_versions_MapId_Published" ON maps.map_versions ("MapId") WHERE "Status" = 'PUBLISHED';""", ct);
     }
 
     private static async Task UpdateMapsPointersAsync(NpgsqlConnection conn, bool hasName, bool hasIsActive, CancellationToken ct)

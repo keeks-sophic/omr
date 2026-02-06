@@ -1,0 +1,286 @@
+========================================================
+ROBOT SIMULATION 03: SIMULATION MODULE (MOCK MODE)
+========================================================
+
+Goal:
+- Describe how the robot-side simulation (MOCK mode) works when not connected to real hardware.
+- Keep the simulation implementation modular and easy to maintain.
+- Ensure simulated behavior uses the same config model and message contracts as REAL mode.
+
+Scope:
+- Simulation is a driver-layer replacement used when runtime.mode=MOCK.
+- Simulation must support:
+  - drive motors (navigation motion + pose integration)
+  - functional motors (actuators)
+  - IO points and device sensors (estop, limit sensors, lidar, barcode scanner, etc.)
+  - fault injection and scenario scripting
+- Simulation does NOT change messaging rules:
+  - still publishes robot.* streams to backend via NATS JetStream
+  - still consumes robot.* commands/settings from backend
+
+
+--------------------------------------------------------
+Concept (where simulation lives)
+--------------------------------------------------------
+
+Design rule:
+- The robot runtime core is hardware-agnostic.
+- Hardware-specific behavior is isolated behind drivers:
+  - Motors: IMotorDriver
+  - IO: IIoDriver
+  - Devices (sensors): ISensorDriver
+
+Mode switch:
+- runtime.mode = REAL:
+  - buildDriverGraph creates PLC/CAN/SERIAL drivers as configured.
+- runtime.mode = MOCK:
+  - buildDriverGraph creates Mock* drivers.
+  - Real driver configs may still be present in robot_config.json, but are ignored.
+
+Single-source configuration:
+- Simulation uses the same robot_config.json model:
+  - motors[] defines all axes
+  - io.digitalInputs/digitalOutputs/devices define available signals
+  - limits define constraints used by simulated motion
+  - streams define publish rates
+
+
+--------------------------------------------------------
+Simulation Responsibilities (what is simulated)
+--------------------------------------------------------
+
+1) Drive simulation (navigation)
+- Inputs:
+  - velocity commands (or target pose commands) produced by CommandExecutor
+  - drive motor limits (maxSpeed/maxAcceleration/maxDeceleration)
+  - kinematics parameters from dimensions (wheelBase/trackWidth if provided)
+- Outputs:
+  - simulated drive motor status (mode, velocity, position)
+  - simulated pose and velocity (odometry)
+- Model:
+  - clamp command velocity by limits
+  - apply acceleration limits over time (slew-rate)
+  - integrate velocity into pose using kinematics
+
+2) Functional motor simulation (actuators)
+- Inputs:
+  - commands targeting a specific functional motorId (functionKey identifies purpose)
+  - per-motor limits (speed/acceleration and position bounds)
+- Outputs:
+  - motor position/velocity feedback
+  - completion conditions (reached target, timeouts)
+- Model:
+  - target-driven axis integrator:
+    - move toward target position with speed/accel constraints
+    - stop when within tolerance
+
+3) IO simulation (digital inputs/outputs)
+- Inputs:
+  - runtime outputs (e.g., motor_enable)
+  - simulated robot state (pose, axis positions)
+  - scenario script and fault injection settings
+- Outputs:
+  - estop pressed state
+  - limit switch states derived from axis bounds
+  - traffic hold signal (if modeled as IO) or internal state
+
+4) Device simulation (lidar, barcode scanner)
+- Lidar:
+  - outputs obstacleDetected and nearestObstacleMeters based on scenario obstacles
+  - triggers safety stop based on configured stop distance
+- Barcode scanner:
+  - emits scan events according to scripted markers or a virtual map
+  - optionally corrects pose if localization fusion is enabled
+
+
+--------------------------------------------------------
+Simulation Profile (scenario injection)
+--------------------------------------------------------
+
+Purpose:
+- Make simulation deterministic and repeatable without hardcoding behavior.
+
+Recommended config extension (concept):
+- runtime:
+  - simulationProfile:
+    - profileName: string
+    - randomSeed: int?
+    - initialState:
+      - pose: { x, y, yaw }
+      - batteryPercent: double
+    - world:
+      - obstacles: [{ id, shape, x, y, radiusMeters? }]
+      - barcodeMarkers: [{ code, x, y, yaw?, type? }]
+    - faultInjection:
+      - rules: [
+          { trigger: "AFTER_SECONDS", value: 30, target: "motor:act_1", faultCode: "SIM_FAULT" },
+          { trigger: "ON_COMMAND", value: "MOVE_TO_POSE", target: "drive", probability: 0.05 }
+        ]
+    - ioOverrides:
+      - estopScript: [{ atSeconds: 10, pressed: true }, { atSeconds: 12, pressed: false }]
+      - limitSensorNoise: { enabled: false }
+
+Determinism rule:
+- When randomSeed is set, all random behaviors (noise, probability faults) become repeatable.
+
+
+--------------------------------------------------------
+Simulation Data Structures (internal)
+--------------------------------------------------------
+
+SimClock:
+- now
+- dt
+
+SimWorld:
+- obstacles[]
+- markers[]
+- boundaries[] (optional)
+
+SimRobotState:
+- pose (x,y,yaw)
+- velocity (linear, angular)
+- motors:
+  - by motorId: { position, velocity, mode, fault? }
+- io:
+  - by ioId: { value }
+- health:
+  - natsConnected
+  - simulatedHardwareOk (bool)
+
+SimScenarioEngine:
+- scripts:
+  - estop timeline
+  - obstacle timeline (spawn/move)
+  - barcode events timeline
+  - fault injection rules
+
+
+--------------------------------------------------------
+Execution Flow (MOCK mode)
+--------------------------------------------------------
+
+Startup:
+1) load robot_config.json
+2) validate config
+3) if runtime.mode == MOCK:
+  - load simulationProfile (optional; default profile if missing)
+  - initialize SimWorld and SimRobotState
+  - instantiate MockMotorDriver/MockIoDriver/MockDeviceDriver with:
+    - motor definitions + limits
+    - IO definitions
+    - simulation profile and world
+4) connect to NATS JetStream
+5) start normal modules:
+  - RobotCoreModule
+  - SettingsModule
+  - TaskCommModule
+  - TrafficCommModule
+  - RouteCommModule
+
+Runtime:
+- The main loop runs at tickHz.
+- Each tick:
+  - apply inbound commands/settings (same as REAL)
+  - simulate motor/IO/device updates
+  - compute status and faults
+  - publish streams at configured rates (heartbeat/state/telemetry/traffic)
+
+Shutdown:
+- stop schedulers
+- publish final status event (optional)
+- close NATS connection
+
+
+--------------------------------------------------------
+Pseudocode (simulation tick)
+--------------------------------------------------------
+
+SimRuntime.tick(dt):
+  scenarioEngine.advance(dt)
+
+  inbound = comm.drainInbox()
+  for msg in inbound:
+    routeInbound(msg)                       // same as REAL
+
+  commandExecutor.advance(dt)               // same as REAL (produces desired motor outputs)
+
+  for motor in motors:
+    motor.simulateStep(dt, desiredOutputsFor(motor))
+
+  for io in ioPoints:
+    io.simulateStep(dt, simRobotState, scenarioEngine)
+
+  for device in devices:
+    device.simulateStep(dt, simWorld, simRobotState, scenarioEngine)
+
+  safetyManager.update(io, devices)
+  if safetyManager.stopRequired:
+    commandExecutor.forceStop()
+
+  odometryIntegrator.updateFromDriveMotors(dt)
+  statusCalculator.update(motorHealth, safetyState, connectivity)
+
+  streamPublisher.publishIfDue()
+
+
+--------------------------------------------------------
+What to publish in MOCK (visibility to backend)
+--------------------------------------------------------
+
+Robot state payload should include a simulation marker:
+- telemetry.stateJson may include:
+  - runtimeMode: "MOCK"
+  - simulationProfileName
+
+Recommended event on boot:
+- robot.{robotId}.events:
+  - type: "simulation.started"
+  - profileName
+  - seed?
+
+Reason:
+- Backend operators can clearly see that the robot is simulated, not real.
+
+
+--------------------------------------------------------
+File Structure (maintainable simulation module)
+--------------------------------------------------------
+
+Aligned with ROBOT RUNTIME 02 planned structure, but simulation is isolated:
+
+robot/
+  src/
+    Simulation/
+      Profiles/
+        SimulationProfile.cs
+        SimulationProfileLoader.cs
+      World/
+        SimWorld.cs
+        ObstacleModel.cs
+        MarkerModel.cs
+      Engine/
+        SimClock.cs
+        SimScenarioEngine.cs
+        FaultInjector.cs
+      Drivers/
+        Motors/
+          MockMotorDriver.cs
+          DriveMotorSimulation.cs
+          FunctionalMotorSimulation.cs
+        Io/
+          MockIoDriver.cs
+          IoSimulationRules.cs
+        Devices/
+          MockDeviceDriver.cs
+          LidarSimulation.cs
+          BarcodeSimulation.cs
+      Diagnostics/
+        SimulationTelemetry.cs
+        SimulationEventFactory.cs
+
+Rule:
+- Simulation code must not be mixed into Task/Traffic/Route modules.
+- Task/Traffic/Route modules remain comm and orchestration; simulation remains driver + scenario engine.
+- REAL drivers remain under Hardware/*/Drivers, MOCK drivers live under Simulation/Drivers.
+

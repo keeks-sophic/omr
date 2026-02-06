@@ -1,0 +1,351 @@
+========================================================
+ROBOT CONFIG STANDARD (JSONC TEMPLATE)
+========================================================
+
+Purpose
+- This file defines the standard robot_config shape used across the app.
+- The app should parse this config and convert it into internal data models.
+
+Editing rules (keep consistent for all robots)
+1) Keep IDs stable:
+   - robot_id
+   - each io.motors.<MOTOR_ID>
+   - each io.sensors.<SENSOR_ID>
+   - each io.lidars.<LIDAR_ID>
+   - each io.barcode_scanners.<SCANNER_ID>
+2) Do NOT rename motor "application":
+   - The app uses motor.application to map motor faults -> robot state warnings/errors.
+3) Motors are controlled directly by the app via CAN or RS232:
+   - io.motors.<id>.connection.type must be "can" or "rs232"
+   - keep io.interfaces (bus/port defaults) aligned with what you wire
+4) Units are explicit in field names:
+   - _mm, _kg, _mps, _mps2, _deg, _hz, _v, _a
+5) This template uses JSONC comments (// and /* */) for readability.
+   - If you need strict JSON, remove comments and keep the same keys/structure.
+
+Allowed motor applications (standard enum)
+- drive
+- turn
+- hoist
+- telescoping
+- grip
+- rotate
+
+========================================================
+robot_config (JSONC)
+========================================================
+
+{
+  "schema": {
+    "name": "skylink.robot_config",
+    "schema_version": "1.0.0",
+    "config_version": "2026-02-06",
+    "format": "jsonc"
+  },
+
+  "runtime": {
+    "comms": {
+      "transport": "nats_jetstream",
+      "topics": {
+        "config": "robots.config.{robotId}",
+        "identity": "robots.identity.{robotId}",
+        "status": "robots.status.{robotId}",
+        "state_fast": "robots.state.{robotId}",
+        "telemetry": "robots.telemetry.{robotId}",
+        "cmd": "robots.cmd.{robotId}",
+        "cmd_ack": "robots.cmd.ack.{robotId}",
+        "cmd_result": "robots.cmd.result.{robotId}"
+      },
+
+      "publish_rates_hz": {
+        "state_fast": 50,
+        "telemetry": 10,
+        "status": 2,
+        "identity": 0.1,
+        "config": 0
+      },
+
+      "state_fast_fields": [
+        "pose",
+        "twist",
+        "motion_state",
+        "safety_state"
+      ],
+
+      "telemetry_fields": [
+        "battery",
+        "temperatures",
+        "motor_feedback",
+        "sensor_health",
+        "network"
+      ]
+    }
+  },
+
+  "robot": {
+    "robot_id": "RB-0001",
+    "robot_type": "amr_forklift",
+    "vendor": "Skylink",
+    "model": "AMR-FK-500",
+    "hardware_revision": "A",
+    "serial_number": "SN-EXAMPLE-001",
+    "display_name": "Forklift-01",
+    "versions": {
+      "firmware": "1.2.3",
+      "software": "3.4.5"
+    }
+  },
+
+  "specs": {
+    "dimensions_mm": { "length": 1100, "width": 800, "height": 350 },
+    "weight_kg": 180,
+    "load_capacity_kg": 500,
+
+    // Recommended for navigation + safety logic
+    "footprint_polygon_mm": [
+      [550, 400],
+      [550, -400],
+      [-550, -400],
+      [-550, 400]
+    ],
+
+    "kinematics": {
+      "drive_type": "differential",
+      "wheel_diameter_mm": 200,
+      "track_width_mm": 620,
+      "wheelbase_mm": 520,
+      "max_slope_deg": 5
+    }
+  },
+
+  "capabilities": {
+    // Keep capability objects present for stable parsing (set enabled=false if not installed).
+    "hoist": {
+      "enabled": true,
+      "stroke_mm": 300,
+      "max_load_kg": 500,
+      "home_sensor_id": "S_HOIST_HOME",
+      "motor_ids": ["M_HOIST"]
+    },
+    "telescopic": {
+      "enabled": true,
+      "max_extension_mm": 600,
+      "stages": 2,
+      "home_sensor_id": "S_TELE_HOME",
+      "motor_ids": ["M_TELE"]
+    },
+    "rotate": {
+      "enabled": true,
+      "range_deg": 360,
+      "max_speed_dps": 90,
+      "home_sensor_id": "S_ROT_HOME",
+      "motor_ids": ["M_ROTATE"]
+    },
+    "grip": {
+      "enabled": true,
+      "max_force_n": 1200,
+      "jaw_stroke_mm": 120,
+      "open_sensor_id": "S_GRIP_OPEN",
+      "close_sensor_id": "S_GRIP_CLOSE",
+      "motor_ids": ["M_GRIP"]
+    }
+  },
+
+  "io": {
+    "controlled_by": "app",
+
+    // Interfaces define bus/port defaults so devices can be shorter and scale cleaner.
+    "interfaces": {
+      "can": {
+        "buses": {
+          "can0": { "bitrate": 500000, "protocol": "canopen" }
+        }
+      },
+      "rs232": {
+        "ports": {
+          "COM5": { "baud": 115200, "parity": "none", "data_bits": 8, "stop_bits": 1, "flow_control": "none" },
+          "COM7": { "baud": 115200, "parity": "none", "data_bits": 8, "stop_bits": 1, "flow_control": "none" }
+        }
+      },
+      "gpio": {
+        "channels": {
+          "DIN_01": { "direction": "input" },
+          "DIN_02": { "direction": "input" },
+          "DIN_03": { "direction": "input" },
+          "DIN_04": { "direction": "input" },
+          "DIN_05": { "direction": "input" },
+          "DIN_ESTOP": { "direction": "input" }
+        }
+      }
+    },
+
+    // Devices are keyed by ID for easy lookup and stable app data models.
+    "motors": {
+      "M_DRIVE_L": {
+        "name": "Left drive motor",
+        "application": "drive",
+        "connection": { "type": "can", "bus": "can0", "node_id": 1 },
+        "limits": { "max_speed_mps": 2.0, "max_accel_mps2": 1.0, "max_decel_mps2": 1.2 },
+        "control": { "mode": "velocity", "invert_direction": false, "gear_ratio": 12.5 }
+      },
+      "M_DRIVE_R": {
+        "name": "Right drive motor",
+        "application": "drive",
+        "connection": { "type": "can", "bus": "can0", "node_id": 2 },
+        "limits": { "max_speed_mps": 2.0, "max_accel_mps2": 1.0, "max_decel_mps2": 1.2 },
+        "control": { "mode": "velocity", "invert_direction": true, "gear_ratio": 12.5 }
+      },
+
+      "M_TURN": {
+        "name": "Steering motor",
+        "application": "turn",
+        "connection": { "type": "can", "bus": "can0", "node_id": 3 },
+        "limits": { "max_speed_dps": 120, "max_accel_dps2": 300 },
+        "control": { "mode": "position", "invert_direction": false }
+      },
+
+      "M_HOIST": {
+        "name": "Hoist motor",
+        "application": "hoist",
+        "connection": { "type": "can", "bus": "can0", "node_id": 4 },
+        "limits": { "max_speed_mps": 0.25, "max_accel_mps2": 0.4 },
+        "control": { "mode": "position", "invert_direction": false }
+      },
+      "M_TELE": {
+        "name": "Telescoping motor",
+        "application": "telescoping",
+        "connection": { "type": "can", "bus": "can0", "node_id": 5 },
+        "limits": { "max_speed_mps": 0.2, "max_accel_mps2": 0.3 },
+        "control": { "mode": "position", "invert_direction": false }
+      },
+      "M_ROTATE": {
+        "name": "Rotation motor",
+        "application": "rotate",
+        "connection": { "type": "can", "bus": "can0", "node_id": 6 },
+        "limits": { "max_speed_dps": 90, "max_accel_dps2": 180 },
+        "control": { "mode": "position", "invert_direction": false }
+      },
+      "M_GRIP": {
+        "name": "Gripper motor",
+        "application": "grip",
+        "connection": { "type": "rs232", "port": "COM7" },
+        "limits": { "max_speed_mps": 0.15, "max_accel_mps2": 0.25 },
+        "control": { "mode": "position", "invert_direction": false }
+      }
+    },
+
+    "sensors": {
+      "S_IMU_1": {
+        "name": "IMU",
+        "type": "imu",
+        "connection": { "type": "rs232", "port": "COM5" },
+        "mount": {
+          "frame": "base_link",
+          "pose_mm_deg": { "x_mm": 0, "y_mm": 0, "z_mm": 120, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 0 }
+        },
+        "rate_hz": 100
+      },
+      "S_ODOM_ENC_L": {
+        "name": "Left wheel encoder",
+        "type": "encoder",
+        "motor_id": "M_DRIVE_L",
+        "rate_hz": 200
+      },
+      "S_ODOM_ENC_R": {
+        "name": "Right wheel encoder",
+        "type": "encoder",
+        "motor_id": "M_DRIVE_R",
+        "rate_hz": 200
+      },
+      "S_HOIST_HOME": {
+        "name": "Hoist home sensor",
+        "type": "limit_switch",
+        "connection": { "type": "gpio", "channel": "DIN_01" }
+      },
+      "S_TELE_HOME": {
+        "name": "Telescopic home sensor",
+        "type": "limit_switch",
+        "connection": { "type": "gpio", "channel": "DIN_02" }
+      },
+      "S_ROT_HOME": {
+        "name": "Rotate home sensor",
+        "type": "limit_switch",
+        "connection": { "type": "gpio", "channel": "DIN_03" }
+      },
+      "S_GRIP_OPEN": {
+        "name": "Gripper open sensor",
+        "type": "limit_switch",
+        "connection": { "type": "gpio", "channel": "DIN_04" }
+      },
+      "S_GRIP_CLOSE": {
+        "name": "Gripper close sensor",
+        "type": "limit_switch",
+        "connection": { "type": "gpio", "channel": "DIN_05" }
+      }
+    },
+
+    "safety": {
+      "estop": {
+        "channels": {
+          "ESTOP_1": {
+            "name": "Main e-stop chain",
+            "connection": { "type": "gpio", "channel": "DIN_ESTOP" },
+            "latching": true
+          }
+        },
+        "reset_required": true
+      }
+    },
+
+    "lidars": {
+      "LIDAR_FRONT": {
+        "name": "Front lidar",
+        "model": "SICK-TiM",
+        "connection": { "type": "ethernet", "ip": "192.168.10.20", "port": 2112 },
+        "mount": {
+          "frame": "base_link",
+          "pose_mm_deg": { "x_mm": 420, "y_mm": 0, "z_mm": 240, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 0 }
+        },
+        "fov_deg": 270,
+        "range_m": 20,
+        "rate_hz": 15
+      }
+    },
+
+    "barcode_scanners": {
+      "BC_1": {
+        "name": "Barcode scanner",
+        "model": "Zebra-DS3608",
+        "connection": { "type": "usb", "device_path": "USB\\VID_0000&PID_0000" },
+        "mount": {
+          "frame": "tool_link",
+          "pose_mm_deg": { "x_mm": 50, "y_mm": 0, "z_mm": 80, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 0 }
+        }
+      }
+    },
+
+    "ui": {
+      "motor_order": ["M_DRIVE_L", "M_DRIVE_R", "M_TURN", "M_HOIST", "M_TELE", "M_ROTATE", "M_GRIP"],
+      "sensor_order": ["S_IMU_1", "S_ODOM_ENC_L", "S_ODOM_ENC_R", "S_HOIST_HOME", "S_TELE_HOME", "S_ROT_HOME", "S_GRIP_OPEN", "S_GRIP_CLOSE"]
+    }
+  },
+
+  "state_model": {
+    // Standard mapping used by the app to derive robot state from IO faults.
+    // Keep these keys stable. The app can render warnings/errors per domain.
+    "motor_application_to_state_domain": {
+      "drive": "mobility",
+      "turn": "steering",
+      "hoist": "hoist",
+      "telescoping": "telescoping",
+      "rotate": "rotate",
+      "grip": "grip"
+    },
+
+    // Optional: unify severity rules across robots, overridden per motor/sensor if needed.
+    "default_fault_severity": {
+      "warning_codes": ["over_temp", "tracking_error", "calibration_required"],
+      "error_codes": ["over_current", "encoder_fault", "driver_fault", "estop_active", "communication_lost"]
+    }
+  }
+}

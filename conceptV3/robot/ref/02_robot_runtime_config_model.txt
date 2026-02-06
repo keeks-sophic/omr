@@ -1,0 +1,535 @@
+========================================================
+ROBOT RUNTIME 02: CONFIG MODEL + MODULAR COMM STRUCTURE
+========================================================
+
+Goal:
+- Define a scalable robot-side configuration data model for many robot variants.
+- Make dimensions, motors, IO, and capabilities easy to add/edit over time.
+- Separate robot runtime modules and NATS message groups (task/traffic/route/etc.) into clean folders.
+- Communicate with backend via NATS JetStream only, aligned with backend Robot module (MODULE 06).
+
+Non-goals:
+- No backend database writes.
+- No REST endpoints required for backend integration.
+
+
+--------------------------------------------------------
+Concept (drive motors vs functional motors)
+--------------------------------------------------------
+
+Motor categories:
+- Drive motor:
+  - Controls robot movement along the track / navigation motion.
+  - If drive motor fails: robot must stop; status becomes ERROR.
+- Functional motor:
+  - Provides non-navigation actions (grip/hoist/telescope/rotate/any future actuator).
+  - If functional motor fails: robot can still navigate (if safe); status becomes WARNING.
+  - Commands requiring the failed functional motor are rejected until recovered.
+
+Config rule:
+- Motors are declared as a list in robot_config.json.
+- New robot models add/edit entries in motors[] (data-driven).
+- Mapping changes are applied at boot (restart required).
+
+
+--------------------------------------------------------
+Robot Config Data Model (robot_config.json)
+--------------------------------------------------------
+
+Key design goals:
+- Stable core structure with extension points for new devices and features.
+- Required fields for safe boot, optional fields for variant-specific tuning.
+- Data-driven collections (motors[], io.*[], devices[]) for scalability.
+- Deterministic validation at boot.
+
+Root model (concept):
+- RobotConfig
+  - schemaVersion: int
+  - identity: RobotIdentityConfig
+  - runtime: RuntimeConfig
+  - nats: NatsConfig
+  - dimensions: DimensionsConfig
+  - capabilities: CapabilityConfig
+  - motors: MotorConfig[]
+  - io: IoConfig
+  - streams: StreamRatesConfig
+  - safety: SafetyConfig
+  - extensions: object?                         // optional extension namespace
+
+RobotIdentityConfig:
+- robotId: string                               // stable id (uuid or stable string)
+- robotCode: string                             // human readable id (RB-001)
+- name: string
+- vendor: string?
+- model: string?
+- firmwareVersion: string?
+
+RuntimeConfig:
+- mode: "REAL" | "MOCK"
+- tickHz: int                                   // main loop rate (e.g. 50..200)
+- startupPolicy:
+  - settingsBootstrapMode: "ROBOT_WINS" | "BACKEND_WINS"
+- healthPolicy:
+  - allowDriveInWarning: bool                   // recommended true
+  - requireNatsForMotion: bool                  // recommended true for safety
+
+NatsConfig:
+- servers: string[]
+- credsFilePath: string
+- clientName: string?
+- timeouts:
+  - connectTimeoutMs: int?
+  - publishTimeoutMs: int?
+- jetStream:
+  - streamIn: string?                           // e.g. ROBOT_IN
+  - streamOut: string?                          // e.g. ROBOT_OUT
+
+DimensionsConfig:
+- lengthMm: int
+- widthMm: int
+- heightMm: int
+- wheelBaseMm: int?
+- trackWidthMm: int?
+- payloadMaxKg: double?
+
+CapabilityConfig (scalable):
+- flags: { [capabilityKey: string]: bool }      // e.g. "hasBarcodeScanner": true
+- supportedCommands: string[]?                  // optional allowlist for command types
+- supportedModules: {                           // optional comm groups enabled
+    "task": true,
+    "traffic": true,
+    "route": true,
+    "teach": true,
+    "settings": true
+  }?
+
+MotorConfig (scalable, supports drive + functional):
+- motorId: string                                // unique within robot
+- role: "DRIVE" | "FUNCTIONAL"
+- functionKey: string?                           // required when role=FUNCTIONAL, example: "GRIPPER"|"HOIST"|custom
+- driver: MotorDriverConfig
+- limits: MotorLimitsConfig
+- resetPolicy:
+  - supportsReset: bool
+  - resetCooldownMs: int?
+- metadata: object?                              // extension bucket
+
+MotorDriverConfig (pluggable):
+- type: "PLC" | "CANOPEN" | "SERIAL" | "MOCK"
+- config: object                                 // driver-specific parameters (address, nodeId, port, etc.)
+
+MotorLimitsConfig (generic units to support many actuators):
+- maxSpeed: { unit: string, value: double }
+- maxAcceleration: { unit: string, value: double }
+- maxDeceleration: { unit: string, value: double }
+- positionMin: { unit: string, value: double }? | null
+- positionMax: { unit: string, value: double }? | null
+
+IoConfig (collections; scalable):
+- digitalInputs: DigitalInputConfig[]
+- digitalOutputs: DigitalOutputConfig[]
+- devices: DeviceConfig[]
+
+DigitalInputConfig:
+- ioId: string
+- type: string                                   // e.g. "ESTOP_CHAIN" | "LIMIT_SENSOR" | custom
+- driver: IoDriverConfig
+- required: bool?
+
+DigitalOutputConfig:
+- ioId: string
+- type: string                                   // e.g. "MOTOR_ENABLE" | "BUZZER" | custom
+- driver: IoDriverConfig
+
+IoDriverConfig:
+- type: "PLC" | "GPIO" | "MOCK"
+- config: object
+
+DeviceConfig:
+- deviceId: string
+- type: string                                   // e.g. "LIDAR" | "BARCODE_SCANNER" | custom
+- driver: DeviceDriverConfig
+- required: bool?
+- settings: object?
+
+DeviceDriverConfig:
+- type: "ETHERNET" | "USB" | "SERIAL" | "MOCK"
+- config: object
+
+StreamRatesConfig (different frequencies):
+- heartbeatHz: double
+- stateHz: double
+- telemetryHz: double
+- trafficHz: double
+- taskHz: double?                                // optional progress rate while executing
+
+SafetyConfig:
+- stopOnEstop: bool
+- stopOnObstacle: bool
+- obstacleStopDistanceMeters: double?
+- obstacleWarnDistanceMeters: double?
+
+
+--------------------------------------------------------
+Robot Config Example (drive + functional motors)
+--------------------------------------------------------
+
+robot_config.json (example excerpt):
+{
+  "schemaVersion": 1,
+  "identity": { "robotId": "RBT-001", "robotCode": "RB-001", "name": "Robot A" },
+  "runtime": { "mode": "REAL", "tickHz": 100, "startupPolicy": { "settingsBootstrapMode": "ROBOT_WINS" } },
+  "nats": { "servers": ["nats://10.0.0.10:4222"], "credsFilePath": "/etc/robot/nats.creds" },
+  "dimensions": { "lengthMm": 900, "widthMm": 650, "heightMm": 350 },
+  "capabilities": { "flags": { "hasBarcodeScanner": true, "hasLidarSafety": true } },
+  "motors": [
+    { "motorId": "drive_left",  "role": "DRIVE", "driver": { "type": "PLC", "config": { } },
+      "limits": { "maxSpeed": { "unit": "mps", "value": 1.2 }, "maxAcceleration": { "unit": "mps2", "value": 0.8 }, "maxDeceleration": { "unit": "mps2", "value": 1.0 } },
+      "resetPolicy": { "supportsReset": true } },
+    { "motorId": "drive_right", "role": "DRIVE", "driver": { "type": "PLC", "config": { } },
+      "limits": { "maxSpeed": { "unit": "mps", "value": 1.2 }, "maxAcceleration": { "unit": "mps2", "value": 0.8 }, "maxDeceleration": { "unit": "mps2", "value": 1.0 } },
+      "resetPolicy": { "supportsReset": true } },
+    { "motorId": "act_1", "role": "FUNCTIONAL", "functionKey": "GRIPPER", "driver": { "type": "PLC", "config": { } },
+      "limits": { "maxSpeed": { "unit": "mmps", "value": 50 }, "maxAcceleration": { "unit": "mmps2", "value": 100 }, "maxDeceleration": { "unit": "mmps2", "value": 120 }, "positionMin": { "unit": "mm", "value": 0 }, "positionMax": { "unit": "mm", "value": 80 } },
+      "resetPolicy": { "supportsReset": true } }
+  ],
+  "io": {
+    "digitalInputs": [
+      { "ioId": "estop", "type": "ESTOP_CHAIN", "driver": { "type": "PLC", "config": { } }, "required": true },
+      { "ioId": "limit_front", "type": "LIMIT_SENSOR", "driver": { "type": "PLC", "config": { } } }
+    ],
+    "devices": [
+      { "deviceId": "lidar0", "type": "LIDAR", "driver": { "type": "ETHERNET", "config": { } }, "required": false },
+      { "deviceId": "scanner0", "type": "BARCODE_SCANNER", "driver": { "type": "USB", "config": { } }, "required": false }
+    ]
+  },
+  "streams": { "heartbeatHz": 1, "stateHz": 10, "telemetryHz": 2, "trafficHz": 10 },
+  "safety": { "stopOnEstop": true, "stopOnObstacle": true }
+}
+
+Scalability rules (config):
+- Add a new robot variant by editing robot_config.json only:
+  - new dimensions
+  - additional motors (role=FUNCTIONAL with functionKey)
+  - additional IO and devices
+- Runtime uses:
+  - motors[] to build driver graph
+  - role/functionKey to validate capabilities and commands
+
+
+--------------------------------------------------------
+NATS Subject Groups (keep comm modules separated)
+--------------------------------------------------------
+
+All comm is NATS JetStream, aligned with backend Robot module (MODULE 06).
+Internal code organization separates subjects by functional group.
+
+Robot module (core robot I/O):
+- robot.{robotId}.heartbeat
+- robot.{robotId}.state
+- robot.{robotId}.telemetry
+- robot.{robotId}.events
+- robot.{robotId}.settings.reported
+- robot.{robotId}.command.ack
+- robot.{robotId}.command.request            // inbound
+- robot.{robotId}.settings.desired           // inbound
+
+Task execution group (optional, for maintenance separation):
+- robot.{robotId}.task.progress
+- robot.{robotId}.task.done
+- robot.{robotId}.task.failed
+- robot.{robotId}.task.assign                // inbound (if backend uses it)
+- robot.{robotId}.task.cancel                // inbound
+
+Traffic group (high frequency):
+- robot.{robotId}.traffic.state              // outbound at trafficHz
+- robot.{robotId}.traffic.control            // inbound constraints/holds
+
+Route group (optional):
+- robot.{robotId}.route.request              // outbound (reroute or preview request)
+- robot.{robotId}.route.response             // inbound route plan
+
+Rule:
+- If backend keeps all robot messaging in Robot module only, these groups can be implemented as payload sections under robot.{robotId}.state/telemetry.
+- The robot code still keeps the group separation internally for maintainability.
+
+
+--------------------------------------------------------
+Robot Status Derivation (drive vs functional)
+--------------------------------------------------------
+
+Robot status values:
+- RUNNING: drive motors healthy and no safety stop
+- WARNING: drive motors healthy; one or more FUNCTIONAL motors unhealthy
+- PAUSED: safety stop / traffic hold / manual hold; motion blocked
+- ERROR: drive motor unhealthy or critical internal fault
+- OFFLINE: NATS/actuation not available by policy
+
+Precedence (recommended):
+1) OFFLINE:
+  - requireNatsForMotion=true AND natsConnected=false
+2) ERROR:
+  - any DRIVE motor connected=false OR state=ERROR
+3) PAUSED:
+  - estop pressed OR obstacle stop OR traffic hold
+4) WARNING:
+  - any FUNCTIONAL motor connected=false OR state=ERROR
+5) RUNNING:
+  - otherwise
+
+Degraded execution rule:
+- In WARNING:
+  - navigation/motion commands remain allowed
+  - commands requiring the unhealthy functional motor are rejected (REQUIRED_MOTOR_UNAVAILABLE)
+
+
+--------------------------------------------------------
+Execution Scenarios (how to handle)
+--------------------------------------------------------
+
+Scenario A: boot with missing optional functional motor
+- Boot continues if motor is not required by capabilities or current mission.
+- Status becomes WARNING.
+- Robot publishes state including motor health list and missing functionKey.
+
+Scenario B: functional motor fault during task execution
+- If current command requires that functional motor:
+  - stop that action safely (do not stop navigation unless it impacts safety)
+  - publish task.failed or command.ack FAILED with reason
+  - status becomes WARNING (or ERROR if it cascades into safety stop)
+- If current command does not require it:
+  - continue driving
+  - publish event + status WARNING
+
+Scenario C: drive motor fault
+- Stop motion immediately.
+- Status becomes ERROR.
+- Reject all commands except STOP and RESET_MOTOR for affected motor(s).
+
+Scenario D: mock mode (development)
+- Drivers are mock drivers.
+- Feedback is computed:
+  - motor state integration uses limits
+  - IO values derived from simulation scripts or rules
+- Publish the same messages; backend can test without real hardware.
+
+
+--------------------------------------------------------
+Mock Mode (simulation) management
+--------------------------------------------------------
+
+What “MOCK” means:
+- runtime.mode = MOCK means the program is not connected to real robot hardware.
+- The robot runtime still connects to backend via NATS JetStream and behaves like a robot from the backend view.
+- The only difference is the driver layer:
+  - motor drivers do not talk to PLC/CAN/etc.
+  - IO/device drivers do not read real sensors
+  - all feedback is produced by simulation logic
+
+Where it is controlled:
+- robot_config.json:
+  - runtime.mode: "REAL" | "MOCK"
+- buildDriverGraph(cfg.motors, cfg.io, cfg.runtime.mode):
+  - REAL: instantiate the configured drivers (PLC/CANOPEN/SERIAL/etc.)
+  - MOCK: instantiate Mock* drivers for motors/IO/devices regardless of real driver types
+
+How it stays scalable for new robot models:
+- The simulation works from the same declarative config:
+  - motors[] defines what axes exist (drive + functional)
+  - limits define motion constraints for each axis
+  - io/devices define what signals exist and whether they are required
+- Adding a new functional motor or IO point to a model automatically becomes available in MOCK:
+  - the runtime creates a simulated driver instance for it
+  - any command that references that motorId can be simulated using limits and a generic motion model
+
+Simulation responsibilities (robot-side):
+- For DRIVE motors:
+  - integrate velocity/position with maxSpeed/maxAcceleration constraints
+  - update robot pose using configured kinematics (differential/track model)
+- For FUNCTIONAL motors:
+  - integrate axis position toward target with limits
+  - produce “busy/done” completion and error injection (optional)
+- For IO:
+  - produce digital inputs using scenario rules:
+    - estop: manual toggle
+    - limit sensors: derived from simulated axis position
+    - obstacle: derived from a scenario obstacle model
+  - produce device outputs:
+    - barcode scanner events can be scripted or generated by virtual markers
+
+Scenario injection (recommended model):
+- Provide a simulationProfile in config to keep it data-driven:
+  - runtime:
+    - simulationProfile:
+      - name
+      - initialPose
+      - faultInjectionRules
+      - obstacleScript
+      - barcodeScript
+- The profile is optional; if missing, use default “ideal” simulation.
+
+Safety rules in MOCK:
+- The same safety policy is applied:
+  - estop/obstacle triggers clamp drive commands to zero
+  - status becomes PAUSED/ERROR according to the same derivation rules
+- This ensures backend behavior (task/traffic) is tested realistically even without hardware.
+
+
+--------------------------------------------------------
+Pseudocode (config-driven initialization + module separation)
+--------------------------------------------------------
+
+boot():
+  cfg = loadConfig("robot_config.json")
+  validate(cfg)
+
+  spec = buildSpec(cfg)
+  drivers = buildDriverGraph(cfg.motors, cfg.io, cfg.runtime.mode)
+
+  comm = startNats(spec.robotId, cfg.nats)
+
+  modules = [
+    RobotCoreModule(spec, drivers, comm),
+    SettingsModule(spec, drivers, comm),
+    TaskCommModule(spec, drivers, comm),
+    TrafficCommModule(spec, drivers, comm),
+    RouteCommModule(spec, drivers, comm)
+  ]
+
+  for m in modules: m.start()
+  runMainLoop(spec, drivers, comm, modules)
+
+RobotCoreModule.tick():
+  sampleSafetyIo()
+  sampleMotors()
+  computePose()
+  computeStatus()
+  publishHeartbeatIfDue()
+  publishStateIfDueOrChanged()
+  publishTelemetryIfDue()
+
+TaskCommModule.onInboundAssign(msg):
+  if status in { ERROR, OFFLINE, PAUSED }: reject
+  enqueueTaskExecution(msg)
+
+TrafficCommModule.tick():
+  if enabled:
+    publishTrafficStateIfDue()
+
+SettingsModule.onDesiredSettings(msg):
+  validateRequestedKeysAllowlist()
+  applyToDrivers()
+  publishSettingsReported()
+
+
+--------------------------------------------------------
+Robot Program File Structure (reserve comm per backend module)
+--------------------------------------------------------
+
+robot/
+  robot_config.json
+  robot_config.schema.json (optional)
+
+  src/
+    Program.cs
+    Bootstrap/
+      ConfigLoader.cs
+      ConfigValidator.cs
+      DependencyGraph.cs
+
+    ConfigModel/
+      RobotConfig.cs
+      RobotIdentityConfig.cs
+      RuntimeConfig.cs
+      NatsConfig.cs
+      DimensionsConfig.cs
+      CapabilityConfig.cs
+      MotorConfig.cs
+      IoConfig.cs
+      StreamRatesConfig.cs
+      SafetyConfig.cs
+
+    Messaging/
+      Nats/
+        NatsConnection.cs
+        JetStreamPublisher.cs
+        JetStreamSubscriber.cs
+        Subjects/
+          RobotSubjects.cs
+          TaskSubjects.cs
+          TrafficSubjects.cs
+          RouteSubjects.cs
+          TeachSubjects.cs
+        Envelope/
+          EnvelopeV1.cs
+          EnvelopeValidator.cs
+
+      Contracts/
+        Robot/
+          RobotStateDto.cs
+          RobotTelemetryDto.cs
+          RobotEventDto.cs
+        Settings/
+          DesiredSettingsDto.cs
+          ReportedSettingsDto.cs
+        Task/
+          TaskAssignDto.cs
+          TaskProgressDto.cs
+        Traffic/
+          TrafficStateDto.cs
+          TrafficControlDto.cs
+        Route/
+          RouteRequestDto.cs
+          RouteResponseDto.cs
+
+    Hardware/
+      Motors/
+        IMotorDriver.cs
+        MotorManager.cs
+        Drivers/
+          PlcMotorDriver.cs
+          CanOpenMotorDriver.cs
+          SerialMotorDriver.cs
+          MockMotorDriver.cs
+      Io/
+        IIoDriver.cs
+        IoManager.cs
+        Drivers/
+          PlcIoDriver.cs
+          GpioIoDriver.cs
+          MockIoDriver.cs
+      Devices/
+        ISensorDriver.cs
+        DeviceManager.cs
+        Drivers/
+          LidarDriver.cs
+          BarcodeScannerDriver.cs
+          MockDeviceDriver.cs
+
+    Runtime/
+      Scheduler.cs
+      HealthMonitor.cs
+      StatusCalculator.cs
+      FaultRegistry.cs
+
+    Modules/
+      RobotCore/
+        RobotCoreModule.cs
+        RobotStatePublisher.cs
+      Settings/
+        SettingsModule.cs
+        DesiredSettingsApplier.cs
+        ReportedSettingsBuilder.cs
+      Task/
+        TaskCommModule.cs
+        TaskExecutor.cs
+      Traffic/
+        TrafficCommModule.cs
+      Route/
+        RouteCommModule.cs
+      Teach/
+        TeachCommModule.cs
+
+Rule:
+- Task/Traffic/Route/Teach communications are in separate folders and separate modules.
+- RobotCore owns only the consolidated state, safety, motors, and base publishing.
